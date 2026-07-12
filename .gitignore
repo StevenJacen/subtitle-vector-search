@@ -1,0 +1,13 @@
+.worktrees/
+.superpowers/
+node_modules/
+coverage/
+dist/
+.env
+.env.*
+!.env.example
+downloads/
+*.srt
+*.vtt
+supabase/.temp/
+
