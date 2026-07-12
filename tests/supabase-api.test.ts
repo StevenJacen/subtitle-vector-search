@@ -30,7 +30,14 @@ describe('SubtitleApi', () => {
 
     await expect(api.startImport({
       movie: { title: 'Example Film', releaseYear: 1994, imdbId: 'tt0111161' },
-      track: { languageCode: 'en', source: 'opensubtitles', sourceSha256: 'abc123' },
+      track: {
+        languageCode: 'en',
+        source: 'opensubtitles',
+        sourceRef: 'opensubtitles:42',
+        sourceFileName: 'example.srt',
+        sourceSha256: 'abc123',
+        rightsStatus: 'personal_research',
+      },
     })).resolves.toEqual({ movieId: 7, trackId: 11, existingCueCount: 0, existingChunkCount: 0 })
 
     expect(fetchFn).toHaveBeenCalledWith(
@@ -42,13 +49,20 @@ describe('SubtitleApi', () => {
           'x-subtitle-token': 'personal-token',
           'content-type': 'application/json',
         },
-        body: JSON.stringify({
-          action: 'start',
-          movie: { title: 'Example Film', releaseYear: 1994, imdbId: 'tt0111161' },
-          track: { languageCode: 'en', source: 'opensubtitles', sourceSha256: 'abc123' },
-        }),
       }),
     )
+    expect(JSON.parse((fetchFn.mock.calls[0][1] as RequestInit).body as string)).toEqual({
+      action: 'start',
+      movie: { title: 'Example Film', releaseYear: 1994, imdbId: 'tt0111161' },
+      track: {
+        languageCode: 'en',
+        source: 'opensubtitles',
+        sourceRef: 'opensubtitles:42',
+        sourceFileName: 'example.srt',
+        sourceSha256: 'abc123',
+        rightsStatus: 'personal_research',
+      },
+    })
   })
 
   it('sends cues and chunks in an import batch action', async () => {
@@ -66,6 +80,36 @@ describe('SubtitleApi', () => {
         body: JSON.stringify({ action: 'batch', trackId: 11, cues, chunks }),
       }),
     )
+  })
+
+  it('defaults import provenance rights to personal research', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(Response.json({
+      movieId: 7,
+      trackId: 11,
+      existingCueCount: 0,
+      existingChunkCount: 0,
+    }))
+    const api = new SubtitleApi({ ...config, fetchFn })
+
+    await api.startImport({
+      movie: { title: 'Example Film' },
+      track: { languageCode: 'en', source: 'manual', sourceSha256: 'abc123', rightsStatus: undefined },
+    })
+
+    expect(fetchFn).toHaveBeenCalledWith(
+      'https://project.supabase.co/functions/v1/ingest-subtitles',
+      expect.anything(),
+    )
+    expect(JSON.parse((fetchFn.mock.calls[0][1] as RequestInit).body as string)).toEqual({
+      action: 'start',
+      movie: { title: 'Example Film' },
+      track: {
+        languageCode: 'en',
+        source: 'manual',
+        sourceSha256: 'abc123',
+        rightsStatus: 'personal_research',
+      },
+    })
   })
 
   it('finalizes an import through the finalize action', async () => {

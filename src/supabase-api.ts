@@ -16,8 +16,13 @@ export interface MovieInput {
 export interface TrackInput {
   languageCode: string
   source: string
+  sourceRef?: string
+  sourceFileName?: string
   sourceSha256: string
+  rightsStatus?: RightsStatus
 }
+
+export type RightsStatus = 'personal_research' | 'licensed' | 'unverified'
 
 export interface StartImportResponse {
   movieId: number
@@ -82,7 +87,7 @@ export class SubtitleApi {
     return this.request(this.ingestUrl, {
       action: 'start',
       movie: input.movie,
-      track: input.track,
+      track: { ...input.track, rightsStatus: input.track.rightsStatus ?? 'personal_research' },
     })
   }
 

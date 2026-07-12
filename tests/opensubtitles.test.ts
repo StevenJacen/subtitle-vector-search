@@ -108,6 +108,24 @@ describe('OpenSubtitlesClient', () => {
     await expect(client.searchEnglishByImdb('0111161')).rejects.toMatchObject({ status: 503 })
 
     expect(fetchFn).toHaveBeenCalledTimes(3)
-    expect(delayFn).toHaveBeenCalledTimes(2)
+    expect(delayFn).toHaveBeenNthCalledWith(1, 1_000)
+    expect(delayFn).toHaveBeenNthCalledWith(2, 2_000)
+  })
+
+  it('honors an HTTP-date Retry-After value', async () => {
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ message: 'slow down' }), {
+        status: 429,
+        headers: { 'Retry-After': 'Wed, 21 Oct 2015 07:28:00 GMT' },
+      }))
+      .mockResolvedValueOnce(Response.json({ data: [] }))
+    const delayFn = vi.fn().mockResolvedValue(undefined)
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('Wed, 21 Oct 2015 07:27:58 GMT'))
+    const client = new OpenSubtitlesClient({ ...clientConfig, fetchFn, delayFn })
+
+    await expect(client.searchEnglishByImdb('0111161')).resolves.toEqual([])
+
+    expect(delayFn).toHaveBeenCalledWith(2_000)
+    now.mockRestore()
   })
 })

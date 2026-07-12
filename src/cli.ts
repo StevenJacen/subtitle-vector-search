@@ -1,6 +1,6 @@
-import { access, readFile, writeFile } from 'node:fs/promises'
+import { open, readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
-import { extname } from 'node:path'
+import { basename, extname } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Command } from 'commander'
 import 'dotenv/config'
@@ -17,9 +17,8 @@ export interface CliDependencies {
   env: Record<string, string | undefined>
   openSubtitles?: OpenSubtitlesCommands
   subtitleApi?: SubtitleApiCommands
-  fileExists: (path: string) => Promise<boolean>
   readFile: (path: string) => Promise<Buffer>
-  writeFile: (path: string, bytes: Uint8Array) => Promise<void>
+  writeFileExclusive: (path: string, bytes: Uint8Array) => Promise<void>
   output: (text: string) => void
   parseSubtitleFn: (content: string, extension: string) => Cue[]
   buildChunksFn: (cues: Cue[]) => SubtitleChunk[]
@@ -28,9 +27,8 @@ export interface CliDependencies {
 export function createProgram(overrides: Partial<CliDependencies> = {}): Command {
   const dependencies: CliDependencies = {
     env: process.env,
-    fileExists,
     readFile,
-    writeFile,
+    writeFileExclusive,
     output: text => process.stdout.write(text),
     parseSubtitleFn: parseSubtitle,
     buildChunksFn: buildChunks,
@@ -47,10 +45,6 @@ export function createProgram(overrides: Partial<CliDependencies> = {}): Command
     .requiredOption('--imdb <id>', 'IMDb title ID')
     .requiredOption('--output <path>', 'destination subtitle path')
     .action(async (options: { imdb: string; output: string }) => {
-      if (await dependencies.fileExists(options.output)) {
-        throw new Error(`refusing to overwrite existing output: ${options.output}`)
-      }
-
       const client = dependencies.openSubtitles ?? new OpenSubtitlesClient({
         apiKey: requireEnvironment(dependencies.env, 'OPENSUBTITLES_API_KEY'),
         token: requireEnvironment(dependencies.env, 'OPENSUBTITLES_TOKEN'),
@@ -62,7 +56,14 @@ export function createProgram(overrides: Partial<CliDependencies> = {}): Command
       }
 
       const download = await client.downloadFile(candidate.fileId)
-      await dependencies.writeFile(options.output, download.bytes)
+      try {
+        await dependencies.writeFileExclusive(options.output, download.bytes)
+      } catch (error) {
+        if (isFileExistsError(error)) {
+          throw new Error(`refusing to overwrite existing output: ${options.output}`)
+        }
+        throw error
+      }
       dependencies.output(`Downloaded ${download.fileName} to ${options.output}.\n`)
     })
 
@@ -72,10 +73,14 @@ export function createProgram(overrides: Partial<CliDependencies> = {}): Command
     .requiredOption('--year <year>', 'release year', parseInteger)
     .requiredOption('--imdb <id>', 'IMDb title ID')
     .requiredOption('--source <source>', 'subtitle provenance source')
-    .action(async (subtitleFile: string, options: { title: string; year: number; imdb: string; source: string }) => {
+    .option('--source-ref <reference>', 'source-specific subtitle reference')
+    .action(async (subtitleFile: string, options: { title: string; year: number; imdb: string; source: string; sourceRef?: string }) => {
       const bytes = await dependencies.readFile(subtitleFile)
       const cues = dependencies.parseSubtitleFn(bytes.toString('utf8'), extname(subtitleFile))
       const chunks = dependencies.buildChunksFn(cues)
+      if (chunks.length === 0) {
+        throw new Error('subtitle contains no usable chunks')
+      }
       const api = dependencies.subtitleApi ?? new SubtitleApi({
         supabaseUrl: requireEnvironment(dependencies.env, 'SUPABASE_URL'),
         publishableKey: requireEnvironment(dependencies.env, 'SUPABASE_PUBLISHABLE_KEY'),
@@ -84,7 +89,14 @@ export function createProgram(overrides: Partial<CliDependencies> = {}): Command
       const sourceSha256 = createHash('sha256').update(bytes).digest('hex')
       const started = await api.startImport({
         movie: { title: options.title, releaseYear: options.year, imdbId: options.imdb },
-        track: { languageCode: 'en', source: options.source, sourceSha256 },
+        track: {
+          languageCode: 'en',
+          source: options.source,
+          sourceRef: options.sourceRef,
+          sourceFileName: basename(subtitleFile),
+          sourceSha256,
+          rightsStatus: 'personal_research',
+        },
       })
 
       for (let cueStart = 0, chunkStart = 0; cueStart < cues.length || chunkStart < chunks.length;) {
@@ -139,8 +151,17 @@ function requireEnvironment(env: Record<string, string | undefined>, name: strin
   return value
 }
 
-async function fileExists(path: string): Promise<boolean> {
-  return access(path).then(() => true, () => false)
+async function writeFileExclusive(path: string, bytes: Uint8Array): Promise<void> {
+  const file = await open(path, 'wx')
+  try {
+    await file.writeFile(bytes)
+  } finally {
+    await file.close()
+  }
+}
+
+function isFileExistsError(error: unknown): error is NodeJS.ErrnoException {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST'
 }
 
 const entryPoint = process.argv[1]

@@ -26,16 +26,15 @@ function createDependencies(overrides: Partial<Parameters<typeof createProgram>[
       finalizeImport: vi.fn().mockResolvedValue({ trackId: 11, status: 'ready' }),
       search: vi.fn().mockResolvedValue([]),
     },
-    fileExists: vi.fn().mockResolvedValue(false),
     readFile: vi.fn().mockResolvedValue(Buffer.from('synthetic subtitle')),
-    writeFile: vi.fn().mockResolvedValue(undefined),
+    writeFileExclusive: vi.fn().mockResolvedValue(undefined),
     output: vi.fn(),
     ...overrides,
   }
 }
 
 describe('subtitle CLI', () => {
-  it('downloads the first subtitle candidate only when the output path does not exist', async () => {
+  it('downloads the first subtitle candidate through exclusive file creation', async () => {
     const dependencies = createDependencies()
     const program = createProgram(dependencies)
 
@@ -43,11 +42,13 @@ describe('subtitle CLI', () => {
 
     expect(dependencies.openSubtitles.searchEnglishByImdb).toHaveBeenCalledWith('0111161')
     expect(dependencies.openSubtitles.downloadFile).toHaveBeenCalledWith(99)
-    expect(dependencies.writeFile).toHaveBeenCalledWith('downloads/example.srt', new Uint8Array([1, 2, 3]))
+    expect(dependencies.writeFileExclusive).toHaveBeenCalledWith('downloads/example.srt', new Uint8Array([1, 2, 3]))
   })
 
-  it('rejects download output paths that already exist', async () => {
-    const dependencies = createDependencies({ fileExists: vi.fn().mockResolvedValue(true) })
+  it('maps an exclusive-create collision to a clear no-overwrite refusal', async () => {
+    const dependencies = createDependencies({
+      writeFileExclusive: vi.fn().mockRejectedValue(Object.assign(new Error('exists'), { code: 'EEXIST' })),
+    })
     const program = createProgram(dependencies)
 
     await expect(program.parseAsync([
@@ -78,12 +79,18 @@ describe('subtitle CLI', () => {
 
     await program.parseAsync([
       'node', 'subtitle', 'import', 'downloads/example.srt', '--title', 'Example Film', '--year', '1994',
-      '--imdb', 'tt0111161', '--source', 'opensubtitles',
+      '--imdb', 'tt0111161', '--source', 'opensubtitles', '--source-ref', 'opensubtitles:42',
     ])
 
     expect(dependencies.subtitleApi.startImport).toHaveBeenCalledWith(expect.objectContaining({
       movie: { title: 'Example Film', releaseYear: 1994, imdbId: 'tt0111161' },
-      track: expect.objectContaining({ languageCode: 'en', source: 'opensubtitles' }),
+      track: expect.objectContaining({
+        languageCode: 'en',
+        source: 'opensubtitles',
+        sourceRef: 'opensubtitles:42',
+        sourceFileName: 'example.srt',
+        rightsStatus: 'personal_research',
+      }),
     }))
     expect(dependencies.subtitleApi.sendBatch).toHaveBeenCalledTimes(2)
     for (const [batch] of (dependencies.subtitleApi.sendBatch as ReturnType<typeof vi.fn>).mock.calls) {
@@ -93,6 +100,23 @@ describe('subtitle CLI', () => {
     expect(dependencies.subtitleApi.finalizeImport).toHaveBeenCalledWith(11)
     expect(dependencies.output).toHaveBeenCalledWith('Imported 101 cues and 9 chunks.\n')
     expect(dependencies.output).not.toHaveBeenCalledWith(expect.stringContaining('private dialogue text'))
+  })
+
+  it('retains source cues locally but rejects imports with zero usable chunks before calling the API', async () => {
+    const dependencies = createDependencies({
+      parseSubtitleFn: vi.fn().mockReturnValue([{ index: 0, startMs: 0, endMs: 900, text: '' }]),
+      buildChunksFn: vi.fn().mockReturnValue([]),
+    })
+    const program = createProgram(dependencies)
+
+    await expect(program.parseAsync([
+      'node', 'subtitle', 'import', 'downloads/example.srt', '--title', 'Example Film', '--year', '1994',
+      '--imdb', 'tt0111161', '--source', 'opensubtitles',
+    ])).rejects.toThrow('subtitle contains no usable chunks')
+
+    expect(dependencies.subtitleApi.startImport).not.toHaveBeenCalled()
+    expect(dependencies.subtitleApi.sendBatch).not.toHaveBeenCalled()
+    expect(dependencies.subtitleApi.finalizeImport).not.toHaveBeenCalled()
   })
 
   it('prints an ordinary no-match search response as a successful result', async () => {

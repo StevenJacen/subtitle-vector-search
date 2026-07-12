@@ -104,7 +104,7 @@ export class OpenSubtitlesClient {
         throw await this.toError(response)
       }
 
-      await this.delayFn(retryDelayMilliseconds(response))
+      await this.delayFn(retryDelayMilliseconds(response, attempt))
     }
 
     throw new Error('OpenSubtitles request did not receive a response')
@@ -136,10 +136,19 @@ function isRetryable(status: number): boolean {
   return status === 429 || status >= 500 && status <= 599
 }
 
-function retryDelayMilliseconds(response: Response): number {
+function retryDelayMilliseconds(response: Response, attempt: number): number {
   const retryAfter = response.headers.get('Retry-After')
   const seconds = retryAfter === null ? Number.NaN : Number(retryAfter)
-  return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1_000 : 1_000
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return seconds * 1_000
+  }
+
+  const retryAt = retryAfter === null ? Number.NaN : Date.parse(retryAfter)
+  if (Number.isFinite(retryAt)) {
+    return Math.max(0, retryAt - Date.now())
+  }
+
+  return 1_000 * 2 ** (attempt - 1)
 }
 
 function errorCodeForStatus(status: number): OpenSubtitlesErrorCode {
