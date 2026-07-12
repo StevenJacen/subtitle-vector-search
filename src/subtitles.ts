@@ -30,13 +30,11 @@ export function parseSubtitle(content: string, extension: string): Cue[] {
     }
 
     const cleanedText = normalizeCueText(text)
-    if (!cleanedText) continue
-
     cues.push({ index: cues.length, startMs: start, endMs: end, text: cleanedText })
   }
 
   if (cues.length === 0) {
-    throw new Error('subtitle contains no usable cues')
+    throw new Error('subtitle contains no cues')
   }
 
   return cues

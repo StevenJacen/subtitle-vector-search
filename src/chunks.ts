@@ -16,32 +16,33 @@ export function buildChunks(
 
   validateOptions(targetTokens, maxTokens, overlapCues)
 
-  const cueTokens = cues.map(cue => estimateTokens(cue.text))
+  const embeddableCues = cues.filter(cue => cue.text.trim().length > 0)
+  const cueTokens = embeddableCues.map(cue => estimateTokens(cue.text))
   if (cueTokens.some(tokenCount => tokenCount > maxTokens)) {
     throw new Error('cue exceeds the embedding token limit')
   }
 
   const chunks: SubtitleChunk[] = []
   let startPosition = 0
+  let previousLastPosition: number | undefined
 
-  while (startPosition < cues.length) {
+  while (startPosition < embeddableCues.length) {
     const selectedPositions: number[] = []
     let tokenCount = 0
     let position = startPosition
-    const previousLastPosition = chunks.length === 0 ? undefined : findCuePosition(cues, chunks.at(-1)!.lastCueIndex)
+    const previousLast = previousLastPosition
 
-    while (position < cues.length) {
+    while (position < embeddableCues.length) {
       const nextTokenCount = cueTokens[position]
       const exceedsTarget = tokenCount + nextTokenCount > targetTokens
       const exceedsMaximum = tokenCount + nextTokenCount > maxTokens
-      const containsNewCue = previousLastPosition !== undefined
-        && selectedPositions.some(selectedPosition => selectedPosition > previousLastPosition)
+      const containsNewCue = previousLast !== undefined
+        && selectedPositions.some(selectedPosition => selectedPosition > previousLast)
 
-      if (exceedsMaximum || (exceedsTarget && selectedPositions.length > 0 && (previousLastPosition === undefined || containsNewCue))) {
+      if (exceedsMaximum || (exceedsTarget && selectedPositions.length > 0 && (previousLast === undefined || containsNewCue))) {
         break
       }
 
-      // Include one new cue so an overlap that fills the target cannot stall the loop.
       selectedPositions.push(position)
       tokenCount += nextTokenCount
       position += 1
@@ -53,28 +54,21 @@ export function buildChunks(
 
     const firstPosition = selectedPositions[0]
     const lastPosition = selectedPositions.at(-1)!
-    const firstCue = cues[firstPosition]
-    const lastCue = cues[lastPosition]
+    const firstCue = embeddableCues[firstPosition]
+    const lastCue = embeddableCues[lastPosition]
     chunks.push({
       index: chunks.length,
       startMs: firstCue.startMs,
       endMs: lastCue.endMs,
       firstCueIndex: firstCue.index,
       lastCueIndex: lastCue.index,
-      text: selectedPositions.map(selectedPosition => cues[selectedPosition].text).join(' '),
+      text: selectedPositions.map(selectedPosition => embeddableCues[selectedPosition].text).join(' '),
     })
 
-    if (lastPosition === cues.length - 1) break
+    if (lastPosition === embeddableCues.length - 1) break
 
-    const nextStartPosition = Math.max(0, lastPosition - overlapCues + 1)
-    if (
-      nextStartPosition === startPosition
-      && previousLastPosition !== undefined
-      && lastPosition <= previousLastPosition
-    ) {
-      throw new Error('chunk overlap did not advance')
-    }
-    startPosition = nextStartPosition
+    previousLastPosition = lastPosition
+    startPosition = findNextStartPosition(cueTokens, lastPosition, maxTokens, overlapCues)
   }
 
   return chunks
@@ -92,10 +86,24 @@ function validateOptions(targetTokens: number, maxTokens: number, overlapCues: n
   }
 }
 
-function findCuePosition(cues: Cue[], cueIndex: number): number {
-  const position = cues.findIndex(cue => cue.index === cueIndex)
-  if (position === -1) {
-    throw new Error('chunk references an unknown cue')
+function findNextStartPosition(
+  cueTokens: number[],
+  lastPosition: number,
+  maxTokens: number,
+  overlapCues: number,
+): number {
+  const nextPosition = lastPosition + 1
+  let startPosition = Math.max(0, lastPosition - overlapCues + 1)
+  let overlapTokens = 0
+
+  for (let position = startPosition; position <= lastPosition; position += 1) {
+    overlapTokens += cueTokens[position]
   }
-  return position
+
+  while (startPosition <= lastPosition && overlapTokens + cueTokens[nextPosition] > maxTokens) {
+    overlapTokens -= cueTokens[startPosition]
+    startPosition += 1
+  }
+
+  return startPosition
 }

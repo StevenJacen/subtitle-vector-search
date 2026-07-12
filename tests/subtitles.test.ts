@@ -18,6 +18,18 @@ describe('parseSubtitle', () => {
     expect(cues[0]).toMatchObject({ startMs: 2000, endMs: 4000, text: 'Keep hope alive.' })
   })
 
+  it('retains cleaned-empty cues with their source-order indexes', () => {
+    const cues = parseSubtitle(
+      '1\n00:00:01,000 --> 00:00:02,000\n<i></i>\n\n2\n00:00:03,000 --> 00:00:04,000\nStill here.\n',
+      '.srt',
+    )
+
+    expect(cues).toEqual([
+      { index: 0, startMs: 1000, endMs: 2000, text: '' },
+      { index: 1, startMs: 3000, endMs: 4000, text: 'Still here.' },
+    ])
+  })
+
   it('rejects backward timestamps', () => {
     expect(() => parseSubtitle('1\n00:00:03,000 --> 00:00:02,000\nBad\n', '.srt'))
       .toThrow('end time must be greater than start time')
