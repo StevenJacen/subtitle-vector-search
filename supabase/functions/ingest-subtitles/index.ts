@@ -2,6 +2,7 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2.110.2'
 import { ContractError, parseIngestRequest, type IngestRequest } from '../_shared/contracts.ts'
 import { embedChunks } from '../_shared/embeddings.ts'
+import { FinalizeIntegrityError, finalizeTrackIntegrity } from '../_shared/finalize-integrity.ts'
 import { errorResponse, handleAuthenticatedRequest, jsonResponse } from '../_shared/http.ts'
 
 const embeddingSession = new Supabase.ai.Session('gte-small')
@@ -17,6 +18,9 @@ Deno.serve(async request => {
       const client = createServiceClient()
       return jsonResponse(await ingest(client, input))
     } catch (error) {
+      if (error instanceof FinalizeIntegrityError) {
+        return errorResponse(400, error.code, error.message)
+      }
       if (error instanceof ContractError || error instanceof SyntaxError) {
         return errorResponse(400, 'invalid_request', 'invalid request')
       }
@@ -134,14 +138,20 @@ async function ingestBatch(client: any, input: Extract<IngestRequest, { action: 
 }
 
 async function finalizeImport(client: any, trackId: number) {
-  const [cueCount, chunkCount] = await Promise.all([
-    count(client.from('subtitle_cues').select('*', { count: 'exact', head: true }).eq('track_id', trackId)),
-    count(client.from('subtitle_chunks').select('*', { count: 'exact', head: true }).eq('track_id', trackId)),
+  const [cues, chunks] = await Promise.all([
+    data(client.from('subtitle_cues').select('cue_index').eq('track_id', trackId)),
+    data(client.from('subtitle_chunks').select('first_cue_index,last_cue_index').eq('track_id', trackId)),
   ])
-  if (cueCount < 1 || chunkCount < 1) {
-    throw new ContractError()
-  }
-  await data(client.from('subtitle_tracks').update({ status: 'ready' }).eq('id', trackId))
+  await finalizeTrackIntegrity(
+    cues.map((cue: { cue_index: number }) => cue.cue_index),
+    chunks.map((chunk: { first_cue_index: number; last_cue_index: number }) => ({
+      firstCueIndex: chunk.first_cue_index,
+      lastCueIndex: chunk.last_cue_index,
+    })),
+    async () => {
+      await data(client.from('subtitle_tracks').update({ status: 'ready' }).eq('id', trackId))
+    },
+  )
   return { trackId, status: 'ready' }
 }
 

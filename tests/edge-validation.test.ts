@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { authenticateRequest } from '../supabase/functions/_shared/auth.js'
 import { parseIngestRequest } from '../supabase/functions/_shared/contracts.js'
 import { embedChunks } from '../supabase/functions/_shared/embeddings.js'
+import { FinalizeIntegrityError, finalizeTrackIntegrity } from '../supabase/functions/_shared/finalize-integrity.js'
 import { handleAuthenticatedRequest } from '../supabase/functions/_shared/http.js'
 
 const environment = {
@@ -100,5 +101,42 @@ describe('Edge embedding validation', () => {
     const embedding = Array.from({ length: 384 }, () => 0.25)
 
     await expect(embedChunks([chunk], async () => embedding)).resolves.toEqual([{ chunk, embedding }])
+  })
+})
+
+describe('Edge finalize integrity', () => {
+  it('rejects a chunk whose final cue is missing', () => {
+    expect(() => finalizeTrackIntegrity([0], [{ firstCueIndex: 0, lastCueIndex: 1 }]))
+      .toThrow(FinalizeIntegrityError)
+  })
+
+  it('rejects a chunk whose cue range has an interior gap', () => {
+    expect(() => finalizeTrackIntegrity([0, 2], [{ firstCueIndex: 0, lastCueIndex: 2 }]))
+      .toThrow(FinalizeIntegrityError)
+  })
+
+  it('accepts complete chunk references after cues arrive in later batches', () => {
+    expect(() => finalizeTrackIntegrity(
+      [0, 1, 2, 3],
+      [{ firstCueIndex: 0, lastCueIndex: 1 }, { firstCueIndex: 2, lastCueIndex: 3 }],
+    )).not.toThrow()
+  })
+
+  it('does not mark a track ready when a persisted chunk references missing cues', () => {
+    const markReady = vi.fn().mockResolvedValue(undefined)
+    let error: unknown
+
+    try {
+      finalizeTrackIntegrity([0], [{ firstCueIndex: 100, lastCueIndex: 101 }], markReady)
+    } catch (caught) {
+      error = caught
+    }
+
+    expect(error).toMatchObject({
+      code: 'incomplete_cue_ranges',
+      message: 'subtitle track has incomplete cue ranges',
+    })
+
+    expect(markReady).not.toHaveBeenCalled()
   })
 })
