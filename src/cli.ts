@@ -104,7 +104,7 @@ export function createProgram(overrides: Partial<CliDependencies> = {}): Command
       try {
         for (let cueStart = 0, chunkStart = 0; cueStart < cues.length || chunkStart < chunks.length;) {
           const cueBatch = cues.slice(cueStart, cueStart + 100)
-          const chunkBatch = chunks.slice(chunkStart, chunkStart + 8)
+          const chunkBatch = chunks.slice(chunkStart, chunkStart + 1)
           const accepted = await api.sendBatch({ trackId: started.trackId, cues: cueBatch, chunks: chunkBatch })
           acceptedCueCount += accepted.acceptedCueCount
           acceptedChunkCount += accepted.acceptedChunkCount

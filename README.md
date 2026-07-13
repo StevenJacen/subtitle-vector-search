@@ -70,8 +70,8 @@ npx supabase db push
 npx supabase secrets set SUBTITLE_PERSONAL_TOKEN=<random-secret>
 npx supabase functions deploy ingest-subtitles --no-verify-jwt
 npx supabase functions deploy search-subtitles --no-verify-jwt
-npm run subtitle -- import <authorized-file.srt> --title "The Shawshank Redemption" --year 1994 --imdb tt0111161 --source manual
-npm run subtitle -- search "hope during hard times"
+npx tsx src/cli.ts import <authorized-file.srt> --title "The Shawshank Redemption" --year 1994 --imdb tt0111161 --source manual
+npx tsx src/cli.ts search "hope during hard times"
 ```
 
 Migrations must be pushed before either function is deployed. The project ref above is the target project for this workflow; substitute a different ref only when intentionally deploying elsewhere. Remote deployment compilation is mandatory because local Deno semantic checking is not available in every Node development environment.
@@ -88,10 +88,10 @@ The schema and Edge Functions are deployed to the project above. Deployment does
 The CLI can also retrieve a subtitle through the official OpenSubtitles API when your credentials and rights permit it:
 
 ```powershell
-npm run subtitle -- download --imdb 0111161 --output downloads/authorized.srt
-npm run subtitle -- import downloads/authorized.srt --title "Authorized Title" --year 2026 --imdb tt0000001 --source opensubtitles --source-ref opensubtitles:42
-npm run subtitle -- search "quiet determination" --limit 10
-npm run subtitle -- search "quiet determination" --movie-id 7
+npx tsx src/cli.ts download --imdb 0111161 --output downloads/authorized.srt
+npx tsx src/cli.ts import downloads/authorized.srt --title "Authorized Title" --year 2026 --imdb tt0000001 --source opensubtitles --source-ref opensubtitles:42
+npx tsx src/cli.ts search "quiet determination" --limit 10
+npx tsx src/cli.ts search "quiet determination" --movie-id 7
 ```
 
 Search output is compact and timestamped:

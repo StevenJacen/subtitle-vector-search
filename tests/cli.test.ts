@@ -78,11 +78,12 @@ describe('subtitle CLI', () => {
       buildChunksFn: vi.fn().mockReturnValue(chunks),
       subtitleApi: {
         startImport: vi.fn().mockResolvedValue({ movieId: 7, trackId: 11, existingCueCount: 0, existingChunkCount: 0 }),
-        sendBatch: vi.fn()
-          .mockResolvedValueOnce({ acceptedCueCount: 70, acceptedChunkCount: 5 })
-          .mockResolvedValueOnce({ acceptedCueCount: 1, acceptedChunkCount: 0 }),
+        sendBatch: vi.fn().mockImplementation(input => Promise.resolve({
+          acceptedCueCount: input.cues.length,
+          acceptedChunkCount: input.chunks.length,
+        })),
         finalizeImport: vi.fn().mockResolvedValue({ trackId: 11, status: 'ready' }),
-        failImport: vi.fn(),
+        failImport: vi.fn().mockResolvedValue({ trackId: 11, status: 'failed' }),
         search: vi.fn(),
       },
     })
@@ -103,13 +104,13 @@ describe('subtitle CLI', () => {
         rightsStatus: 'personal_research',
       }),
     }))
-    expect(dependencies.subtitleApi.sendBatch).toHaveBeenCalledTimes(2)
+    expect(dependencies.subtitleApi.sendBatch).toHaveBeenCalledTimes(9)
     for (const [batch] of (dependencies.subtitleApi.sendBatch as ReturnType<typeof vi.fn>).mock.calls) {
       expect(batch.cues.length).toBeLessThanOrEqual(100)
-      expect(batch.chunks.length).toBeLessThanOrEqual(8)
+      expect(batch.chunks.length).toBeLessThanOrEqual(1)
     }
     expect(dependencies.subtitleApi.finalizeImport).toHaveBeenCalledWith(11)
-    expect(dependencies.output).toHaveBeenCalledWith('Imported 71 cues and 5 chunks.\n')
+    expect(dependencies.output).toHaveBeenCalledWith('Imported 101 cues and 9 chunks.\n')
     expect(dependencies.output).not.toHaveBeenCalledWith(expect.stringContaining('private dialogue text'))
   })
 
