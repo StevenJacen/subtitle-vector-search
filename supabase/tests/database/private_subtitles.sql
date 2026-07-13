@@ -1,6 +1,6 @@
 begin;
 
-select plan(118);
+select plan(137);
 
 select has_table('public', 'movies', 'movies table exists');
 select has_table('public', 'subtitle_tracks', 'subtitle_tracks table exists');
@@ -224,6 +224,43 @@ select ok(
   'service_role can execute match_subtitle_chunks'
 );
 
+select ok(
+  not has_function_privilege('anon', 'public.reserve_subtitle_chunk_claims(bigint,uuid,jsonb,jsonb)', 'execute')
+  and not has_function_privilege('authenticated', 'public.reserve_subtitle_chunk_claims(bigint,uuid,jsonb,jsonb)', 'execute')
+  and has_function_privilege('service_role', 'public.reserve_subtitle_chunk_claims(bigint,uuid,jsonb,jsonb)', 'execute'),
+  'reserve claim RPC is service-role only'
+);
+select ok(
+  not has_function_privilege('anon', 'public.complete_subtitle_chunk_claims(bigint,uuid,jsonb)', 'execute')
+  and not has_function_privilege('authenticated', 'public.complete_subtitle_chunk_claims(bigint,uuid,jsonb)', 'execute')
+  and has_function_privilege('service_role', 'public.complete_subtitle_chunk_claims(bigint,uuid,jsonb)', 'execute'),
+  'complete claim RPC is service-role only'
+);
+select ok(
+  not has_function_privilege('anon', 'public.release_subtitle_chunk_claims(bigint,uuid)', 'execute')
+  and not has_function_privilege('authenticated', 'public.release_subtitle_chunk_claims(bigint,uuid)', 'execute')
+  and has_function_privilege('service_role', 'public.release_subtitle_chunk_claims(bigint,uuid)', 'execute'),
+  'release claim RPC is service-role only'
+);
+select ok(
+  not has_function_privilege('anon', 'public.fail_subtitle_track(bigint)', 'execute')
+  and not has_function_privilege('authenticated', 'public.fail_subtitle_track(bigint)', 'execute')
+  and has_function_privilege('service_role', 'public.fail_subtitle_track(bigint)', 'execute'),
+  'fail track RPC is service-role only'
+);
+select ok(
+  not has_function_privilege('anon', 'public.reopen_subtitle_track(bigint)', 'execute')
+  and not has_function_privilege('authenticated', 'public.reopen_subtitle_track(bigint)', 'execute')
+  and has_function_privilege('service_role', 'public.reopen_subtitle_track(bigint)', 'execute'),
+  'reopen track RPC is service-role only'
+);
+select ok(
+  not has_function_privilege('anon', 'public.finalize_subtitle_track(bigint)', 'execute')
+  and not has_function_privilege('authenticated', 'public.finalize_subtitle_track(bigint)', 'execute')
+  and has_function_privilege('service_role', 'public.finalize_subtitle_track(bigint)', 'execute'),
+  'finalize track RPC is service-role only'
+);
+
 select ok(has_sequence_privilege('service_role', 'public.movies_id_seq', 'usage'), 'service_role can use movies identity sequence');
 select ok(has_sequence_privilege('service_role', 'public.subtitle_tracks_id_seq', 'usage'), 'service_role can use subtitle_tracks identity sequence');
 select ok(has_sequence_privilege('service_role', 'public.subtitle_cues_id_seq', 'usage'), 'service_role can use subtitle_cues identity sequence');
@@ -252,6 +289,286 @@ select ok(not has_sequence_privilege('authenticated', 'public.subtitle_cues_id_s
 select ok(not has_sequence_privilege('authenticated', 'public.subtitle_chunks_id_seq', 'usage'), 'authenticated cannot use subtitle_chunks identity sequence');
 select ok(not has_sequence_privilege('authenticated', 'public.subtitle_chunks_id_seq', 'select'), 'authenticated cannot select subtitle_chunks identity sequence');
 select ok(not has_sequence_privilege('authenticated', 'public.subtitle_chunks_id_seq', 'update'), 'authenticated cannot update subtitle_chunks identity sequence');
+
+create function pg_temp.raises_sqlstate(p_statement text, p_expected_sqlstate text)
+returns boolean
+language plpgsql
+as $$
+begin
+  execute p_statement;
+  return false;
+exception when others then
+  return sqlstate = p_expected_sqlstate;
+end;
+$$;
+
+create temporary table claim_test_ids (
+  track_id bigint not null
+);
+
+with inserted_movie as (
+  insert into public.movies (title, release_year, imdb_id)
+  values ('Claim behavior fixture', 2028, 'tt0000003')
+  returning id
+), inserted_track as (
+  insert into public.subtitle_tracks (
+    movie_id,
+    language_code,
+    source,
+    source_sha256,
+    rights_status,
+    status
+  )
+  select id, 'en', 'synthetic', 'claim-behavior-sha256', 'personal_research', 'processing'
+  from inserted_movie
+  returning id
+)
+insert into claim_test_ids (track_id)
+select id
+from inserted_track;
+
+create temporary table claim_test_vectors (
+  embedding jsonb not null
+);
+insert into claim_test_vectors (embedding)
+select pg_catalog.jsonb_agg(case when generated.value = 0 then 1 else 0 end order by generated.value)
+from pg_catalog.generate_series(0, 383) as generated(value);
+
+select is(
+  (
+    select count(*)
+    from public.reserve_subtitle_chunk_claims(
+      (select track_id from claim_test_ids),
+      '00000000-0000-0000-0000-000000000001'::uuid,
+      pg_catalog.jsonb_build_array(pg_catalog.jsonb_build_object(
+        'cue_index', 0,
+        'start_ms', 0,
+        'end_ms', 1000,
+        'text', ''
+      )),
+      pg_catalog.jsonb_build_array(pg_catalog.jsonb_build_object('chunk_index', 0))
+    )
+  ),
+  1::bigint,
+  'initial claim reservation accepts an uncompleted chunk'
+);
+select is(
+  (
+    select count(*)
+    from public.reserve_subtitle_chunk_claims(
+      (select track_id from claim_test_ids),
+      '00000000-0000-0000-0000-000000000002'::uuid,
+      '[]'::jsonb,
+      pg_catalog.jsonb_build_array(pg_catalog.jsonb_build_object('chunk_index', 0))
+    )
+  ),
+  0::bigint,
+  'active claims remain protected'
+);
+
+update public.subtitle_chunk_claims
+set claimed_at = pg_catalog.statement_timestamp() - interval '11 minutes'
+where track_id = (select track_id from claim_test_ids)
+  and chunk_index = 0;
+select is(
+  (
+    select count(*)
+    from public.reserve_subtitle_chunk_claims(
+      (select track_id from claim_test_ids),
+      '00000000-0000-0000-0000-000000000002'::uuid,
+      '[]'::jsonb,
+      pg_catalog.jsonb_build_array(pg_catalog.jsonb_build_object('chunk_index', 0))
+    )
+  ),
+  1::bigint,
+  'stale claims can be taken over'
+);
+select ok(
+  (
+    select accepted_chunk_count
+    from public.complete_subtitle_chunk_claims(
+      (select track_id from claim_test_ids),
+      '00000000-0000-0000-0000-000000000001'::uuid,
+      pg_catalog.jsonb_build_array(pg_catalog.jsonb_build_object(
+        'chunk_index', 0,
+        'start_ms', 0,
+        'end_ms', 1000,
+        'text', '',
+        'first_cue_index', 0,
+        'last_cue_index', 0,
+        'embedding', (select embedding from claim_test_vectors)
+      ))
+    )
+  ) = 0
+  and public.release_subtitle_chunk_claims(
+    (select track_id from claim_test_ids),
+    '00000000-0000-0000-0000-000000000001'::uuid
+  ) = 0
+  and not exists (
+    select 1
+    from public.subtitle_chunks
+    where track_id = (select track_id from claim_test_ids)
+  )
+  and (
+    select claim_token
+    from public.subtitle_chunk_claims
+    where track_id = (select track_id from claim_test_ids)
+      and chunk_index = 0
+  ) = '00000000-0000-0000-0000-000000000002'::uuid,
+  'wrong-token completion and release preserve the active claim'
+);
+select ok(
+  (
+    select accepted_chunk_count
+    from public.complete_subtitle_chunk_claims(
+      (select track_id from claim_test_ids),
+      '00000000-0000-0000-0000-000000000002'::uuid,
+      pg_catalog.jsonb_build_array(pg_catalog.jsonb_build_object(
+        'chunk_index', 0,
+        'start_ms', 0,
+        'end_ms', 1000,
+        'text', '',
+        'first_cue_index', 0,
+        'last_cue_index', 0,
+        'embedding', (select embedding from claim_test_vectors)
+      ))
+    )
+  ) = 1
+  and not exists (
+    select 1
+    from public.subtitle_chunk_claims
+    where track_id = (select track_id from claim_test_ids)
+  ),
+  'matching completion accepts and releases the claim'
+);
+select is(
+  (
+    select count(*)
+    from public.reserve_subtitle_chunk_claims(
+      (select track_id from claim_test_ids),
+      '00000000-0000-0000-0000-000000000003'::uuid,
+      '[]'::jsonb,
+      pg_catalog.jsonb_build_array(pg_catalog.jsonb_build_object('chunk_index', 0))
+    )
+  ),
+  0::bigint,
+  'completed chunks cannot be re-claimed'
+);
+
+insert into public.subtitle_chunk_claims (track_id, chunk_index, claim_token)
+select track_id, 0, '00000000-0000-0000-0000-000000000003'::uuid
+from claim_test_ids;
+select ok(
+  (
+    select accepted_chunk_count
+    from public.complete_subtitle_chunk_claims(
+      (select track_id from claim_test_ids),
+      '00000000-0000-0000-0000-000000000003'::uuid,
+      pg_catalog.jsonb_build_array(pg_catalog.jsonb_build_object(
+        'chunk_index', 0,
+        'start_ms', 0,
+        'end_ms', 1000,
+        'text', 'attempted overwrite',
+        'first_cue_index', 0,
+        'last_cue_index', 0,
+        'embedding', (select embedding from claim_test_vectors)
+      ))
+    )
+  ) = 0
+  and (
+    select text
+    from public.subtitle_chunks
+    where track_id = (select track_id from claim_test_ids)
+      and chunk_index = 0
+  ) = '',
+  'completed chunks are not overwritten'
+);
+
+insert into public.subtitle_chunk_claims (track_id, chunk_index, claim_token)
+select track_id, 1, '00000000-0000-0000-0000-000000000004'::uuid
+from claim_test_ids;
+select ok(
+  pg_temp.raises_sqlstate(
+    pg_catalog.format('select public.finalize_subtitle_track(%s)', (select track_id from claim_test_ids)),
+    'P0003'
+  ),
+  'finalize rejects pending claims'
+);
+do $$
+begin
+  perform public.release_subtitle_chunk_claims(
+    (select track_id from claim_test_ids),
+    '00000000-0000-0000-0000-000000000004'::uuid
+  );
+end;
+$$;
+
+update public.subtitle_chunks
+set end_ms = 999
+where track_id = (select track_id from claim_test_ids)
+  and chunk_index = 0;
+select ok(
+  pg_temp.raises_sqlstate(
+    pg_catalog.format('select public.finalize_subtitle_track(%s)', (select track_id from claim_test_ids)),
+    'P0004'
+  ),
+  'finalize rejects timestamp mismatches'
+);
+update public.subtitle_chunks
+set end_ms = 1000
+where track_id = (select track_id from claim_test_ids)
+  and chunk_index = 0;
+
+update public.subtitle_chunks
+set text = 'wrong text'
+where track_id = (select track_id from claim_test_ids)
+  and chunk_index = 0;
+select ok(
+  pg_temp.raises_sqlstate(
+    pg_catalog.format('select public.finalize_subtitle_track(%s)', (select track_id from claim_test_ids)),
+    'P0004'
+  ),
+  'finalize rejects text mismatches'
+);
+update public.subtitle_chunks
+set text = ''
+where track_id = (select track_id from claim_test_ids)
+  and chunk_index = 0;
+
+do $$
+begin
+  perform public.finalize_subtitle_track((select track_id from claim_test_ids));
+end;
+$$;
+select is(
+  (select status from public.subtitle_tracks where id = (select track_id from claim_test_ids)),
+  'ready',
+  'valid empty-cue ranges finalize the track'
+);
+
+update public.subtitle_tracks
+set status = 'processing'
+where id = (select track_id from claim_test_ids);
+do $$
+begin
+  perform public.fail_subtitle_track((select track_id from claim_test_ids));
+end;
+$$;
+select is(
+  (select status from public.subtitle_tracks where id = (select track_id from claim_test_ids)),
+  'failed',
+  'fail track RPC records failure'
+);
+do $$
+begin
+  perform public.reopen_subtitle_track((select track_id from claim_test_ids));
+end;
+$$;
+select is(
+  (select status from public.subtitle_tracks where id = (select track_id from claim_test_ids)),
+  'processing',
+  'failed tracks reopen for processing'
+);
 
 create temporary table inserted_ids (
   movie_id bigint not null,

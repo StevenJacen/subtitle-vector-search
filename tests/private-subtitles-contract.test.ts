@@ -64,5 +64,38 @@ describe('private subtitle pgTAP contract', () => {
     }
   })
 
-  it.todo('exercises final claim and finalize functions sequentially in pgTAP')
+  it('executes the final claim recovery and finalize behavior matrix in pgTAP', () => {
+    for (const assertion of [
+      'active claims remain protected',
+      'stale claims can be taken over',
+      'wrong-token completion and release preserve the active claim',
+      'completed chunks cannot be re-claimed',
+      'completed chunks are not overwritten',
+      'finalize rejects pending claims',
+      'finalize rejects timestamp mismatches',
+      'finalize rejects text mismatches',
+      'valid empty-cue ranges finalize the track',
+      'failed tracks reopen for processing',
+    ]) {
+      expect(pgTap).toContain(assertion)
+    }
+  })
+
+  it('limits final claim RPC execution to the service role in pgTAP', () => {
+    for (const assertion of [
+      'release claim RPC is service-role only',
+      'fail track RPC is service-role only',
+      'reopen track RPC is service-role only',
+      'finalize track RPC is service-role only',
+    ]) {
+      expect(pgTap).toContain(assertion)
+    }
+  })
+
+  it('keeps the pgTAP plan equal to its assertion count', () => {
+    const planned = Number(pgTap.match(/select plan\((\d+)\)/)?.[1])
+    const assertions = (pgTap.match(/select\s+(?:ok|is|has_table)\s*\(/g) ?? []).length
+
+    expect(assertions).toBe(planned)
+  })
 })
