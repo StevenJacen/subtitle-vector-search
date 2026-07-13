@@ -27,7 +27,10 @@ Deno.serve(async request => {
       if (error instanceof EmptyReadyTrackError) {
         return errorResponse(422, 'empty_ready_track', 'no ready subtitle track is available')
       }
-      if (error instanceof SyntaxError || error instanceof SearchRequestError) {
+      if (error instanceof SearchRequestError) {
+        return errorResponse(400, error.code, error.message)
+      }
+      if (error instanceof SyntaxError) {
         return errorResponse(400, 'invalid_request', 'invalid request')
       }
       return errorResponse(500, 'search_failed', 'subtitle search failed')

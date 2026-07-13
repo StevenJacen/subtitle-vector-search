@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Cue, SubtitleChunk } from '../src/domain.js'
 import { createProgram } from '../src/cli.js'
+import { SubtitleApiError } from '../src/supabase-api.js'
 
 const env = {
   OPENSUBTITLES_API_KEY: 'open-key',
@@ -163,5 +164,24 @@ describe('subtitle CLI', () => {
     expect(dependencies.output).toHaveBeenCalledWith(
       '0.842  00:41:40.000 --> 00:41:45.200\nWe can keep building the lantern together.\n',
     )
+  })
+
+  it('surfaces the structured English-only validation message from search', async () => {
+    const dependencies = createDependencies({
+      subtitleApi: {
+        startImport: vi.fn(),
+        sendBatch: vi.fn(),
+        finalizeImport: vi.fn(),
+        search: vi.fn().mockRejectedValue(new SubtitleApiError(
+          'English queries are required',
+          400,
+          'english_query_required',
+        )),
+      },
+    })
+    const program = createProgram(dependencies)
+
+    await expect(program.parseAsync(['node', 'subtitle', 'search', '希望']))
+      .rejects.toThrow('English queries are required')
   })
 })

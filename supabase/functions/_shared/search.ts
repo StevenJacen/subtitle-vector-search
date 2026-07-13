@@ -55,15 +55,18 @@ export class SearchContractError extends Error {
 }
 
 export class SearchRequestError extends SearchContractError {
-  constructor() {
-    super('invalid search request')
+  constructor(
+    readonly code: 'invalid_request' | 'english_query_required' = 'invalid_request',
+    message = code === 'english_query_required' ? 'English queries are required' : 'invalid request',
+  ) {
+    super(message)
     this.name = 'SearchRequestError'
   }
 }
 
 export function parseSearchRequest(value: unknown): SearchRequest {
   const input = object(value)
-  const query = nonBlankString(input.query)
+  const query = englishQuery(input.query)
   const requestedLimit = input.limit === undefined ? 10 : positiveInteger(input.limit)
   const movieId = input.movieId === undefined ? undefined : positiveInteger(input.movieId)
 
@@ -177,6 +180,14 @@ function nonBlankString(value: unknown): string {
     throw new SearchRequestError()
   }
   return value.trim()
+}
+
+function englishQuery(value: unknown): string {
+  const query = nonBlankString(value)
+  if (!/^[\x09-\x0D\x20-\x7E]+$/.test(query) || !/[A-Za-z]/.test(query)) {
+    throw new SearchRequestError('english_query_required')
+  }
+  return query
 }
 
 function positiveInteger(value: unknown): number {

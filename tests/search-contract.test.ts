@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
-  SearchContractError,
   assertQueryEmbedding,
   mapSearchResults,
   parseSearchRequest,
@@ -12,7 +11,29 @@ const vector = Array.from({ length: 384 }, (_, index) => index === 0 ? 1 : 0)
 
 describe('search request contract', () => {
   it('rejects blank queries', () => {
-    expect(() => parseSearchRequest({ query: '   ' })).toThrow(SearchContractError)
+    expect(requestErrorFor({ query: '   ' })).toMatchObject({
+      code: 'invalid_request',
+      message: 'invalid request',
+    })
+  })
+
+  it('accepts ASCII English queries with contractions and ordinary punctuation', () => {
+    expect(parseSearchRequest({ query: "Don't panic - build plan #2!" })).toMatchObject({
+      query: "Don't panic - build plan #2!",
+    })
+  })
+
+  it.each([
+    ['Chinese', '希望在困难时期'],
+    ['mixed non-ASCII text', 'hope 希望'],
+    ['emoji only', '🎬✨'],
+    ['numeric only', '2026'],
+    ['punctuation only', '?!...'],
+  ])('rejects %s queries as English-only input', (_description, query) => {
+    expect(requestErrorFor({ query })).toMatchObject({
+      code: 'english_query_required',
+      message: 'English queries are required',
+    })
   })
 
   it('defaults the limit to ten and clamps it to fifty', () => {
@@ -150,9 +171,21 @@ describe('search Edge entry contract', () => {
     expect(source).toContain("new Supabase.ai.Session('gte-small')")
     expect(source).toContain('handleAuthenticatedRequest(request, Deno.env')
     expect(source).toContain("embeddingSession.run(input.query, { mean_pool: true, normalize: true })")
+    expect(source).toContain('errorResponse(400, error.code, error.message)')
     expect(source).toContain("client.rpc('match_subtitle_chunks'")
     expect(source).toContain(".eq('track_id', row.track_id)")
     expect(source).toContain(".gte('cue_index', row.first_cue_index)")
     expect(source).toContain(".lte('cue_index', row.last_cue_index)")
   })
 })
+
+function requestErrorFor(input: unknown): Error {
+  try {
+    parseSearchRequest(input)
+  } catch (error) {
+    if (error instanceof Error) {
+      return error
+    }
+  }
+  throw new Error('expected search request validation to fail')
+}

@@ -150,6 +150,19 @@ describe('SubtitleApi', () => {
     })
   })
 
+  it('preserves the structured English-only search validation error', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: { code: 'english_query_required', message: 'English queries are required' },
+    }), { status: 400 }))
+    const api = new SubtitleApi({ ...config, fetchFn })
+
+    await expect(api.search({ query: '希望' })).rejects.toMatchObject({
+      status: 400,
+      code: 'english_query_required',
+      message: 'English queries are required',
+    })
+  })
+
   it('decodes structured JSON errors from Edge Functions', async () => {
     const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       error: { code: 'invalid_request', message: 'title is required' },
