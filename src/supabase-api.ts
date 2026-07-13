@@ -70,6 +70,14 @@ export class SubtitleApiError extends Error {
   }
 }
 
+export class SubtitleApiTransportError extends Error {
+  constructor(cause: unknown) {
+    super('subtitle API transport request failed')
+    this.name = 'SubtitleApiTransportError'
+    this.cause = cause
+  }
+}
+
 export class SubtitleApi {
   private readonly fetchFn: typeof fetch
   private readonly ingestUrl: string
@@ -126,36 +134,50 @@ export class SubtitleApi {
 
   private async request<ResponseBody>(url: string, body: object): Promise<ResponseBody> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      let response: Response | undefined
       try {
-        const response = await this.fetchFn(url, {
-          method: 'POST',
-          headers: this.headers,
-          body: JSON.stringify(body),
-        })
-        const payload = await response.json().catch(() => undefined) as ErrorEnvelope | ResponseBody | undefined
-
-        if (!response.ok) {
-          const error = isErrorEnvelope(payload) ? payload.error : undefined
-          const requestError = new SubtitleApiError(
-            error?.message ?? `Subtitle API request failed with HTTP ${response.status}`,
-            response.status,
-            error?.code ?? 'request_failed',
-          )
-          if (!isTransientStatus(response.status) || attempt === 2) {
-            throw requestError
-          }
-        } else {
-          return payload as ResponseBody
-        }
+        response = await this.fetchRequest(url, body)
       } catch (error) {
-        if (error instanceof SubtitleApiError || attempt === 2) {
+        if (!(error instanceof SubtitleApiTransportError) || attempt === 2) {
           throw error
         }
       }
 
+      if (response === undefined) {
+        await this.delayFn(250 * (2 ** attempt))
+        continue
+      }
+
+      const payload = await response.json().catch(() => undefined) as ErrorEnvelope | ResponseBody | undefined
+      if (response.ok) {
+        return payload as ResponseBody
+      }
+
+      const error = isErrorEnvelope(payload) ? payload.error : undefined
+      const requestError = new SubtitleApiError(
+        error?.message ?? `Subtitle API request failed with HTTP ${response.status}`,
+        response.status,
+        error?.code ?? 'request_failed',
+      )
+      if (!isTransientStatus(response.status) || attempt === 2) {
+        throw requestError
+      }
       await this.delayFn(250 * (2 ** attempt))
     }
     throw new Error('unreachable')
+  }
+
+  private async fetchRequest(url: string, body: object): Promise<Response> {
+    const serializedBody = JSON.stringify(body)
+    try {
+      return await this.fetchFn(url, {
+        method: 'POST',
+        headers: this.headers,
+        body: serializedBody,
+      })
+    } catch (error) {
+      throw new SubtitleApiTransportError(error)
+    }
   }
 }
 

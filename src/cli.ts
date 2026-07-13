@@ -111,12 +111,12 @@ export function createProgram(overrides: Partial<CliDependencies> = {}): Command
           cueStart += cueBatch.length
           chunkStart += chunkBatch.length
         }
+        await api.finalizeImport(started.trackId)
       } catch (error) {
-        await api.failImport(started.trackId).catch(() => undefined)
+        await api.failImport(started.trackId).catch(failError => attachCleanupFailure(error, failError))
         throw error
       }
 
-      await api.finalizeImport(started.trackId)
       dependencies.output(`Imported ${acceptedCueCount} cues and ${acceptedChunkCount} chunks.\n`)
     })
 
@@ -176,6 +176,15 @@ async function writeFileExclusive(path: string, bytes: Uint8Array): Promise<void
 
 function isFileExistsError(error: unknown): error is NodeJS.ErrnoException {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST'
+}
+
+function attachCleanupFailure(originalError: unknown, failError: unknown): void {
+  if (originalError instanceof Error && originalError.cause === undefined) {
+    Object.defineProperty(originalError, 'cause', {
+      configurable: true,
+      value: failError,
+    })
+  }
 }
 
 const entryPoint = process.argv[1]

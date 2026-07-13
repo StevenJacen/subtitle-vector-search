@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Cue, SubtitleChunk } from '../src/domain.js'
 import { createProgram } from '../src/cli.js'
-import { SubtitleApiError } from '../src/supabase-api.js'
+import { SubtitleApi, SubtitleApiError } from '../src/supabase-api.js'
 
 const env = {
   OPENSUBTITLES_API_KEY: 'open-key',
@@ -136,6 +136,113 @@ describe('subtitle CLI', () => {
 
     expect(dependencies.subtitleApi.failImport).toHaveBeenCalledWith(11)
     expect(dependencies.subtitleApi.finalizeImport).not.toHaveBeenCalled()
+  })
+
+  it('does not mark the track failed when transient finalization succeeds within SubtitleApi retries', async () => {
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(Response.json({ movieId: 7, trackId: 11, existingCueCount: 0, existingChunkCount: 0 }))
+      .mockResolvedValueOnce(Response.json({ acceptedCueCount: 1, acceptedChunkCount: 1 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: 'busy', message: 'busy' } }), { status: 503 }))
+      .mockResolvedValueOnce(Response.json({ trackId: 11, status: 'ready' }))
+    const api = new SubtitleApi({
+      supabaseUrl: env.SUPABASE_URL,
+      publishableKey: env.SUPABASE_PUBLISHABLE_KEY,
+      personalToken: env.SUBTITLE_PERSONAL_TOKEN,
+      fetchFn,
+      delayFn: vi.fn().mockResolvedValue(undefined),
+    })
+    const failImport = vi.spyOn(api, 'failImport')
+    const dependencies = createDependencies({
+      parseSubtitleFn: vi.fn().mockReturnValue([{ index: 0, startMs: 0, endMs: 900, text: 'line' }]),
+      buildChunksFn: vi.fn().mockReturnValue([{
+        index: 0, startMs: 0, endMs: 900, firstCueIndex: 0, lastCueIndex: 0, text: 'line',
+      }]),
+      subtitleApi: api,
+    })
+
+    await createProgram(dependencies).parseAsync([
+      'node', 'subtitle', 'import', 'downloads/example.srt', '--title', 'Example Film', '--year', '1994',
+      '--imdb', 'tt0111161', '--source', 'manual',
+    ])
+
+    expect(fetchFn).toHaveBeenCalledTimes(4)
+    expect(failImport).not.toHaveBeenCalled()
+  })
+
+  it('marks the track failed once when finalize retries are exhausted', async () => {
+    const finalizeError = new SubtitleApiError('temporarily unavailable', 503, 'ingestion_transient_failure')
+    const dependencies = createDependencies({
+      parseSubtitleFn: vi.fn().mockReturnValue([{ index: 0, startMs: 0, endMs: 900, text: 'line' }]),
+      buildChunksFn: vi.fn().mockReturnValue([{
+        index: 0, startMs: 0, endMs: 900, firstCueIndex: 0, lastCueIndex: 0, text: 'line',
+      }]),
+      subtitleApi: {
+        startImport: vi.fn().mockResolvedValue({ movieId: 7, trackId: 11, existingCueCount: 0, existingChunkCount: 0 }),
+        sendBatch: vi.fn().mockResolvedValue({ acceptedCueCount: 1, acceptedChunkCount: 1 }),
+        finalizeImport: vi.fn().mockRejectedValue(finalizeError),
+        failImport: vi.fn().mockResolvedValue({ trackId: 11, status: 'failed' }),
+        search: vi.fn(),
+      },
+    })
+
+    await expect(createProgram(dependencies).parseAsync([
+      'node', 'subtitle', 'import', 'downloads/example.srt', '--title', 'Example Film', '--year', '1994',
+      '--imdb', 'tt0111161', '--source', 'manual',
+    ])).rejects.toBe(finalizeError)
+
+    expect(dependencies.subtitleApi.failImport).toHaveBeenCalledTimes(1)
+    expect(dependencies.subtitleApi.failImport).toHaveBeenCalledWith(11)
+  })
+
+  it('marks the track failed once when finalization is nonretryable', async () => {
+    const finalizeError = new SubtitleApiError('finalization rejected', 400, 'invalid_request')
+    const dependencies = createDependencies({
+      parseSubtitleFn: vi.fn().mockReturnValue([{ index: 0, startMs: 0, endMs: 900, text: 'line' }]),
+      buildChunksFn: vi.fn().mockReturnValue([{
+        index: 0, startMs: 0, endMs: 900, firstCueIndex: 0, lastCueIndex: 0, text: 'line',
+      }]),
+      subtitleApi: {
+        startImport: vi.fn().mockResolvedValue({ movieId: 7, trackId: 11, existingCueCount: 0, existingChunkCount: 0 }),
+        sendBatch: vi.fn().mockResolvedValue({ acceptedCueCount: 1, acceptedChunkCount: 1 }),
+        finalizeImport: vi.fn().mockRejectedValue(finalizeError),
+        failImport: vi.fn().mockResolvedValue({ trackId: 11, status: 'failed' }),
+        search: vi.fn(),
+      },
+    })
+
+    await expect(createProgram(dependencies).parseAsync([
+      'node', 'subtitle', 'import', 'downloads/example.srt', '--title', 'Example Film', '--year', '1994',
+      '--imdb', 'tt0111161', '--source', 'manual',
+    ])).rejects.toBe(finalizeError)
+
+    expect(dependencies.subtitleApi.failImport).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves the finalization error when marking the import failed also fails', async () => {
+    const finalizeError = new SubtitleApiError('temporarily unavailable', 503, 'ingestion_transient_failure')
+    const failError = new Error('could not mark import failed')
+    const dependencies = createDependencies({
+      parseSubtitleFn: vi.fn().mockReturnValue([{ index: 0, startMs: 0, endMs: 900, text: 'line' }]),
+      buildChunksFn: vi.fn().mockReturnValue([{
+        index: 0, startMs: 0, endMs: 900, firstCueIndex: 0, lastCueIndex: 0, text: 'line',
+      }]),
+      subtitleApi: {
+        startImport: vi.fn().mockResolvedValue({ movieId: 7, trackId: 11, existingCueCount: 0, existingChunkCount: 0 }),
+        sendBatch: vi.fn().mockResolvedValue({ acceptedCueCount: 1, acceptedChunkCount: 1 }),
+        finalizeImport: vi.fn().mockRejectedValue(finalizeError),
+        failImport: vi.fn().mockRejectedValue(failError),
+        search: vi.fn(),
+      },
+    })
+
+    const error = await createProgram(dependencies).parseAsync([
+      'node', 'subtitle', 'import', 'downloads/example.srt', '--title', 'Example Film', '--year', '1994',
+      '--imdb', 'tt0111161', '--source', 'manual',
+    ]).catch(error => error)
+
+    expect(error).toBe(finalizeError)
+    expect((error as Error).cause).toBe(failError)
+    expect(dependencies.subtitleApi.failImport).toHaveBeenCalledTimes(1)
   })
 
   it('retains source cues locally but rejects imports with zero usable chunks before calling the API', async () => {

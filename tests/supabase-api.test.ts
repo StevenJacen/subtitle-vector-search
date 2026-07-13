@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Cue, SubtitleChunk } from '../src/domain.js'
-import { SubtitleApi, SubtitleApiError } from '../src/supabase-api.js'
+import { SubtitleApi, SubtitleApiError, SubtitleApiTransportError } from '../src/supabase-api.js'
 
 const config = {
   supabaseUrl: 'https://project.supabase.co/',
@@ -184,6 +184,38 @@ describe('SubtitleApi', () => {
     expect(delayFn).toHaveBeenCalledTimes(2)
   })
 
+  it('wraps exhausted fetch failures as transport errors and retries them', async () => {
+    const networkFailure = new TypeError('network unavailable')
+    const fetchFn = vi.fn().mockRejectedValue(networkFailure)
+    const delayFn = vi.fn().mockResolvedValue(undefined)
+    const api = new SubtitleApi({ ...config, fetchFn, delayFn })
+
+    const error = await api.startImport(startInput).catch(error => error)
+
+    expect(error).toBeInstanceOf(SubtitleApiTransportError)
+    expect((error as Error).cause).toBe(networkFailure)
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    expect(delayFn).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not retry serialization failures that occur before fetch', async () => {
+    const serializationFailure = new Error('cannot serialize input')
+    const fetchFn = vi.fn()
+    const delayFn = vi.fn().mockResolvedValue(undefined)
+    const api = new SubtitleApi({ ...config, fetchFn, delayFn })
+    const invalidInput = {
+      movie: {
+        title: { toJSON: () => { throw serializationFailure } },
+        imdbId: 'tt0111161',
+      },
+      track: startInput.track,
+    } as unknown as typeof startInput
+
+    await expect(api.startImport(invalidInput)).rejects.toBe(serializationFailure)
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(delayFn).not.toHaveBeenCalled()
+  })
+
   it('searches through the search Edge Function with optional movie filtering', async () => {
     const fetchFn = vi.fn().mockResolvedValue(Response.json({ results: [] }))
     const api = new SubtitleApi({ ...config, fetchFn })
@@ -208,6 +240,7 @@ describe('SubtitleApi', () => {
       code: 'invalid_response',
       message: 'subtitle search returned an invalid response',
     })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 
   it('preserves the structured English-only search validation error', async () => {
