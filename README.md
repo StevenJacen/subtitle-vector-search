@@ -83,7 +83,7 @@ npx supabase migration list
 npx supabase db lint --linked --level warning
 ```
 
-This task does not deploy functions, import hosted subtitle content, or write remote state.
+The schema and Edge Functions are deployed to the project above. Deployment does not import subtitle content; import only English subtitle files you are authorized to retain and use.
 
 The CLI can also retrieve a subtitle through the official OpenSubtitles API when your credentials and rights permit it:
 
