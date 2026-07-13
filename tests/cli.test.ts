@@ -25,6 +25,7 @@ function createDependencies(overrides: Partial<Parameters<typeof createProgram>[
       startImport: vi.fn().mockResolvedValue({ movieId: 7, trackId: 11, existingCueCount: 0, existingChunkCount: 0 }),
       sendBatch: vi.fn().mockResolvedValue({ acceptedCueCount: 0, acceptedChunkCount: 0 }),
       finalizeImport: vi.fn().mockResolvedValue({ trackId: 11, status: 'ready' }),
+      failImport: vi.fn().mockResolvedValue({ trackId: 11, status: 'failed' }),
       search: vi.fn().mockResolvedValue([]),
     },
     readFile: vi.fn().mockResolvedValue(Buffer.from('synthetic subtitle')),
@@ -75,6 +76,15 @@ describe('subtitle CLI', () => {
     const dependencies = createDependencies({
       parseSubtitleFn: vi.fn().mockReturnValue(cues),
       buildChunksFn: vi.fn().mockReturnValue(chunks),
+      subtitleApi: {
+        startImport: vi.fn().mockResolvedValue({ movieId: 7, trackId: 11, existingCueCount: 0, existingChunkCount: 0 }),
+        sendBatch: vi.fn()
+          .mockResolvedValueOnce({ acceptedCueCount: 70, acceptedChunkCount: 5 })
+          .mockResolvedValueOnce({ acceptedCueCount: 1, acceptedChunkCount: 0 }),
+        finalizeImport: vi.fn().mockResolvedValue({ trackId: 11, status: 'ready' }),
+        failImport: vi.fn(),
+        search: vi.fn(),
+      },
     })
     const program = createProgram(dependencies)
 
@@ -99,8 +109,33 @@ describe('subtitle CLI', () => {
       expect(batch.chunks.length).toBeLessThanOrEqual(8)
     }
     expect(dependencies.subtitleApi.finalizeImport).toHaveBeenCalledWith(11)
-    expect(dependencies.output).toHaveBeenCalledWith('Imported 101 cues and 9 chunks.\n')
+    expect(dependencies.output).toHaveBeenCalledWith('Imported 71 cues and 5 chunks.\n')
     expect(dependencies.output).not.toHaveBeenCalledWith(expect.stringContaining('private dialogue text'))
+  })
+
+  it('marks the track failed after batch retries are exhausted', async () => {
+    const batchError = new SubtitleApiError('temporarily unavailable', 503, 'ingestion_transient_failure')
+    const dependencies = createDependencies({
+      parseSubtitleFn: vi.fn().mockReturnValue([{ index: 0, startMs: 0, endMs: 900, text: 'line' }]),
+      buildChunksFn: vi.fn().mockReturnValue([{
+        index: 0, startMs: 0, endMs: 900, firstCueIndex: 0, lastCueIndex: 0, text: 'line',
+      }]),
+      subtitleApi: {
+        startImport: vi.fn().mockResolvedValue({ movieId: 7, trackId: 11, existingCueCount: 0, existingChunkCount: 0 }),
+        sendBatch: vi.fn().mockRejectedValue(batchError),
+        finalizeImport: vi.fn(),
+        failImport: vi.fn().mockResolvedValue({ trackId: 11, status: 'failed' }),
+        search: vi.fn(),
+      },
+    })
+
+    await expect(createProgram(dependencies).parseAsync([
+      'node', 'subtitle', 'import', 'downloads/example.srt', '--title', 'Example Film', '--year', '1994',
+      '--imdb', 'tt0111161', '--source', 'manual',
+    ])).rejects.toBe(batchError)
+
+    expect(dependencies.subtitleApi.failImport).toHaveBeenCalledWith(11)
+    expect(dependencies.subtitleApi.finalizeImport).not.toHaveBeenCalled()
   })
 
   it('retains source cues locally but rejects imports with zero usable chunks before calling the API', async () => {
@@ -136,6 +171,7 @@ describe('subtitle CLI', () => {
         startImport: vi.fn(),
         sendBatch: vi.fn(),
         finalizeImport: vi.fn(),
+        failImport: vi.fn(),
         search: vi.fn().mockResolvedValue([{
           similarity: 0.84219,
           movie: { id: 7, title: 'Synthetic Night Walk', releaseYear: 2026 },
@@ -172,6 +208,7 @@ describe('subtitle CLI', () => {
         startImport: vi.fn(),
         sendBatch: vi.fn(),
         finalizeImport: vi.fn(),
+        failImport: vi.fn(),
         search: vi.fn().mockRejectedValue(new SubtitleApiError(
           'English queries are required',
           400,

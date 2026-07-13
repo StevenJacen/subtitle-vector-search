@@ -7,7 +7,8 @@ const pgTap = readFileSync(
   'utf8',
 )
 
-const tables = ['movies', 'subtitle_tracks', 'subtitle_cues', 'subtitle_chunks']
+const tables = ['movies', 'subtitle_tracks', 'subtitle_cues', 'subtitle_chunks', 'subtitle_chunk_claims']
+const sequenceTables = ['movies', 'subtitle_tracks', 'subtitle_cues', 'subtitle_chunks']
 const publicRoles = ['anon', 'authenticated']
 const tablePrivileges = ['select', 'insert', 'update', 'delete']
 const sequencePrivileges = ['usage', 'select', 'update']
@@ -29,7 +30,7 @@ describe('private subtitle pgTAP contract', () => {
         }
       }
 
-      for (const table of tables) {
+      for (const table of sequenceTables) {
         for (const privilege of sequencePrivileges) {
           expect(pgTap).toContain(
             `not has_sequence_privilege('${role}', 'public.${table}_id_seq', '${privilege}')`,
@@ -50,4 +51,18 @@ describe('private subtitle pgTAP contract', () => {
       expect(pgTap).toContain(assertion)
     }
   })
+
+  it('covers final claim table schema and security', () => {
+    for (const assertion of [
+      'subtitle_chunk_claims references subtitle_tracks',
+      'subtitle_chunk_claims track foreign key is indexed',
+      'subtitle_chunk_claims forces RLS',
+      'subtitle_chunk_claims has no policies',
+      'service_role has subtitle chunk claim table privileges',
+    ]) {
+      expect(pgTap).toContain(assertion)
+    }
+  })
+
+  it.todo('exercises final claim and finalize functions sequentially in pgTAP')
 })

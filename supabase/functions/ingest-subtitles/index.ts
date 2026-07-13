@@ -24,7 +24,7 @@ Deno.serve(async request => {
       if (error instanceof ContractError || error instanceof SyntaxError) {
         return errorResponse(400, 'invalid_request', 'invalid request')
       }
-      return errorResponse(500, 'ingestion_failed', 'subtitle ingestion failed')
+      return errorResponse(503, 'ingestion_transient_failure', 'subtitle ingestion temporarily failed')
     }
   })
 })
@@ -51,6 +51,8 @@ async function ingest(client: any, input: IngestRequest): Promise<object> {
       return await ingestBatch(client, input)
     case 'finalize':
       return await finalizeImport(client, input.trackId)
+    case 'fail':
+      return await failImport(client, input.trackId)
   }
 }
 
@@ -83,11 +85,14 @@ async function startImport(client: any, input: Extract<IngestRequest, { action: 
 
   const track = await data(client
     .from('subtitle_tracks')
-    .select('id')
+    .select('id,status')
     .eq('movie_id', movie.id)
     .eq('language_code', input.track.languageCode)
     .eq('source_sha256', input.track.sourceSha256)
     .single())
+  if (track.status === 'failed') {
+    await rpcData(client.rpc('reopen_subtitle_track', { p_track_id: track.id }), 'batch')
+  }
   const [existingCueCount, existingChunkCount] = await Promise.all([
     count(client.from('subtitle_cues').select('*', { count: 'exact', head: true }).eq('track_id', track.id)),
     count(client.from('subtitle_chunks').select('*', { count: 'exact', head: true }).eq('track_id', track.id)),
@@ -114,18 +119,34 @@ async function ingestBatch(client: any, input: Extract<IngestRequest, { action: 
   )
   const claimedIndexes = new Set(claims.map(claim => claim.claimed_chunk_index))
   const claimedChunks = input.chunks.filter(chunk => claimedIndexes.has(chunk.index))
-  const chunksWithEmbeddings = await embedChunks(
-    claimedChunks,
-    text => embeddingSession.run(text, { mean_pool: true, normalize: true }),
-  )
-  const acceptedChunkCount = await completeClaims(client, input.trackId, claimToken, chunksWithEmbeddings)
-
-  return { acceptedCueCount: input.cues.length, acceptedChunkCount }
+  try {
+    const chunksWithEmbeddings = await embedChunks(
+      claimedChunks,
+      text => embeddingSession.run(text, { mean_pool: true, normalize: true }),
+    )
+    const acceptedChunkCount = await completeClaims(client, input.trackId, claimToken, chunksWithEmbeddings)
+    return { acceptedCueCount: input.cues.length, acceptedChunkCount }
+  } catch (error) {
+    await releaseClaims(client, input.trackId, claimToken).catch(() => undefined)
+    throw error
+  }
 }
 
 async function finalizeImport(client: any, trackId: number) {
   await rpcData(client.rpc('finalize_subtitle_track', { p_track_id: trackId }), 'finalize')
   return { trackId, status: 'ready' }
+}
+
+async function failImport(client: any, trackId: number) {
+  await rpcData(client.rpc('fail_subtitle_track', { p_track_id: trackId }), 'batch')
+  return { trackId, status: 'failed' }
+}
+
+async function releaseClaims(client: any, trackId: number, claimToken: string): Promise<void> {
+  await rpcData(client.rpc('release_subtitle_chunk_claims', {
+    p_track_id: trackId,
+    p_claim_token: claimToken,
+  }), 'batch')
 }
 
 async function completeClaims(
@@ -167,9 +188,13 @@ async function rpcData<T>(
 ): Promise<T> {
   const result = await query
   if (result.error !== null) {
-    throwForIngestionRpcError(operation, result.error?.code)
+    throwForIngestionRpcError(operation, databaseErrorCode(result.error))
   }
   return result.data as T
+}
+
+function databaseErrorCode(error: unknown): unknown {
+  return typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined
 }
 
 async function count(query: PromiseLike<{ count: number | null; error: unknown }>): Promise<number> {

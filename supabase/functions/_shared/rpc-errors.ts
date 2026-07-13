@@ -2,7 +2,7 @@ export type IngestionRpcOperation = 'batch' | 'finalize'
 
 export class IngestionRpcValidationError extends Error {
   constructor(
-    readonly code: 'track_ready' | 'incomplete_cue_ranges' | 'pending_chunk_claims',
+    readonly code: 'track_ready' | 'incomplete_cue_ranges' | 'pending_chunk_claims' | 'chunk_cue_mismatch',
     message: string,
   ) {
     super(message)
@@ -16,6 +16,9 @@ export function throwForIngestionRpcError(
 ): never {
   if (operation === 'finalize' && databaseCode === 'P0003') {
     throw new IngestionRpcValidationError('pending_chunk_claims', 'subtitle track has pending chunk claims')
+  }
+  if (operation === 'finalize' && databaseCode === 'P0004') {
+    throw new IngestionRpcValidationError('chunk_cue_mismatch', 'subtitle chunks do not match their cue ranges')
   }
   if (databaseCode === 'P0001') {
     if (operation === 'batch') {

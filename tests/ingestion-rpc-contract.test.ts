@@ -2,10 +2,9 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-const migration = readFileSync(
-  resolve(process.cwd(), 'supabase/migrations/20260713090000_atomic_subtitle_ingestion.sql'),
-  'utf8',
-)
+const migration = ['20260713090000_atomic_subtitle_ingestion.sql', '20260713100000_finalize_subtitle_ingestion.sql']
+  .map(file => readFileSync(resolve(process.cwd(), 'supabase/migrations', file), 'utf8'))
+  .join('\n')
 const handler = readFileSync(
   resolve(process.cwd(), 'supabase/functions/ingest-subtitles/index.ts'),
   'utf8',
@@ -26,6 +25,11 @@ describe('atomic subtitle ingestion RPC contracts', () => {
     expect(migration).toContain('pg_catalog.generate_series')
     expect(migration).toContain('left join public.subtitle_cues')
     expect(migration).toMatch(/update public\.subtitle_tracks\s+set status = 'ready'/)
+    expect(migration).toContain('first_cue.start_ms <> chunk.start_ms')
+    expect(migration).toContain('last_cue.end_ms <> chunk.end_ms')
+    expect(migration).toContain("pg_catalog.string_agg(cue.text, ' ' order by cue.cue_index)")
+    expect(migration).toContain("where pg_catalog.btrim(cue.text) <> ''")
+    expect(migration).toContain("errcode = 'P0004'")
   })
 
   it('keeps the RPCs security invoker-only with an empty search path and service-role execution', () => {

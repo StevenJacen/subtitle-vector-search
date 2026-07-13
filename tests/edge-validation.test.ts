@@ -70,6 +70,23 @@ describe('Edge ingestion authentication', () => {
 })
 
 describe('Edge ingestion contracts', () => {
+  it.each(['EN', 'en-US', 'fr', 'zh'])('rejects non-English start language code %s', languageCode => {
+    expect(() => parseIngestRequest({
+      action: 'start',
+      movie: { title: 'Synthetic Film', imdbId: 'tt0000001' },
+      track: {
+        languageCode,
+        source: 'synthetic',
+        sourceSha256: 'test-sha256',
+        rightsStatus: 'personal_research',
+      },
+    })).toThrow('invalid request')
+  })
+
+  it('accepts the authenticated fail action contract', () => {
+    expect(parseIngestRequest({ action: 'fail', trackId: 11 })).toEqual({ action: 'fail', trackId: 11 })
+  })
+
   it('accepts empty cue text while preserving valid timestamp and cue boundaries', () => {
     expect(parseIngestRequest(batch())).toEqual(batch())
   })
@@ -132,6 +149,21 @@ describe('Edge ingestion RPC errors', () => {
     expect(error).toMatchObject({
       code: 'pending_chunk_claims',
       message: 'subtitle track has pending chunk claims',
+    })
+  })
+
+  it('maps chunk/cue finalize mismatches to a stable validation response', () => {
+    let error: unknown
+
+    try {
+      throwForIngestionRpcError('finalize', 'P0004')
+    } catch (caught) {
+      error = caught
+    }
+
+    expect(error).toMatchObject({
+      code: 'chunk_cue_mismatch',
+      message: 'subtitle chunks do not match their cue ranges',
     })
   })
 })

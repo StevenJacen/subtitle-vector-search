@@ -33,6 +33,7 @@ export type IngestRequest =
   | { action: 'start'; movie: MovieInput; track: TrackInput }
   | { action: 'batch'; trackId: number; cues: Cue[]; chunks: SubtitleChunk[] }
   | { action: 'finalize'; trackId: number }
+  | { action: 'fail'; trackId: number }
 
 export class ContractError extends Error {
   constructor() {
@@ -56,7 +57,7 @@ export function parseIngestRequest(value: unknown): IngestRequest {
     }
     return { action, trackId: positiveInteger(request.trackId), cues, chunks }
   }
-  if (action === 'finalize') {
+  if (action === 'finalize' || action === 'fail') {
     return { action, trackId: positiveInteger(request.trackId) }
   }
 
@@ -81,8 +82,11 @@ function trackInput(value: unknown): TrackInput {
   }
   const sourceRef = optionalString(input.sourceRef)
   const sourceFileName = optionalString(input.sourceFileName)
+  if (input.languageCode !== 'en') {
+    throw new ContractError()
+  }
   return {
-    languageCode: nonBlankString(input.languageCode),
+    languageCode: input.languageCode,
     source: nonBlankString(input.source),
     ...(sourceRef === undefined ? {} : { sourceRef }),
     ...(sourceFileName === undefined ? {} : { sourceFileName }),

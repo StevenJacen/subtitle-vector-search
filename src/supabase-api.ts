@@ -5,12 +5,13 @@ export interface SubtitleApiConfig {
   publishableKey: string
   personalToken: string
   fetchFn?: typeof fetch
+  delayFn?: (milliseconds: number) => Promise<void>
 }
 
 export interface MovieInput {
   title: string
   releaseYear?: number
-  imdbId?: string
+  imdbId: string
 }
 
 export interface TrackInput {
@@ -41,6 +42,11 @@ export interface FinalizeImportResponse {
   status: 'ready'
 }
 
+export interface FailImportResponse {
+  trackId: number
+  status: 'failed'
+}
+
 export interface SubtitleSearchResult {
   similarity: number
   movie: { id: number; title: string; releaseYear: number | null }
@@ -68,9 +74,11 @@ export class SubtitleApi {
   private readonly fetchFn: typeof fetch
   private readonly ingestUrl: string
   private readonly searchUrl: string
+  private readonly delayFn: (milliseconds: number) => Promise<void>
 
   constructor(config: SubtitleApiConfig) {
     this.fetchFn = config.fetchFn ?? fetch
+    this.delayFn = config.delayFn ?? (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)))
     const baseUrl = config.supabaseUrl.replace(/\/$/, '')
     this.ingestUrl = `${baseUrl}/functions/v1/ingest-subtitles`
     this.searchUrl = `${baseUrl}/functions/v1/search-subtitles`
@@ -104,6 +112,10 @@ export class SubtitleApi {
     return this.request(this.ingestUrl, { action: 'finalize', trackId })
   }
 
+  failImport(trackId: number): Promise<FailImportResponse> {
+    return this.request(this.ingestUrl, { action: 'fail', trackId })
+  }
+
   async search(input: { query: string; limit?: number; movieId?: number }): Promise<SubtitleSearchResult[]> {
     const response = await this.request<unknown>(this.searchUrl, input)
     if (!isSearchResponse(response)) {
@@ -113,24 +125,42 @@ export class SubtitleApi {
   }
 
   private async request<ResponseBody>(url: string, body: object): Promise<ResponseBody> {
-    const response = await this.fetchFn(url, {
-      method: 'POST',
-      headers: this.headers,
-      body: JSON.stringify(body),
-    })
-    const payload = await response.json().catch(() => undefined) as ErrorEnvelope | ResponseBody | undefined
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const response = await this.fetchFn(url, {
+          method: 'POST',
+          headers: this.headers,
+          body: JSON.stringify(body),
+        })
+        const payload = await response.json().catch(() => undefined) as ErrorEnvelope | ResponseBody | undefined
 
-    if (!response.ok) {
-      const error = isErrorEnvelope(payload) ? payload.error : undefined
-      throw new SubtitleApiError(
-        error?.message ?? `Subtitle API request failed with HTTP ${response.status}`,
-        response.status,
-        error?.code ?? 'request_failed',
-      )
+        if (!response.ok) {
+          const error = isErrorEnvelope(payload) ? payload.error : undefined
+          const requestError = new SubtitleApiError(
+            error?.message ?? `Subtitle API request failed with HTTP ${response.status}`,
+            response.status,
+            error?.code ?? 'request_failed',
+          )
+          if (!isTransientStatus(response.status) || attempt === 2) {
+            throw requestError
+          }
+        } else {
+          return payload as ResponseBody
+        }
+      } catch (error) {
+        if (error instanceof SubtitleApiError || attempt === 2) {
+          throw error
+        }
+      }
+
+      await this.delayFn(250 * (2 ** attempt))
     }
-
-    return payload as ResponseBody
+    throw new Error('unreachable')
   }
+}
+
+function isTransientStatus(status: number): boolean {
+  return status === 429 || status >= 500
 }
 
 interface ErrorEnvelope {

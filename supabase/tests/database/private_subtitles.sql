@@ -1,11 +1,12 @@
 begin;
 
-select plan(103);
+select plan(118);
 
 select has_table('public', 'movies', 'movies table exists');
 select has_table('public', 'subtitle_tracks', 'subtitle_tracks table exists');
 select has_table('public', 'subtitle_cues', 'subtitle_cues table exists');
 select has_table('public', 'subtitle_chunks', 'subtitle_chunks table exists');
+select has_table('public', 'subtitle_chunk_claims', 'subtitle_chunk_claims table exists');
 
 select is(
   pg_catalog.format_type(attribute.atttypid, attribute.atttypmod),
@@ -47,10 +48,21 @@ select ok(
   ),
   'subtitle_chunks references subtitle_tracks'
 );
+select ok(
+  exists (
+    select 1
+    from pg_catalog.pg_constraint as constraint
+    where constraint.conrelid = 'public.subtitle_chunk_claims'::pg_catalog.regclass
+      and constraint.contype = 'f'
+      and constraint.confrelid = 'public.subtitle_tracks'::pg_catalog.regclass
+  ),
+  'subtitle_chunk_claims references subtitle_tracks'
+);
 
 select ok(pg_catalog.to_regclass('public.subtitle_tracks_movie_id_idx') is not null, 'subtitle_tracks movie foreign key is indexed');
 select ok(pg_catalog.to_regclass('public.subtitle_cues_track_id_idx') is not null, 'subtitle_cues track foreign key is indexed');
 select ok(pg_catalog.to_regclass('public.subtitle_chunks_track_id_idx') is not null, 'subtitle_chunks track foreign key is indexed');
+select ok(pg_catalog.to_regclass('public.subtitle_chunk_claims_track_id_idx') is not null, 'subtitle_chunk_claims track foreign key is indexed');
 select ok(pg_catalog.to_regclass('public.subtitle_cues_track_id_start_ms_idx') is not null, 'subtitle_cues track timestamp lookup is indexed');
 select ok(
   exists (
@@ -80,6 +92,9 @@ where class.oid = 'public.subtitle_cues'::pg_catalog.regclass;
 select ok(class.relrowsecurity, 'subtitle_chunks has RLS enabled')
 from pg_catalog.pg_class as class
 where class.oid = 'public.subtitle_chunks'::pg_catalog.regclass;
+select ok(class.relrowsecurity, 'subtitle_chunk_claims has RLS enabled')
+from pg_catalog.pg_class as class
+where class.oid = 'public.subtitle_chunk_claims'::pg_catalog.regclass;
 
 select ok(class.relforcerowsecurity, 'movies forces RLS')
 from pg_catalog.pg_class as class
@@ -93,11 +108,15 @@ where class.oid = 'public.subtitle_cues'::pg_catalog.regclass;
 select ok(class.relforcerowsecurity, 'subtitle_chunks forces RLS')
 from pg_catalog.pg_class as class
 where class.oid = 'public.subtitle_chunks'::pg_catalog.regclass;
+select ok(class.relforcerowsecurity, 'subtitle_chunk_claims forces RLS')
+from pg_catalog.pg_class as class
+where class.oid = 'public.subtitle_chunk_claims'::pg_catalog.regclass;
 
 select ok(not exists (select 1 from pg_catalog.pg_policy where polrelid = 'public.movies'::pg_catalog.regclass), 'movies has no policies');
 select ok(not exists (select 1 from pg_catalog.pg_policy where polrelid = 'public.subtitle_tracks'::pg_catalog.regclass), 'subtitle_tracks has no policies');
 select ok(not exists (select 1 from pg_catalog.pg_policy where polrelid = 'public.subtitle_cues'::pg_catalog.regclass), 'subtitle_cues has no policies');
 select ok(not exists (select 1 from pg_catalog.pg_policy where polrelid = 'public.subtitle_chunks'::pg_catalog.regclass), 'subtitle_chunks has no policies');
+select ok(not exists (select 1 from pg_catalog.pg_policy where polrelid = 'public.subtitle_chunk_claims'::pg_catalog.regclass), 'subtitle_chunk_claims has no policies');
 
 select ok(not has_table_privilege('anon', 'public.movies', 'select'), 'anon cannot select movies');
 select ok(not has_table_privilege('anon', 'public.subtitle_tracks', 'select'), 'anon cannot select subtitle_tracks');
@@ -131,6 +150,14 @@ select ok(not has_table_privilege('authenticated', 'public.subtitle_cues', 'dele
 select ok(not has_table_privilege('authenticated', 'public.subtitle_chunks', 'insert'), 'authenticated cannot insert subtitle_chunks');
 select ok(not has_table_privilege('authenticated', 'public.subtitle_chunks', 'update'), 'authenticated cannot update subtitle_chunks');
 select ok(not has_table_privilege('authenticated', 'public.subtitle_chunks', 'delete'), 'authenticated cannot delete subtitle_chunks');
+select ok(not has_table_privilege('anon', 'public.subtitle_chunk_claims', 'select'), 'anon cannot select subtitle_chunk_claims');
+select ok(not has_table_privilege('anon', 'public.subtitle_chunk_claims', 'insert'), 'anon cannot insert subtitle_chunk_claims');
+select ok(not has_table_privilege('anon', 'public.subtitle_chunk_claims', 'update'), 'anon cannot update subtitle_chunk_claims');
+select ok(not has_table_privilege('anon', 'public.subtitle_chunk_claims', 'delete'), 'anon cannot delete subtitle_chunk_claims');
+select ok(not has_table_privilege('authenticated', 'public.subtitle_chunk_claims', 'select'), 'authenticated cannot select subtitle_chunk_claims');
+select ok(not has_table_privilege('authenticated', 'public.subtitle_chunk_claims', 'insert'), 'authenticated cannot insert subtitle_chunk_claims');
+select ok(not has_table_privilege('authenticated', 'public.subtitle_chunk_claims', 'update'), 'authenticated cannot update subtitle_chunk_claims');
+select ok(not has_table_privilege('authenticated', 'public.subtitle_chunk_claims', 'delete'), 'authenticated cannot delete subtitle_chunk_claims');
 
 select ok(
   has_table_privilege('service_role', 'public.movies', 'select')
@@ -159,6 +186,13 @@ select ok(
   and has_table_privilege('service_role', 'public.subtitle_chunks', 'update')
   and has_table_privilege('service_role', 'public.subtitle_chunks', 'delete'),
   'service_role has subtitle chunk table privileges'
+);
+select ok(
+  has_table_privilege('service_role', 'public.subtitle_chunk_claims', 'select')
+  and has_table_privilege('service_role', 'public.subtitle_chunk_claims', 'insert')
+  and has_table_privilege('service_role', 'public.subtitle_chunk_claims', 'update')
+  and has_table_privilege('service_role', 'public.subtitle_chunk_claims', 'delete'),
+  'service_role has subtitle chunk claim table privileges'
 );
 
 select ok(

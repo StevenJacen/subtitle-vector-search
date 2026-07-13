@@ -8,6 +8,11 @@ const config = {
   personalToken: 'personal-token',
 }
 
+const startInput = {
+  movie: { title: 'Example Film', imdbId: 'tt0111161' },
+  track: { languageCode: 'en', source: 'manual', sourceSha256: 'abc123', rightsStatus: 'personal_research' as const },
+}
+
 const cues: Cue[] = [{ index: 0, startMs: 1000, endMs: 2000, text: 'Keep going.' }]
 const chunks: SubtitleChunk[] = [{
   index: 0,
@@ -92,7 +97,7 @@ describe('SubtitleApi', () => {
     const api = new SubtitleApi({ ...config, fetchFn })
 
     await api.startImport({
-      movie: { title: 'Example Film' },
+      movie: { title: 'Example Film', imdbId: 'tt0111161' },
       track: { languageCode: 'en', source: 'manual', sourceSha256: 'abc123', rightsStatus: undefined },
     })
 
@@ -102,7 +107,7 @@ describe('SubtitleApi', () => {
     )
     expect(JSON.parse((fetchFn.mock.calls[0][1] as RequestInit).body as string)).toEqual({
       action: 'start',
-      movie: { title: 'Example Film' },
+      movie: { title: 'Example Film', imdbId: 'tt0111161' },
       track: {
         languageCode: 'en',
         source: 'manual',
@@ -122,6 +127,61 @@ describe('SubtitleApi', () => {
       'https://project.supabase.co/functions/v1/ingest-subtitles',
       expect.objectContaining({ body: JSON.stringify({ action: 'finalize', trackId: 11 }) }),
     )
+  })
+
+  it('marks an import failed through the authenticated fail action', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(Response.json({ trackId: 11, status: 'failed' }))
+    const api = new SubtitleApi({ ...config, fetchFn })
+
+    await expect(api.failImport(11)).resolves.toEqual({ trackId: 11, status: 'failed' })
+    expect(fetchFn).toHaveBeenCalledWith(
+      'https://project.supabase.co/functions/v1/ingest-subtitles',
+      expect.objectContaining({ body: JSON.stringify({ action: 'fail', trackId: 11 }) }),
+    )
+  })
+
+  it('retries network failures and transient HTTP responses at most three attempts', async () => {
+    const fetchFn = vi.fn()
+      .mockRejectedValueOnce(new TypeError('network unavailable'))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: 'busy', message: 'busy' } }), { status: 503 }))
+      .mockResolvedValueOnce(Response.json({ movieId: 7, trackId: 11, existingCueCount: 0, existingChunkCount: 0 }))
+    const delayFn = vi.fn().mockResolvedValue(undefined)
+    const api = new SubtitleApi({ ...config, fetchFn, delayFn })
+
+    await expect(api.startImport(startInput)).resolves.toMatchObject({ trackId: 11 })
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    expect(delayFn).toHaveBeenNthCalledWith(1, 250)
+    expect(delayFn).toHaveBeenNthCalledWith(2, 500)
+  })
+
+  it('retries HTTP 429 but never retries other 4xx responses', async () => {
+    const retryingFetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: 'rate_limited', message: 'slow down' } }), { status: 429 }))
+      .mockResolvedValueOnce(Response.json({ acceptedCueCount: 1, acceptedChunkCount: 1 }))
+    const delayFn = vi.fn().mockResolvedValue(undefined)
+    const retryingApi = new SubtitleApi({ ...config, fetchFn: retryingFetch, delayFn })
+
+    await expect(retryingApi.sendBatch({ trackId: 11, cues, chunks })).resolves.toMatchObject({ acceptedChunkCount: 1 })
+    expect(retryingFetch).toHaveBeenCalledTimes(2)
+
+    const rejectingFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: { code: 'invalid_request', message: 'invalid request' },
+    }), { status: 400 }))
+    const rejectingApi = new SubtitleApi({ ...config, fetchFn: rejectingFetch, delayFn })
+    await expect(rejectingApi.startImport(startInput)).rejects.toMatchObject({ status: 400 })
+    expect(rejectingFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops after three transient attempts', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: { code: 'unavailable', message: 'unavailable' },
+    }), { status: 500 }))
+    const delayFn = vi.fn().mockResolvedValue(undefined)
+    const api = new SubtitleApi({ ...config, fetchFn, delayFn })
+
+    await expect(api.startImport(startInput)).rejects.toMatchObject({ status: 500 })
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    expect(delayFn).toHaveBeenCalledTimes(2)
   })
 
   it('searches through the search Edge Function with optional movie filtering', async () => {

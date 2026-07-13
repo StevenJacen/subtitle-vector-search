@@ -64,8 +64,9 @@ Remote deployment changes hosted project state. Link the CLI to a Supabase proje
 
 ```powershell
 npm install
-npx supabase start
-npx supabase db reset
+npx supabase login
+npx supabase link --project-ref kwoppqigrtvgmmbnzbpx
+npx supabase db push
 npx supabase secrets set SUBTITLE_PERSONAL_TOKEN=<random-secret>
 npx supabase functions deploy ingest-subtitles --no-verify-jwt
 npx supabase functions deploy search-subtitles --no-verify-jwt
@@ -73,7 +74,16 @@ npm run subtitle -- import <authorized-file.srt> --title "The Shawshank Redempti
 npm run subtitle -- search "hope during hard times"
 ```
 
-The `npx supabase start` and `npx supabase db reset` commands in that sequence verify the local database; the secret and deploy commands target the linked remote project. Apply migrations to the linked project through your normal reviewed Supabase migration workflow before deploying functions. This task does not deploy functions, import hosted subtitle content, or write remote state.
+Migrations must be pushed before either function is deployed. The project ref above is the target project for this workflow; substitute a different ref only when intentionally deploying elsewhere. Remote deployment compilation is mandatory because local Deno semantic checking is not available in every Node development environment.
+
+Verify the linked migration state and run hosted database advisors after deployment:
+
+```powershell
+npx supabase migration list
+npx supabase db lint --linked --level warning
+```
+
+This task does not deploy functions, import hosted subtitle content, or write remote state.
 
 The CLI can also retrieve a subtitle through the official OpenSubtitles API when your credentials and rights permit it:
 

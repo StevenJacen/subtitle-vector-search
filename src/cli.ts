@@ -11,7 +11,7 @@ import { SubtitleApi } from './supabase-api.js'
 import { parseSubtitle } from './subtitles.js'
 
 type OpenSubtitlesCommands = Pick<OpenSubtitlesClient, 'searchEnglishByImdb' | 'downloadFile'>
-type SubtitleApiCommands = Pick<SubtitleApi, 'startImport' | 'sendBatch' | 'finalizeImport' | 'search'>
+type SubtitleApiCommands = Pick<SubtitleApi, 'startImport' | 'sendBatch' | 'finalizeImport' | 'failImport' | 'search'>
 
 export interface CliDependencies {
   env: Record<string, string | undefined>
@@ -99,16 +99,25 @@ export function createProgram(overrides: Partial<CliDependencies> = {}): Command
         },
       })
 
-      for (let cueStart = 0, chunkStart = 0; cueStart < cues.length || chunkStart < chunks.length;) {
-        const cueBatch = cues.slice(cueStart, cueStart + 100)
-        const chunkBatch = chunks.slice(chunkStart, chunkStart + 8)
-        await api.sendBatch({ trackId: started.trackId, cues: cueBatch, chunks: chunkBatch })
-        cueStart += cueBatch.length
-        chunkStart += chunkBatch.length
+      let acceptedCueCount = 0
+      let acceptedChunkCount = 0
+      try {
+        for (let cueStart = 0, chunkStart = 0; cueStart < cues.length || chunkStart < chunks.length;) {
+          const cueBatch = cues.slice(cueStart, cueStart + 100)
+          const chunkBatch = chunks.slice(chunkStart, chunkStart + 8)
+          const accepted = await api.sendBatch({ trackId: started.trackId, cues: cueBatch, chunks: chunkBatch })
+          acceptedCueCount += accepted.acceptedCueCount
+          acceptedChunkCount += accepted.acceptedChunkCount
+          cueStart += cueBatch.length
+          chunkStart += chunkBatch.length
+        }
+      } catch (error) {
+        await api.failImport(started.trackId).catch(() => undefined)
+        throw error
       }
 
       await api.finalizeImport(started.trackId)
-      dependencies.output(`Imported ${cues.length} cues and ${chunks.length} chunks.\n`)
+      dependencies.output(`Imported ${acceptedCueCount} cues and ${acceptedChunkCount} chunks.\n`)
     })
 
   program

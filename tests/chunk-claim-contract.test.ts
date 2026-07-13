@@ -2,10 +2,9 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-const migration = readFileSync(
-  resolve(process.cwd(), 'supabase/migrations/20260713093000_subtitle_chunk_claims.sql'),
-  'utf8',
-)
+const migration = ['20260713093000_subtitle_chunk_claims.sql', '20260713100000_finalize_subtitle_ingestion.sql']
+  .map(file => readFileSync(resolve(process.cwd(), 'supabase/migrations', file), 'utf8'))
+  .join('\n')
 const handler = readFileSync(
   resolve(process.cwd(), 'supabase/functions/ingest-subtitles/index.ts'),
   'utf8',
@@ -38,6 +37,21 @@ describe('subtitle chunk claim contracts', () => {
     expect(migration).toContain('delete from public.subtitle_chunk_claims as claim')
     expect(migration).toContain('from inserted_chunks as inserted')
     expect(migration).toContain('select pg_catalog.count(*)::integer')
+  })
+
+  it('releases only claims matching both track and token under a track lock', () => {
+    expect(migration).toContain('create function public.release_subtitle_chunk_claims(')
+    expect(migration).toContain('claim.track_id = p_track_id')
+    expect(migration).toContain('claim.claim_token = p_claim_token')
+    expect(migration).toContain('for update')
+    expect(migration).toContain('public.release_subtitle_chunk_claims(bigint, uuid)')
+  })
+
+  it('defines locked failed and reopen transitions', () => {
+    expect(migration).toContain('create function public.fail_subtitle_track(')
+    expect(migration).toContain('create function public.reopen_subtitle_track(')
+    expect(migration).toContain("track_status = 'failed'")
+    expect(migration).toContain("set status = 'processing'")
   })
 
   it('rejects finalize while claims remain pending', () => {
