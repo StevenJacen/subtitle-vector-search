@@ -2,8 +2,8 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2.110.2'
 import { ContractError, parseIngestRequest, type IngestRequest } from '../_shared/contracts.ts'
 import { embedChunks } from '../_shared/embeddings.ts'
-import { FinalizeIntegrityError, finalizeTrackIntegrity } from '../_shared/finalize-integrity.ts'
 import { errorResponse, handleAuthenticatedRequest, jsonResponse } from '../_shared/http.ts'
+import { IngestionRpcValidationError, throwForIngestionRpcError } from '../_shared/rpc-errors.ts'
 
 const embeddingSession = new Supabase.ai.Session('gte-small')
 
@@ -18,7 +18,7 @@ Deno.serve(async request => {
       const client = createServiceClient()
       return jsonResponse(await ingest(client, input))
     } catch (error) {
-      if (error instanceof FinalizeIntegrityError) {
+      if (error instanceof IngestionRpcValidationError) {
         return errorResponse(400, error.code, error.message)
       }
       if (error instanceof ContractError || error instanceof SyntaxError) {
@@ -97,16 +97,6 @@ async function startImport(client: any, input: Extract<IngestRequest, { action: 
 }
 
 async function ingestBatch(client: any, input: Extract<IngestRequest, { action: 'batch' }>) {
-  if (input.cues.length > 0) {
-    await data(client.from('subtitle_cues').upsert(input.cues.map(cue => ({
-      track_id: input.trackId,
-      cue_index: cue.index,
-      start_ms: cue.startMs,
-      end_ms: cue.endMs,
-      text: cue.text,
-    })), { onConflict: 'track_id,cue_index' }))
-  }
-
   const existingChunks = input.chunks.length === 0
     ? []
     : await data(client
@@ -122,37 +112,45 @@ async function ingestBatch(client: any, input: Extract<IngestRequest, { action: 
       missingChunks,
       text => embeddingSession.run(text, { mean_pool: true, normalize: true }),
     )
-    await data(client.from('subtitle_chunks').upsert(chunksWithEmbeddings.map(({ chunk, embedding }) => ({
-      track_id: input.trackId,
-      chunk_index: chunk.index,
-      start_ms: chunk.startMs,
-      end_ms: chunk.endMs,
-      text: chunk.text,
-      first_cue_index: chunk.firstCueIndex,
-      last_cue_index: chunk.lastCueIndex,
-      embedding,
-    })), { onConflict: 'track_id,chunk_index' }))
+    return await writeBatch(client, input, chunksWithEmbeddings)
   }
 
-  return { acceptedCueCount: input.cues.length, acceptedChunkCount: missingChunks.length }
+  return await writeBatch(client, input, [])
 }
 
 async function finalizeImport(client: any, trackId: number) {
-  const [cues, chunks] = await Promise.all([
-    data(client.from('subtitle_cues').select('cue_index').eq('track_id', trackId)),
-    data(client.from('subtitle_chunks').select('first_cue_index,last_cue_index').eq('track_id', trackId)),
-  ])
-  await finalizeTrackIntegrity(
-    cues.map((cue: { cue_index: number }) => cue.cue_index),
-    chunks.map((chunk: { first_cue_index: number; last_cue_index: number }) => ({
-      firstCueIndex: chunk.first_cue_index,
-      lastCueIndex: chunk.last_cue_index,
-    })),
-    async () => {
-      await data(client.from('subtitle_tracks').update({ status: 'ready' }).eq('id', trackId))
-    },
-  )
+  await rpcData(client.rpc('finalize_subtitle_track', { p_track_id: trackId }), 'finalize')
   return { trackId, status: 'ready' }
+}
+
+async function writeBatch(
+  client: any,
+  input: Extract<IngestRequest, { action: 'batch' }>,
+  chunksWithEmbeddings: Array<{ chunk: Extract<IngestRequest, { action: 'batch' }>['chunks'][number]; embedding: number[] }>,
+) {
+  const result = await rpcData<Array<{ accepted_cue_count: number; accepted_chunk_count: number }>>(
+    client.rpc('ingest_subtitle_batch', {
+      p_track_id: input.trackId,
+      p_cues: input.cues.map(cue => ({
+        cue_index: cue.index,
+        start_ms: cue.startMs,
+        end_ms: cue.endMs,
+        text: cue.text,
+      })),
+      p_chunks: chunksWithEmbeddings.map(({ chunk, embedding }) => ({
+        chunk_index: chunk.index,
+        start_ms: chunk.startMs,
+        end_ms: chunk.endMs,
+        text: chunk.text,
+        first_cue_index: chunk.firstCueIndex,
+        last_cue_index: chunk.lastCueIndex,
+        embedding,
+      })),
+    }),
+    'batch',
+  )
+  const counts = result[0]
+  return { acceptedCueCount: counts.accepted_cue_count, acceptedChunkCount: counts.accepted_chunk_count }
 }
 
 async function data<T>(query: PromiseLike<{ data: T; error: unknown }>): Promise<T> {
@@ -161,6 +159,17 @@ async function data<T>(query: PromiseLike<{ data: T; error: unknown }>): Promise
     throw new Error('database operation failed')
   }
   return result.data
+}
+
+async function rpcData<T>(
+  query: PromiseLike<{ data: T; error: unknown }>,
+  operation: 'batch' | 'finalize',
+): Promise<T> {
+  const result = await query
+  if (result.error !== null) {
+    throwForIngestionRpcError(operation, result.error?.code)
+  }
+  return result.data as T
 }
 
 async function count(query: PromiseLike<{ count: number | null; error: unknown }>): Promise<number> {
