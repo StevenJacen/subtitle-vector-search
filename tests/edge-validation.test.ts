@@ -119,4 +119,19 @@ describe('Edge ingestion RPC errors', () => {
       message: 'subtitle track is already ready',
     })
   })
+
+  it('maps pending finalize claims to a stable validation response', () => {
+    let error: unknown
+
+    try {
+      throwForIngestionRpcError('finalize', 'P0003')
+    } catch (caught) {
+      error = caught
+    }
+
+    expect(error).toMatchObject({
+      code: 'pending_chunk_claims',
+      message: 'subtitle track has pending chunk claims',
+    })
+  })
 })

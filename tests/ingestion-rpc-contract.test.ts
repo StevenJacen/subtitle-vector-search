@@ -41,8 +41,10 @@ describe('atomic subtitle ingestion RPC contracts', () => {
   })
 
   it('uses only the transactional RPCs for batch and finalize writes', () => {
-    expect(handler).toContain(".rpc('ingest_subtitle_batch'")
+    expect(handler).toContain(".rpc('reserve_subtitle_chunk_claims'")
+    expect(handler).toContain(".rpc('complete_subtitle_chunk_claims'")
     expect(handler).toContain(".rpc('finalize_subtitle_track'")
+    expect(handler).not.toContain(".rpc('ingest_subtitle_batch'")
     expect(handler).not.toContain("from('subtitle_cues').upsert")
     expect(handler).not.toContain("from('subtitle_chunks').upsert")
     expect(handler).not.toContain("update({ status: 'ready' })")

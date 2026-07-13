@@ -97,25 +97,30 @@ async function startImport(client: any, input: Extract<IngestRequest, { action: 
 }
 
 async function ingestBatch(client: any, input: Extract<IngestRequest, { action: 'batch' }>) {
-  const existingChunks = input.chunks.length === 0
-    ? []
-    : await data(client
-      .from('subtitle_chunks')
-      .select('chunk_index')
-      .eq('track_id', input.trackId)
-      .in('chunk_index', input.chunks.map(chunk => chunk.index)))
-  const existingIndexes = new Set(existingChunks.map((chunk: { chunk_index: number }) => chunk.chunk_index))
-  const missingChunks = input.chunks.filter(chunk => !existingIndexes.has(chunk.index))
+  const claimToken = crypto.randomUUID()
+  const claims = await rpcData<Array<{ claimed_chunk_index: number }>>(
+    client.rpc('reserve_subtitle_chunk_claims', {
+      p_track_id: input.trackId,
+      p_claim_token: claimToken,
+      p_cues: input.cues.map(cue => ({
+        cue_index: cue.index,
+        start_ms: cue.startMs,
+        end_ms: cue.endMs,
+        text: cue.text,
+      })),
+      p_chunk_indexes: input.chunks.map(chunk => ({ chunk_index: chunk.index })),
+    }),
+    'batch',
+  )
+  const claimedIndexes = new Set(claims.map(claim => claim.claimed_chunk_index))
+  const claimedChunks = input.chunks.filter(chunk => claimedIndexes.has(chunk.index))
+  const chunksWithEmbeddings = await embedChunks(
+    claimedChunks,
+    text => embeddingSession.run(text, { mean_pool: true, normalize: true }),
+  )
+  const acceptedChunkCount = await completeClaims(client, input.trackId, claimToken, chunksWithEmbeddings)
 
-  if (missingChunks.length > 0) {
-    const chunksWithEmbeddings = await embedChunks(
-      missingChunks,
-      text => embeddingSession.run(text, { mean_pool: true, normalize: true }),
-    )
-    return await writeBatch(client, input, chunksWithEmbeddings)
-  }
-
-  return await writeBatch(client, input, [])
+  return { acceptedCueCount: input.cues.length, acceptedChunkCount }
 }
 
 async function finalizeImport(client: any, trackId: number) {
@@ -123,20 +128,16 @@ async function finalizeImport(client: any, trackId: number) {
   return { trackId, status: 'ready' }
 }
 
-async function writeBatch(
+async function completeClaims(
   client: any,
-  input: Extract<IngestRequest, { action: 'batch' }>,
+  trackId: number,
+  claimToken: string,
   chunksWithEmbeddings: Array<{ chunk: Extract<IngestRequest, { action: 'batch' }>['chunks'][number]; embedding: number[] }>,
 ) {
-  const result = await rpcData<Array<{ accepted_cue_count: number; accepted_chunk_count: number }>>(
-    client.rpc('ingest_subtitle_batch', {
-      p_track_id: input.trackId,
-      p_cues: input.cues.map(cue => ({
-        cue_index: cue.index,
-        start_ms: cue.startMs,
-        end_ms: cue.endMs,
-        text: cue.text,
-      })),
+  const result = await rpcData<Array<{ accepted_chunk_count: number }>>(
+    client.rpc('complete_subtitle_chunk_claims', {
+      p_track_id: trackId,
+      p_claim_token: claimToken,
       p_chunks: chunksWithEmbeddings.map(({ chunk, embedding }) => ({
         chunk_index: chunk.index,
         start_ms: chunk.startMs,
@@ -149,8 +150,7 @@ async function writeBatch(
     }),
     'batch',
   )
-  const counts = result[0]
-  return { acceptedCueCount: counts.accepted_cue_count, acceptedChunkCount: counts.accepted_chunk_count }
+  return result[0]?.accepted_chunk_count ?? 0
 }
 
 async function data<T>(query: PromiseLike<{ data: T; error: unknown }>): Promise<T> {
