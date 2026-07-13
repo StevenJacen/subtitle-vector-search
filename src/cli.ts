@@ -8,7 +8,7 @@ import { buildChunks } from './chunks.js'
 import type { Cue, SubtitleChunk } from './domain.js'
 import { OpenSubtitlesClient } from './opensubtitles.js'
 import { SubtitleApi } from './supabase-api.js'
-import { formatTimestamp, parseSubtitle } from './subtitles.js'
+import { parseSubtitle } from './subtitles.js'
 
 type OpenSubtitlesCommands = Pick<OpenSubtitlesClient, 'searchEnglishByImdb' | 'downloadFile'>
 type SubtitleApiCommands = Pick<SubtitleApi, 'startImport' | 'sendBatch' | 'finalizeImport' | 'search'>
@@ -114,13 +114,18 @@ export function createProgram(overrides: Partial<CliDependencies> = {}): Command
   program
     .command('search <query>')
     .option('--limit <count>', 'maximum results', parseInteger, 10)
-    .action(async (query: string, options: { limit: number }) => {
+    .option('--movie-id <id>', 'limit results to a movie ID', parseInteger)
+    .action(async (query: string, options: { limit: number; movieId?: number }) => {
       const api = dependencies.subtitleApi ?? new SubtitleApi({
         supabaseUrl: requireEnvironment(dependencies.env, 'SUPABASE_URL'),
         publishableKey: requireEnvironment(dependencies.env, 'SUPABASE_PUBLISHABLE_KEY'),
         personalToken: requireEnvironment(dependencies.env, 'SUBTITLE_PERSONAL_TOKEN'),
       })
-      const results = await api.search({ query, limit: options.limit })
+      const results = await api.search({
+        query,
+        limit: options.limit,
+        ...(options.movieId === undefined ? {} : { movieId: options.movieId }),
+      })
 
       if (results.length === 0) {
         dependencies.output('No matching dialogue found.\n')
@@ -128,7 +133,7 @@ export function createProgram(overrides: Partial<CliDependencies> = {}): Command
       }
 
       for (const result of results) {
-        dependencies.output(`${result.similarity.toFixed(3)}  ${formatTimestamp(result.startMs)} --> ${formatTimestamp(result.endMs)}\n${result.text}\n`)
+        dependencies.output(`${result.similarity.toFixed(3)}  ${result.timestamp}\n${result.text}\n`)
       }
     })
 

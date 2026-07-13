@@ -105,7 +105,10 @@ export class SubtitleApi {
   }
 
   async search(input: { query: string; limit?: number; movieId?: number }): Promise<SubtitleSearchResult[]> {
-    const response = await this.request<{ results: SubtitleSearchResult[] }>(this.searchUrl, input)
+    const response = await this.request<unknown>(this.searchUrl, input)
+    if (!isSearchResponse(response)) {
+      throw new SubtitleApiError('subtitle search returned an invalid response', 502, 'invalid_response')
+    }
     return response.results
   }
 
@@ -144,4 +147,55 @@ function isErrorEnvelope(value: unknown): value is ErrorEnvelope {
     && 'message' in value.error
     && typeof value.error.code === 'string'
     && typeof value.error.message === 'string'
+}
+
+function isSearchResponse(value: unknown): value is { results: SubtitleSearchResult[] } {
+  return isRecord(value) && Array.isArray(value.results) && value.results.every(isSearchResult)
+}
+
+function isSearchResult(value: unknown): value is SubtitleSearchResult {
+  return isRecord(value)
+    && finiteNumber(value.similarity)
+    && isRecord(value.movie)
+    && positiveInteger(value.movie.id)
+    && typeof value.movie.title === 'string'
+    && (value.movie.releaseYear === null || integer(value.movie.releaseYear))
+    && positiveInteger(value.trackId)
+    && nonNegativeInteger(value.chunkIndex)
+    && nonNegativeInteger(value.startMs)
+    && positiveInteger(value.endMs)
+    && value.endMs > value.startMs
+    && typeof value.timestamp === 'string'
+    && typeof value.text === 'string'
+    && Array.isArray(value.cues)
+    && value.cues.every(isCue)
+}
+
+function isCue(value: unknown): value is Cue {
+  return isRecord(value)
+    && nonNegativeInteger(value.index)
+    && nonNegativeInteger(value.startMs)
+    && positiveInteger(value.endMs)
+    && value.endMs > value.startMs
+    && typeof value.text === 'string'
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function finiteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function integer(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value)
+}
+
+function positiveInteger(value: unknown): value is number {
+  return integer(value) && value > 0
+}
+
+function nonNegativeInteger(value: unknown): value is number {
+  return integer(value) && value >= 0
 }

@@ -139,6 +139,17 @@ describe('SubtitleApi', () => {
     )
   })
 
+  it('rejects a malformed successful search response as a validation error', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(Response.json({ results: { unexpected: true } }))
+    const api = new SubtitleApi({ ...config, fetchFn })
+
+    await expect(api.search({ query: 'quiet determination' })).rejects.toMatchObject({
+      status: 502,
+      code: 'invalid_response',
+      message: 'subtitle search returned an invalid response',
+    })
+  })
+
   it('decodes structured JSON errors from Edge Functions', async () => {
     const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       error: { code: 'invalid_request', message: 'title is required' },

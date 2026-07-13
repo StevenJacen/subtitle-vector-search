@@ -1,6 +1,6 @@
 begin;
 
-select plan(101);
+select plan(103);
 
 select has_table('public', 'movies', 'movies table exists');
 select has_table('public', 'subtitle_tracks', 'subtitle_tracks table exists');
@@ -450,6 +450,47 @@ select is(
   (select count(*) from public.match_subtitle_chunks((select embedding from query_vectors), 100, null)),
   50::bigint,
   'match_count is capped at fifty results'
+);
+
+select is(
+  (
+    select chunk_index
+    from public.match_subtitle_chunks(
+      (
+        select chunk.embedding
+        from public.subtitle_chunks as chunk
+        join public.subtitle_tracks as track on track.id = chunk.track_id
+        join public.movies as movie on movie.id = track.movie_id
+        where movie.imdb_id = 'seed-search-fixture' and chunk.chunk_index = 0
+      ),
+      2,
+      (select id from public.movies where imdb_id = 'seed-search-fixture')
+    )
+    limit 1
+  ),
+  0,
+  'seed first vector ranks the first synthetic chunk first'
+);
+select is(
+  (
+    select pg_catalog.array_agg(cue.cue_index order by cue.cue_index)
+    from public.match_subtitle_chunks(
+      (
+        select chunk.embedding
+        from public.subtitle_chunks as chunk
+        join public.subtitle_tracks as track on track.id = chunk.track_id
+        join public.movies as movie on movie.id = track.movie_id
+        where movie.imdb_id = 'seed-search-fixture' and chunk.chunk_index = 0
+      ),
+      1,
+      (select id from public.movies where imdb_id = 'seed-search-fixture')
+    ) as matched
+    join public.subtitle_cues as cue
+      on cue.track_id = matched.track_id
+      and cue.cue_index between matched.first_cue_index and matched.last_cue_index
+  ),
+  array[0, 1]::integer[],
+  'seed first chunk includes its exact inclusive cue range'
 );
 
 select * from finish();

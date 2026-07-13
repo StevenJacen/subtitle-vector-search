@@ -128,4 +128,40 @@ describe('subtitle CLI', () => {
     expect(dependencies.subtitleApi.search).toHaveBeenCalledWith({ query: 'hope during hard times', limit: 10 })
     expect(dependencies.output).toHaveBeenCalledWith('No matching dialogue found.\n')
   })
+
+  it('prints ranked search results compactly and forwards an optional movie filter', async () => {
+    const dependencies = createDependencies({
+      subtitleApi: {
+        startImport: vi.fn(),
+        sendBatch: vi.fn(),
+        finalizeImport: vi.fn(),
+        search: vi.fn().mockResolvedValue([{
+          similarity: 0.84219,
+          movie: { id: 7, title: 'Synthetic Night Walk', releaseYear: 2026 },
+          trackId: 11,
+          chunkIndex: 4,
+          startMs: 2_500_000,
+          endMs: 2_505_200,
+          timestamp: '00:41:40.000 --> 00:41:45.200',
+          text: 'We can keep building the lantern together.',
+          cues: [
+            { index: 1, startMs: 2_500_000, endMs: 2_502_000, text: 'We can keep building.' },
+            { index: 2, startMs: 2_502_000, endMs: 2_505_200, text: 'I will carry the lantern.' },
+          ],
+        }]),
+      },
+    })
+    const program = createProgram(dependencies)
+
+    await program.parseAsync([
+      'node', 'subtitle', 'search', 'quiet determination', '--limit', '5', '--movie-id', '7',
+    ])
+
+    expect(dependencies.subtitleApi.search).toHaveBeenCalledWith({
+      query: 'quiet determination', limit: 5, movieId: 7,
+    })
+    expect(dependencies.output).toHaveBeenCalledWith(
+      '0.842  00:41:40.000 --> 00:41:45.200\nWe can keep building the lantern together.\n',
+    )
+  })
 })
