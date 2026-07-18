@@ -659,6 +659,26 @@ describe('video asset repository', () => {
       .resolves.toEqual({ selectionId: 9 })
   })
 
+  it('maps only the selection ownership SQLSTATE to a controlled candidate 404', async () => {
+    const rawDetails = 'candidate does not belong to run 9'
+    const repo = createVideoAssetRepository({
+      from: vi.fn(),
+      rpc: vi.fn().mockResolvedValue({
+        data: null,
+        error: { code: 'P0002', message: rawDetails, details: 'provider_resource_id=42' },
+      }),
+    })
+
+    const promise = repo.selectCandidate({ runId, providerResourceId: 42, note: 'replacement' })
+
+    await expect(promise).rejects.toMatchObject({
+      status: 404,
+      code: 'candidate_not_found',
+      message: 'candidate not found',
+    })
+    await expect(promise).rejects.not.toThrow(rawDetails)
+  })
+
   it('hydrates persisted run rows and derives controlled failed-lane codes', async () => {
     const runQuery = query({ data: {
       id: runId,

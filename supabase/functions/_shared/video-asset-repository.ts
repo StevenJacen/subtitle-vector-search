@@ -271,7 +271,7 @@ export function createVideoAssetRepository(client: SupabaseRepositoryClient): Vi
     },
 
     async selectCandidate(input) {
-      const result = rows(await database(client.rpc('select_video_asset', {
+      const result = rows(await selectionDatabase(client.rpc('select_video_asset', {
         p_run_id: input.runId,
         p_provider_resource_id: input.providerResourceId,
         p_note: input.note,
@@ -290,6 +290,24 @@ async function database(result: DatabaseResult | PromiseLike<DatabaseResult>): P
     throw databaseFailure()
   }
   if (resolved.error !== null) throw databaseFailure()
+  return resolved.data
+}
+
+async function selectionDatabase(
+  result: DatabaseResult | PromiseLike<DatabaseResult>,
+): Promise<unknown> {
+  let resolved: DatabaseResult
+  try {
+    resolved = await result
+  } catch {
+    throw databaseFailure()
+  }
+  if (resolved.error !== null) {
+    if (databaseErrorCode(resolved.error) === 'P0002') {
+      throw new VideoAssetError(404, 'candidate_not_found', 'candidate not found')
+    }
+    throw databaseFailure()
+  }
   return resolved.data
 }
 
