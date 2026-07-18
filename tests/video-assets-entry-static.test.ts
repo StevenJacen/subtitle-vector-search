@@ -12,6 +12,11 @@ const matchSource = readFileSync(
   'utf8',
 )
 
+const selectionSource = readFileSync(
+  resolve(process.cwd(), 'supabase/functions/select-video-asset/index.ts'),
+  'utf8',
+)
+
 describe('visual concept seed Edge entry', () => {
   it('uses pinned Edge dependencies and authenticates before model or database work', () => {
     expect(seedSource).toContain("import 'jsr:@supabase/functions-js/edge-runtime.d.ts'")
@@ -129,5 +134,66 @@ describe('video asset matching Edge entry', () => {
     )
     expect(matchSource).not.toContain('console.')
     expect(matchSource.toLocaleLowerCase('en-US')).not.toContain('download')
+  })
+})
+
+describe('video asset selection Edge entry', () => {
+  it('pins Edge imports and rejects non-POST methods before authentication', () => {
+    const methodGuard = selectionSource.indexOf("if (request.method !== 'POST')")
+    const auth = selectionSource.indexOf('handleAuthenticatedRequest(request, Deno.env')
+
+    expect(selectionSource).toContain("import 'jsr:@supabase/functions-js/edge-runtime.d.ts'")
+    expect(selectionSource).toContain("from 'npm:@supabase/supabase-js@2.110.2'")
+    expect(methodGuard).toBeGreaterThan(-1)
+    expect(methodGuard).toBeLessThan(auth)
+    expect(selectionSource).toContain(
+      "errorResponse(405, 'method_not_allowed', 'only POST is supported')",
+    )
+  })
+
+  it('authenticates before parsing JSON or creating the service-role repository', () => {
+    const auth = selectionSource.indexOf('handleAuthenticatedRequest(request, Deno.env')
+
+    expect(auth).toBeGreaterThan(-1)
+    expect(auth).toBeLessThan(selectionSource.indexOf('request.json()'))
+    expect(auth).toBeLessThan(selectionSource.indexOf('createSelectionRepository(Deno.env)'))
+    expect(selectionSource).toContain('parseSelectionRequest(await request.json())')
+    expect(selectionSource).toContain('createVideoAssetRepository({')
+    expect(selectionSource).toContain('await repository.selectCandidate(input)')
+  })
+
+  it('returns the validated run and resource IDs with the current selection ID', () => {
+    expect(selectionSource).toContain('runId: input.runId')
+    expect(selectionSource).toContain('providerResourceId: input.providerResourceId')
+    expect(selectionSource).toContain('selectionId: selection.selectionId')
+    expect(selectionSource).toContain('jsonResponse({')
+  })
+
+  it('uses only the service-role database path and has no model, provider, detail, or media-fetch path', () => {
+    const expectedNames = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY']
+    for (const name of expectedNames) {
+      expect(selectionSource).toContain(`requiredEnvironment(environment, '${name}')`)
+    }
+    expect(Array.from(
+      selectionSource.matchAll(/requiredEnvironment\(environment, '([^']+)'\)/g),
+      match => match[1],
+    )).toEqual(expectedNames)
+    expect(selectionSource).not.toContain('planner')
+    expect(selectionSource).not.toContain('gte-small')
+    expect(selectionSource).not.toContain('Vecteezy')
+    expect(selectionSource).not.toContain('detail')
+    expect(selectionSource.toLocaleLowerCase('en-US')).not.toContain('download')
+  })
+
+  it('keeps invalid input, candidate ownership, and database failures controlled', () => {
+    expect(selectionSource).toContain('if (error instanceof VideoAssetError)')
+    expect(selectionSource).toContain("errorResponse(400, 'invalid_request', 'invalid request')")
+    expect(selectionSource).toContain("errorResponse(404, 'candidate_not_found', 'candidate not found')")
+    expect(selectionSource).toContain("errorResponse(500, 'selection_failed', 'selection failed')")
+    expect(selectionSource).toContain("=== 'P0002'")
+    expect(selectionSource).toContain("name === 'select_video_asset'")
+    expect(selectionSource).toContain('isCandidateOwnershipError(result.error)')
+    expect(selectionSource).not.toContain('error.message')
+    expect(selectionSource).not.toContain('console.')
   })
 })

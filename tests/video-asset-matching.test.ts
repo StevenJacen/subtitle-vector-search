@@ -649,6 +649,16 @@ describe('video asset repository', () => {
     expect(JSON.stringify(rpc.mock.calls)).not.toContain('thumbnail.example')
   })
 
+  it('returns the RPC selection ID so a replacement keeps the current selection row', async () => {
+    const repo = createVideoAssetRepository({
+      from: vi.fn(),
+      rpc: vi.fn().mockResolvedValue({ data: [{ selection_id: 9 }], error: null }),
+    })
+
+    await expect(repo.selectCandidate({ runId, providerResourceId: 42, note: 'replacement' }))
+      .resolves.toEqual({ selectionId: 9 })
+  })
+
   it('hydrates persisted run rows and derives controlled failed-lane codes', async () => {
     const runQuery = query({ data: {
       id: runId,
