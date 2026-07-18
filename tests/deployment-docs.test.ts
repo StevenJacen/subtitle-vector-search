@@ -20,3 +20,13 @@ it('documents hosted deployment in migration-before-function order', () => {
   expect(readme).toContain('npx supabase db lint --linked --level warning')
   expect(readme).toContain('Remote deployment compilation is mandatory')
 })
+
+it('documents the server-side movie quote montage example', () => {
+  expect(readme).toContain('npx supabase functions deploy movie-quote-montage --no-verify-jwt')
+  expect(readme).toContain("'x-subtitle-token' = $env:SUBTITLE_PERSONAL_TOKEN")
+  expect(readme).toContain('"theme":"love and time"')
+  expect(readme).toContain('"quoteCount":8')
+  expect(readme).toContain('"matchThreshold":0.72')
+  expect(readme).toContain('"maxPerMovie":1')
+  expect(readme).toContain("new Supabase.ai.Session('gte-small')")
+})

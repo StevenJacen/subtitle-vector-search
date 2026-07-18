@@ -70,6 +70,7 @@ npx supabase db push
 npx supabase secrets set SUBTITLE_PERSONAL_TOKEN=<random-secret>
 npx supabase functions deploy ingest-subtitles --no-verify-jwt
 npx supabase functions deploy search-subtitles --no-verify-jwt
+npx supabase functions deploy movie-quote-montage --no-verify-jwt
 npx tsx src/cli.ts import <authorized-file.srt> --title "The Shawshank Redemption" --year 1994 --imdb tt0111161 --source manual
 npx tsx src/cli.ts search "hope during hard times"
 ```
@@ -84,6 +85,24 @@ npx supabase db lint --linked --level warning
 ```
 
 The schema and Edge Functions are deployed to the project above. Deployment does not import subtitle content; import only English subtitle files you are authorized to retain and use.
+
+## Movie Quote Montage
+
+`movie-quote-montage` accepts an English theme and returns a deterministic montage of exact stored subtitle chunks. It limits how many chunks can come from one movie, so a single title does not dominate the result. The `copy` field joins the selected chunks with blank lines; it is retrieved dialogue, not newly generated prose.
+
+The Edge Function generates the query vector inside Supabase with `new Supabase.ai.Session('gte-small')`, using the same normalized 384-dimensional model as the stored chunks. No external embedding API is required.
+
+After pushing the migration and deploying the function, test a theme such as `love and time` with the existing private token:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri https://kwoppqigrtvgmmbnzbpx.supabase.co/functions/v1/movie-quote-montage `
+  -Headers @{ 'x-subtitle-token' = $env:SUBTITLE_PERSONAL_TOKEN } `
+  -ContentType 'application/json' `
+  -Body '{"theme":"love and time","quoteCount":8,"matchThreshold":0.72,"maxPerMovie":1}'
+```
+
+The response includes `copy` plus source metadata for every selected chunk: movie title, release year, timestamps, chunk indexes, and similarity score. Raise `matchThreshold` for stricter matches or lower it when the result set is empty.
 
 The CLI can also retrieve a subtitle through the official OpenSubtitles API when your credentials and rights permit it:
 
