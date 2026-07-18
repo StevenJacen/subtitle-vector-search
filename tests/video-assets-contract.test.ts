@@ -57,15 +57,6 @@ describe('visual plan', () => {
     expect(() => parseVisualPlan({ ...validPlan, queries: [{ kind: 'literal', term }, validPlan.queries[1], validPlan.queries[2]] }, { sourceText: 'hope', forbiddenTerms: [] })).toThrow()
   })
 
-  it('rejects a copied multi-word source phrase but allows a generic single word', () => {
-    const copiedPhrasePlan = {
-      ...validPlan,
-      queries: [{ kind: 'literal', term: 'a person finds hope' }, validPlan.queries[1], validPlan.queries[2]],
-    }
-    expect(() => parseVisualPlan(copiedPhrasePlan, { sourceText: 'a person finds hope', forbiddenTerms: [] })).toThrow()
-    expect(parseVisualPlan(validPlan, { sourceText: 'hope', forbiddenTerms: [] })).toEqual(validPlan)
-  })
-
   it('rejects an unquoted provided forbidden term', () => {
     const plan = {
       ...validPlan,

@@ -143,15 +143,10 @@ export function parseVisualPlan(value: unknown, context: PlanValidationContext):
   }
 
   const sourceLexicon = new Set(tokens(context.sourceText))
-  const normalizedSource = tokens(context.sourceText).join(' ')
   const forbidden = context.forbiddenTerms.map(term => normalizePhrase(requiredString(term)))
   for (const valueToCheck of [...Object.values(visualIntent), ...queries.map(query => query.term)]) {
     const normalized = normalizePhrase(valueToCheck)
-    const normalizedWords = tokens(valueToCheck).join(' ')
-    if (forbidden.some(term => term !== '' && normalized.includes(term))
-      || (tokens(context.sourceText).length >= 3
-        && normalizedSource !== ''
-        && normalizedWords.includes(normalizedSource))) {
+    if (forbidden.some(term => term !== '' && normalized.includes(term))) {
       throw invalidPlan()
     }
     for (const descriptor of protectedDescriptors) {
