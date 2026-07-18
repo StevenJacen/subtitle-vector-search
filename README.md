@@ -43,7 +43,7 @@ VIDEO_PLANNER_TRANSPORT=supabase-ai
 OLLAMA_GATEWAY_SECURITY_CONFIRMED=true
 ```
 
-Before enabling hosted inference, an unauthenticated `GET /api/tags` must return HTTP 401 or 403 from `AI_INFERENCE_API_HOST`. A public response means the gateway is not ready: keep hosted inference disabled and fix its authentication. Never bypass this gate.
+Before enabling hosted inference, an unauthenticated `GET /api/tags` must return HTTP 401 or 403 from `AI_INFERENCE_API_HOST`. A public response means the gateway is not ready: keep hosted inference disabled and fix its authentication. Never bypass this gate for production.
 
 The `supabase-ai` transport instantiates `Supabase.ai.Session('gemma4:12b')`
 directly; this code path does not itself read `AI_INFERENCE_API_HOST` or
@@ -59,6 +59,19 @@ endpoint. The `ollama-http` transport explicitly consumes
 VIDEO_PLANNER_TRANSPORT=ollama-http
 OLLAMA_AUTH_TOKEN=<bearer-token>
 ```
+
+For an internal test gateway with explicit approval for unauthenticated calls,
+omit `OLLAMA_AUTH_TOKEN` and set this server-only exception:
+
+```dotenv
+VIDEO_PLANNER_TRANSPORT=ollama-http
+OLLAMA_ALLOW_UNAUTHENTICATED_TEST_GATEWAY=true
+```
+
+Never enable this test exception in production or for a publicly accessible
+Ollama service. It only controls whether the direct transport sends a Bearer
+header; all normal request authentication and response sanitization remain in
+place.
 
 ## Local Testing
 

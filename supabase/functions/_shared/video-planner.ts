@@ -113,7 +113,12 @@ export function createPlannerTransport(
     const host = required(environment, 'AI_INFERENCE_API_HOST')
     const token = required(environment, 'OLLAMA_AUTH_TOKEN')
     const model = required(environment, 'OLLAMA_MODEL')
-    if (host === undefined || token === undefined || model !== 'gemma4:12b') {
+    const allowUnauthenticatedTestGateway = environment.get(
+      'OLLAMA_ALLOW_UNAUTHENTICATED_TEST_GATEWAY',
+    ) === 'true'
+    if (host === undefined
+      || model !== 'gemma4:12b'
+      || (token === undefined && !allowUnauthenticatedTestGateway)) {
       throw configurationError()
     }
     let endpoint: string
@@ -129,7 +134,7 @@ export function createPlannerTransport(
         const response = await request(endpoint, {
           method: 'POST',
           headers: {
-            authorization: `Bearer ${token}`,
+            ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
             'content-type': 'application/json',
           },
           body: JSON.stringify({

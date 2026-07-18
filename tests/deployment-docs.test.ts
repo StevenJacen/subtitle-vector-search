@@ -70,7 +70,7 @@ it('documents the isolated Supabase RRF experiment', () => {
   expect(readme).toContain('rrf_k = 50')
 })
 
-it('documents the unproven hosted planner compatibility and strict gateway gate', () => {
+it('documents hosted planner transports and the explicit internal test exception', () => {
   const configuration = sectionBetween(
     '### Video Candidate Matching Configuration',
     '## Local Testing',
@@ -84,6 +84,7 @@ it('documents the unproven hosted planner compatibility and strict gateway gate'
   expect(configuration).toContain('OLLAMA_GATEWAY_SECURITY_CONFIRMED=true')
   expect(configuration).toContain('VIDEO_PLANNER_TRANSPORT=ollama-http')
   expect(configuration).toContain('OLLAMA_AUTH_TOKEN=<bearer-token>')
+  expect(configuration).toContain('OLLAMA_ALLOW_UNAUTHENTICATED_TEST_GATEWAY=true')
   expect(configuration).toContain("Supabase.ai.Session('gemma4:12b')")
   expect(configuration).toMatch(
     /hosted compatibility\s+with\s+`AI_INFERENCE_API_HOST`\s+is\s+not\s+yet proven/i,
@@ -93,6 +94,8 @@ it('documents the unproven hosted planner compatibility and strict gateway gate'
   )
   expect(configuration).toMatch(/unauthenticated `GET \/api\/tags` must return HTTP (401 or 403|401\/403)/)
   expect(configuration).toMatch(/`ollama-http`[^.]+`AI_INFERENCE_API_HOST`[^.]+`OLLAMA_AUTH_TOKEN`[^.]+`OLLAMA_MODEL`/)
+  expect(configuration).toMatch(/internal test[^.]+explicit[^.]+unauthenticated/i)
+  expect(configuration).toMatch(/never enable[^.]+production/i)
   expect(configuration).not.toContain('supabase-ai` transport uses the configured authenticated gateway')
 })
 

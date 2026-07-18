@@ -300,6 +300,22 @@ describe('planner transports', () => {
     })
   })
 
+  it('allows an explicitly approved unauthenticated internal test gateway', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      message: { content: 'structured output' },
+    }), { status: 200 }))
+    const generate = createPlannerTransport(environment({
+      VIDEO_PLANNER_TRANSPORT: 'ollama-http',
+      AI_INFERENCE_API_HOST: 'https://internal-ollama.example/base',
+      OLLAMA_MODEL: 'gemma4:12b',
+      OLLAMA_ALLOW_UNAUTHENTICATED_TEST_GATEWAY: 'true',
+    }), { fetch })
+
+    await expect(generate('planner prompt')).resolves.toBe('structured output')
+    const [, init] = fetch.mock.calls[0] as [string, RequestInit]
+    expect(init.headers).toEqual({ 'content-type': 'application/json' })
+  })
+
   it('sanitizes prompt and provider response details from transport errors', async () => {
     const prompt = 'SECRET PROMPT BODY'
     const providerBody = 'SECRET PROVIDER BODY'
