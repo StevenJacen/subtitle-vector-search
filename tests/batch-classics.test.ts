@@ -96,4 +96,27 @@ describe('batch classics importer', () => {
     expect(context.dependencies.downloadMovie).toHaveBeenCalledTimes(1)
     expect(context.dependencies.importMovie).not.toHaveBeenCalled()
   })
+
+  it('stops cleanly without marking a movie failed when subtitle API auth is invalid', async () => {
+    const context = deps({
+      exists: vi.fn((path: string) => path.endsWith('.srt')),
+      importMovie: vi.fn(async () => {
+        throw new Error('invalid subtitle token')
+      }),
+    })
+
+    const state = await runBatchImport({
+      candidatesPath: 'candidates.json',
+      statePath: '.batch-state/state.json',
+      downloadsDir: 'downloads/classics',
+      targetSuccessCount: 2,
+      maxAttempts: 2,
+      dryRun: false,
+    }, context.dependencies)
+
+    expect(state.successes).toEqual([])
+    expect(state.failures).toEqual([])
+    expect(context.dependencies.downloadMovie).not.toHaveBeenCalled()
+    expect(context.dependencies.importMovie).toHaveBeenCalledTimes(1)
+  })
 })

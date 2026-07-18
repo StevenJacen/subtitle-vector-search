@@ -100,8 +100,8 @@ export async function runBatchImport(
       try {
         await deps.downloadMovie(candidate, file)
       } catch (error) {
-        if (isQuotaLimitError(error)) {
-          deps.output('OpenSubtitles quota limit reached; stop and rerun later to resume.\n')
+        if (isQuotaLimitError(error) || isConfigurationStopError(error)) {
+          deps.output(`${stopMessage(error)} Rerun later to resume.\n`)
           return state
         }
         recordFailure(state, candidate, 'download', summarizeError(error), deps.now())
@@ -114,8 +114,8 @@ export async function runBatchImport(
     try {
       await deps.importMovie(candidate, file)
     } catch (error) {
-      if (isQuotaLimitError(error)) {
-        deps.output('Ingestion stopped after provider quota limit; rerun later to resume.\n')
+      if (isQuotaLimitError(error) || isConfigurationStopError(error)) {
+        deps.output(`${stopMessage(error)} Rerun later to resume.\n`)
         return state
       }
       recordFailure(state, candidate, 'import', summarizeError(error), deps.now())
@@ -218,6 +218,17 @@ function summarizeError(error: unknown): string {
 
 function isQuotaLimitError(error: unknown): boolean {
   return /429|rate.?limited|quota|download limit|daily limit/i.test(summarizeError(error))
+}
+
+function isConfigurationStopError(error: unknown): boolean {
+  return /invalid subtitle token|unauthorized|forbidden|missing environment variable/i.test(summarizeError(error))
+}
+
+function stopMessage(error: unknown): string {
+  if (isQuotaLimitError(error)) {
+    return 'Provider quota limit reached; stop cleanly.'
+  }
+  return 'Configuration or authentication error reached; stop cleanly.'
 }
 
 function slugify(title: string): string {
