@@ -1,3 +1,5 @@
+import { VISUAL_CONCEPT_SEEDS } from './visual-concept-seeds.ts'
+
 export type QueryKind = 'literal' | 'action' | 'metaphor'
 export type VideoAssetProvider = 'vecteezy'
 export type VideoAssetRunStatus = 'planning' | 'completed' | 'degraded' | 'failed'
@@ -92,16 +94,17 @@ const humanTerms = new Set([
   'person', 'people', 'customer', 'worker', 'traveler', 'athlete', 'adult', 'parent',
   'friend', 'friends', 'couple', 'family', 'boy', 'girl', 'man', 'woman', 'child', 'kid',
 ])
-const ordinaryStockTerms = new Set([
-  'a', 'an', 'the', 'aerial', 'cinematic', 'city', 'close', 'forest', 'golden',
-  'hour', 'lighting', 'macro', 'medium', 'motion', 'natural', 'person', 'people',
-  'shot', 'skyline', 'slow', 'through', 'time', 'video', 'walking', 'wide',
-])
 const protectedIdentifiers = [
   'nike', 'adidas', 'coca cola', 'disney', 'marvel', 'pixar', 'netflix',
   'star wars', 'harry potter', 'lord of the rings', 'pokemon', 'batman', 'superman',
 ]
+const compoundTokens: Array<{ parts: string[]; token: string }> = [
+  { parts: ['re', 'enact'], token: 'reenact' },
+  { parts: ['re', 'create'], token: 'recreate' },
+  { parts: ['non', 'binary'], token: 'nonbinary' },
+]
 const protectedIdentifierTokens = protectedIdentifiers.map(identifier => tokens(identifier))
+const protectedIdentifierCompacts = protectedIdentifierTokens.map(identifier => identifier.join(''))
 const protectedReferenceTokens = [
   'inspired by', 'in the style of', 'based on', 'as seen in', 'reference to', 'homage to',
 ].map(reference => tokens(reference))
@@ -115,11 +118,29 @@ const descriptorCanonicalForms: Record<string, string> = {
   teenagers: 'teenager', adolescents: 'adolescent', boys: 'boy', girls: 'girl',
   men: 'man', women: 'woman', males: 'male', females: 'female', asians: 'asian',
   latinos: 'latino', latinas: 'latina', hispanics: 'hispanic', arabs: 'arab',
+  lesbians: 'lesbian', gays: 'gay', bisexuals: 'bisexual', nonbinaries: 'nonbinary',
   veterans: 'veteran', muslims: 'muslim', christians: 'christian', jews: 'jewish',
   hindus: 'hindu', immigrants: 'immigrant', people: 'person', persons: 'person',
   customers: 'customer', workers: 'worker', travelers: 'traveler', athletes: 'athlete',
   parents: 'parent', families: 'family', friends: 'friend', adults: 'adult',
 }
+const genericVisualBaseTerms = [
+  'a', 'an', 'the', 'and', 'or', 'of', 'in', 'on', 'at', 'by', 'for', 'from',
+  'into', 'through', 'with', 'without', 'toward', 'towards', 'over', 'under',
+  'after', 'before', 'near', 'beside', 'across', 'up', 'down', 'while',
+  'scene', 'video', 'footage', 'cinematic', 'natural', 'lighting', 'shot', 'view',
+  'close', 'wide', 'medium', 'aerial', 'macro', 'slow', 'motion', 'time', 'lapse',
+  'symbolic', 'expressing', 'everyday', 'environment', 'marvelous',
+]
+const safeVisualTerms = new Set([
+  ...genericVisualBaseTerms,
+  ...VISUAL_CONCEPT_SEEDS.flatMap(seed => [
+    seed.description,
+    seed.literalQuery,
+    seed.actionQuery,
+    seed.metaphorQuery,
+  ]).flatMap(canonicalTokens),
+])
 
 export function parseVideoAssetRequest(value: unknown): VideoAssetRequest {
   const input = object(value)
@@ -190,10 +211,10 @@ export function parseVisualPlan(value: unknown, context: PlanValidationContext):
   const forbidden = context.forbiddenTerms.map(term => tokens(requiredString(term)))
   for (const valueToCheck of [...Object.values(visualIntent), ...queries.map(query => query.term)]) {
     const valueTokens = tokens(valueToCheck)
-    if (forbidden.some(term => containsTokenSequence(valueTokens, term))) {
+    if (forbidden.some(term => containsProtectedPhrase(valueTokens, term))) {
       throw invalidPlan()
     }
-    if (protectedIdentifierTokens.some(identifier => containsTokenSequence(valueTokens, identifier))
+    if (containsProtectedIdentifier(valueTokens)
       || hasProtectedReference(valueToCheck, valueTokens)
       || hasUngroundedProperName(valueToCheck, groundingLexicon)
       || hasUngroundedProtectedDescriptor(valueToCheck, groundingLexicon)) {
@@ -285,7 +306,10 @@ function isValidContext(value: PlanValidationContext): boolean {
 }
 
 function tokens(value: string): string[] {
-  return normalizePhrase(value).match(/[a-z0-9]+/g) ?? []
+  const separated = value
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+  return mergeCompounds(separated.toLocaleLowerCase('en-US').match(/[a-z0-9]+/g) ?? [])
 }
 
 function canonicalTokens(value: string): string[] {
@@ -295,6 +319,33 @@ function canonicalTokens(value: string): string[] {
 function containsTokenSequence(haystack: string[], needle: string[]): boolean {
   if (needle.length === 0 || needle.length > haystack.length) return false
   return haystack.some((_, index) => needle.every((token, offset) => haystack[index + offset] === token))
+}
+
+function containsProtectedPhrase(valueTokens: string[], phraseTokens: string[]): boolean {
+  return containsTokenSequence(valueTokens, phraseTokens)
+    || (phraseTokens.length > 1 && valueTokens.includes(phraseTokens.join('')))
+}
+
+function containsProtectedIdentifier(valueTokens: string[]): boolean {
+  return protectedIdentifierTokens.some(identifier => containsTokenSequence(valueTokens, identifier))
+    || protectedIdentifierCompacts.some(compact => valueTokens.includes(compact))
+}
+
+function mergeCompounds(valueTokens: string[]): string[] {
+  const result: string[] = []
+  for (let index = 0; index < valueTokens.length;) {
+    const compound = compoundTokens.find(candidate => (
+      candidate.parts.every((part, offset) => valueTokens[index + offset] === part)
+    ))
+    if (compound === undefined) {
+      result.push(valueTokens[index])
+      index += 1
+    } else {
+      result.push(compound.token)
+      index += compound.parts.length
+    }
+  }
+  return result
 }
 
 function hasProtectedReference(value: string, valueTokens: string[]): boolean {
@@ -318,16 +369,15 @@ function hasUngroundedProtectedDescriptor(value: string, sourceLexicon: Set<stri
 }
 
 function hasUngroundedProperName(value: string, sourceLexicon: Set<string>): boolean {
-  const words = value.match(/[A-Za-z][A-Za-z0-9-]*/g) ?? []
+  const words = value
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .match(/[A-Za-z][A-Za-z0-9]*/g) ?? []
   return words.some(word => {
-    if (!/^[A-Z][a-z]+$/.test(word)) return false
+    if (!/^[A-Z][a-z]+$/.test(word) && !/^[A-Z]{2,}$/.test(word)) return false
     const normalized = descriptorCanonicalForms[word.toLowerCase()] ?? word.toLowerCase()
-    return !sourceLexicon.has(normalized) && !ordinaryStockTerms.has(normalized)
+    return !sourceLexicon.has(normalized) && !safeVisualTerms.has(normalized)
   })
-}
-
-function normalizePhrase(value: string): string {
-  return value.trim().toLocaleLowerCase('en-US').replace(/\s+/g, ' ')
 }
 
 function invalidRequest(): VideoAssetError {

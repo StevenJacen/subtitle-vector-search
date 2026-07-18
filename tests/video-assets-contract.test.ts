@@ -4,6 +4,7 @@ import {
   parseVideoAssetRequest,
   parseVisualPlan,
 } from '../supabase/functions/_shared/video-assets.js'
+import { VISUAL_CONCEPT_SEEDS } from '../supabase/functions/_shared/visual-concept-seeds.js'
 
 const validPlan = {
   visualIntent: {
@@ -72,9 +73,16 @@ describe('visual plan', () => {
     'customer wearing nike-branded shoes in a quiet room',
     'recreating a harry-potter scene at sunrise',
     'recreating a harry.potter scene at sunrise',
+    'HarryPotter sunrise landscape video',
+    'harrypotter sunrise landscape video',
     'recreate this famous scene at sunrise',
+    're-enact this famous scene at sunrise',
+    'non-binary person opening curtains at sunrise',
+    'lesbians opening curtains at sunrise',
     'women opening curtains at sunrise',
     'Taylor opening curtains at sunrise',
+    'TAYLOR opening curtains at sunrise',
+    'Taylor-Swift opening curtains at sunrise',
     'superhero inspired by marvel cinematic scene',
     'person in the style of Acme Hero',
     'quiet room with Acme Hero watching sunrise',
@@ -137,6 +145,46 @@ describe('visual plan', () => {
 
     expect(parseVisualPlan(candidate, { sourceText: 'A journey brings hope.', forbiddenTerms: [] }))
       .toEqual(candidate)
+  })
+
+  it.each([
+    'Person Opening Curtains At Sunrise Video',
+    'Opening curtains at sunrise video',
+    'Hands Turning Pages Of Worn Photo Album Video',
+    'Marvelous sunrise over quiet landscape video',
+  ])('allows routine stock-search language without protected substrings: %s', term => {
+    const candidate = {
+      ...validPlan,
+      queries: [{ kind: 'literal', term }, validPlan.queries[1], validPlan.queries[2]],
+    }
+
+    expect(parseVisualPlan(candidate, { sourceText: 'A visual moment of hope.', forbiddenTerms: [] }))
+      .toEqual(candidate)
+  })
+
+  it('allows title-cased stock language derived from every built-in visual concept seed', () => {
+    const titleCase = (value: string) => value.replace(/\b[a-z]/g, letter => letter.toUpperCase())
+
+    for (const seed of VISUAL_CONCEPT_SEEDS) {
+      const candidate = {
+        visualIntent: {
+          subject: 'A Symbolic Scene',
+          action: 'Expressing Change',
+          setting: 'An Everyday Environment',
+          mood: 'Reflective',
+          lighting: 'Natural Cinematic Lighting',
+          shot: 'Medium Cinematic Shot',
+        },
+        queries: [
+          { kind: 'literal', term: titleCase(seed.literalQuery) },
+          { kind: 'action', term: titleCase(seed.actionQuery) },
+          { kind: 'metaphor', term: titleCase(seed.metaphorQuery) },
+        ],
+      }
+
+      expect(parseVisualPlan(candidate, { sourceText: seed.description, forbiddenTerms: [] }))
+        .toEqual(candidate)
+    }
   })
 
   it.each([
