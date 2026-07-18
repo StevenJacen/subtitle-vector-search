@@ -48,9 +48,10 @@ The design is based on live, read-only probes made before implementation:
   descriptions were useful, but it emitted two metaphor queries and omitted the
   required literal query. Strict output validation and one repair attempt are
   therefore required.
-- Vecteezy video search returns stable resource IDs, titles, content type,
-  license type, AI-generated flags, tags, orientation, available file types,
-  available download sizes, and temporary preview/thumbnail URLs.
+- Vecteezy video search returns stable resource IDs, nullable titles, content
+  type, AI-generated flags, tags, available file types, available download
+  sizes, and temporary preview/thumbnail URLs. The read-only resource-detail
+  endpoint additionally returns license type and orientation.
 - The tested account did not consistently receive duration or source dimensions.
   Those fields must remain optional and must not drive ranking in this phase.
 - The account currently has a 500-download monthly allowance. Search is
@@ -215,6 +216,12 @@ Sort by fused score descending, then best individual rank ascending, then
 resource ID ascending for deterministic ties. Retain the requested 5-10
 candidates.
 
+After fusion, enrich only the retained 5-10 candidates through Vecteezy's
+read-only `GET /v2/{account_id}/resources/{id}` endpoint, with at most four
+concurrent detail calls. This supplies license type and orientation without
+calling any download route. A failed detail request leaves those optional fields
+null and does not discard a candidate that was returned by search.
+
 The response may contain fresh preview URLs for manual review. Preview and
 thumbnail URLs are temporary provider data and must not be stored in Postgres.
 
@@ -307,7 +314,7 @@ but are excluded from the idempotency index so a later request can retry.
 - `run_id uuid not null references public.video_search_runs(id) on delete cascade`
 - `provider text not null default 'vecteezy'`
 - `provider_resource_id bigint not null`
-- `title text not null`
+- `title text null`
 - `content_type text not null`
 - `license_type text null`
 - `ai_generated boolean null`
@@ -386,8 +393,8 @@ A successful `match-video-assets` response has this shape:
       "licenseType": "commercial",
       "aiGenerated": false,
       "orientation": "horizontal",
-      "fileTypes": [{ "extension": "mp4", "size": 12345678 }],
-      "downloadSizes": [{ "id": 42, "width": 1920, "height": 1080 }],
+      "fileTypes": [{ "extension": "mp4", "sizeInBytes": 12345678 }],
+      "downloadSizes": [{ "id": "42", "width": 1920, "height": 1080 }],
       "score": 0.0214,
       "bestRank": 1,
       "matchedBy": ["literal", "action"],
@@ -411,6 +418,9 @@ The example URL is illustrative and is never a persisted value.
 - Give each Vecteezy lane a 10-second timeout. Two or three successful lanes may
   return a `degraded` or `completed` run; fewer than two successful lanes fail
   the run with `502`.
+- Detail enrichment has a separate 10-second timeout per retained candidate and
+  a concurrency limit of four. Detail failure leaves optional metadata null and
+  does not change a successful lane into a failed lane.
 - Never expose provider response bodies, database errors, model prompts, secret
   values, or internal stack traces to the caller.
 - Logs may contain run IDs, timings, result counts, and controlled error codes,
