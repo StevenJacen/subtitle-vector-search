@@ -45,8 +45,33 @@ describe('visual plan', () => {
   it('rejects duplicate kinds, quoted dialogue, source movie titles, and invented traits', () => {
     expect(() => parseVisualPlan({ ...validPlan, queries: [validPlan.queries[1], validPlan.queries[1], validPlan.queries[2]] }, { sourceText: 'hope', forbiddenTerms: [] })).toThrow()
     expect(() => parseVisualPlan({ ...validPlan, queries: [{ kind: 'literal', term: '"We begin again" film clip' }, validPlan.queries[1], validPlan.queries[2]] }, { sourceText: 'hope', forbiddenTerms: [] })).toThrow()
-    expect(() => parseVisualPlan({ ...validPlan, queries: [{ kind: 'literal', term: 'The Synthetic Movie sunrise scene' }, validPlan.queries[1], validPlan.queries[2]] }, { sourceText: 'hope', forbiddenTerms: ['The Synthetic Movie'] })).toThrow()
+    expect(() => parseVisualPlan({ ...validPlan, queries: [{ kind: 'literal', term: 'The Synthetic Movie sunrise scene' }, validPlan.queries[1], validPlan.queries[2]] }, { sourceText: 'hope', forbiddenTerms: ['the synthetic movie'] })).toThrow()
     expect(() => parseVisualPlan({ ...validPlan, queries: [{ kind: 'literal', term: 'young woman opening curtains' }, validPlan.queries[1], validPlan.queries[2]] }, { sourceText: 'a person finds hope', forbiddenTerms: [] })).toThrow()
+  })
+
+  it.each([
+    'person walking sunrise video 你好',
+    '12345',
+    '!!!',
+  ])('rejects query terms that are not printable ASCII English: %s', term => {
+    expect(() => parseVisualPlan({ ...validPlan, queries: [{ kind: 'literal', term }, validPlan.queries[1], validPlan.queries[2]] }, { sourceText: 'hope', forbiddenTerms: [] })).toThrow()
+  })
+
+  it('rejects a copied multi-word source phrase but allows a generic single word', () => {
+    const copiedPhrasePlan = {
+      ...validPlan,
+      queries: [{ kind: 'literal', term: 'a person finds hope' }, validPlan.queries[1], validPlan.queries[2]],
+    }
+    expect(() => parseVisualPlan(copiedPhrasePlan, { sourceText: 'a person finds hope', forbiddenTerms: [] })).toThrow()
+    expect(parseVisualPlan(validPlan, { sourceText: 'hope', forbiddenTerms: [] })).toEqual(validPlan)
+  })
+
+  it('rejects an unquoted provided forbidden term', () => {
+    const plan = {
+      ...validPlan,
+      queries: [{ kind: 'literal', term: 'Synthetic Night Walk sunrise scene' }, validPlan.queries[1], validPlan.queries[2]],
+    }
+    expect(() => parseVisualPlan(plan, { sourceText: 'hope', forbiddenTerms: ['synthetic night walk'] })).toThrow()
   })
 })
 

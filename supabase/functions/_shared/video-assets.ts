@@ -128,7 +128,10 @@ export function parseVisualPlan(value: unknown, context: PlanValidationContext):
       throw invalidPlan()
     }
     const term = requiredString(query.term)
-    if (Array.from(term).length > 180 || /["'“”‘’]/u.test(term)) {
+    if (Array.from(term).length > 180
+      || /["'“”‘’]/u.test(term)
+      || !/^[\x20-\x7E]+$/.test(term)
+      || !/[A-Za-z]/.test(term)) {
       throw invalidPlan()
     }
     return { kind: kind as QueryKind, term }
@@ -140,10 +143,15 @@ export function parseVisualPlan(value: unknown, context: PlanValidationContext):
   }
 
   const sourceLexicon = new Set(tokens(context.sourceText))
+  const normalizedSource = tokens(context.sourceText).join(' ')
   const forbidden = context.forbiddenTerms.map(term => normalizePhrase(requiredString(term)))
   for (const valueToCheck of [...Object.values(visualIntent), ...queries.map(query => query.term)]) {
     const normalized = normalizePhrase(valueToCheck)
-    if (forbidden.some(term => term !== '' && normalized.includes(term))) {
+    const normalizedWords = tokens(valueToCheck).join(' ')
+    if (forbidden.some(term => term !== '' && normalized.includes(term))
+      || (tokens(context.sourceText).length >= 3
+        && normalizedSource !== ''
+        && normalizedWords.includes(normalizedSource))) {
       throw invalidPlan()
     }
     for (const descriptor of protectedDescriptors) {
