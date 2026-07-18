@@ -30,3 +30,15 @@ it('documents the server-side movie quote montage example', () => {
   expect(readme).toContain('"maxPerMovie":1')
   expect(readme).toContain("new Supabase.ai.Session('gte-small')")
 })
+
+it('documents the isolated Supabase RRF experiment', () => {
+  expect(readme).toContain('npx supabase functions deploy hybrid-subtitle-search --no-verify-jwt')
+  expect(readme).toContain('/functions/v1/hybrid-subtitle-search')
+  expect(readme).toContain('"query":"love and time","limit":12')
+  expect(readme).toContain('rrfScore')
+  expect(readme).toContain('semanticRank')
+  expect(readme).toContain('fullTextRank')
+  expect(readme).toContain('full_text_weight = 1')
+  expect(readme).toContain('semantic_weight = 2')
+  expect(readme).toContain('rrf_k = 50')
+})

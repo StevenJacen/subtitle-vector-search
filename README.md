@@ -71,6 +71,7 @@ npx supabase secrets set SUBTITLE_PERSONAL_TOKEN=<random-secret>
 npx supabase functions deploy ingest-subtitles --no-verify-jwt
 npx supabase functions deploy search-subtitles --no-verify-jwt
 npx supabase functions deploy movie-quote-montage --no-verify-jwt
+npx supabase functions deploy hybrid-subtitle-search --no-verify-jwt
 npx tsx src/cli.ts import <authorized-file.srt> --title "The Shawshank Redemption" --year 1994 --imdb tt0111161 --source manual
 npx tsx src/cli.ts search "hope during hard times"
 ```
@@ -103,6 +104,56 @@ Invoke-RestMethod -Method Post `
 ```
 
 The response includes `copy` plus source metadata for every selected chunk: movie title, release year, timestamps, chunk indexes, and similarity score. Raise `matchThreshold` for stricter matches or lower it when the result set is empty.
+
+## Hybrid RRF Experiment
+
+`hybrid-subtitle-search` is an isolated all-Supabase experiment based on the
+official Supabase hybrid-search pattern. PostgreSQL retrieves one candidate list
+with English full-text search and another with the existing `gte-small` cosine
+vectors, then combines their ranks with Reciprocal Rank Fusion (RRF). The
+existing `search-subtitles` endpoint remains unchanged as the vector-only
+baseline.
+
+The initial experiment fixes these RPC controls:
+
+```text
+full_text_weight = 1
+semantic_weight = 2
+rrf_k = 50
+```
+
+The higher semantic weight prevents short literal phrases from overwhelming
+strong thematic matches. These values are experimental and should be changed
+only after comparing returned dialogue.
+
+After pushing the migration and deploying `hybrid-subtitle-search`, call both
+endpoints with the same private token and request body:
+
+```powershell
+$body = '{"query":"love and time","limit":12}'
+$vector = Invoke-RestMethod -Method Post `
+  -Uri https://kwoppqigrtvgmmbnzbpx.supabase.co/functions/v1/search-subtitles `
+  -Headers @{ 'x-subtitle-token' = $env:SUBTITLE_PERSONAL_TOKEN } `
+  -ContentType 'application/json' `
+  -Body $body
+$hybrid = Invoke-RestMethod -Method Post `
+  -Uri https://kwoppqigrtvgmmbnzbpx.supabase.co/functions/v1/hybrid-subtitle-search `
+  -Headers @{ 'x-subtitle-token' = $env:SUBTITLE_PERSONAL_TOKEN } `
+  -ContentType 'application/json' `
+  -Body $body
+```
+
+Hybrid results include the normal `similarity`, source, timestamps, text, and
+cues plus three diagnostics. `rrfScore` is the final fused score;
+`semanticRank` is the candidate's vector rank; and `fullTextRank` is its keyword
+rank. Either rank can be `null` when the candidate appeared in only one of the
+two bounded candidate lists.
+
+The experiment is independently reversible. Stop calling or delete the
+`hybrid-subtitle-search` deployment, then use a reviewed follow-up migration to
+drop `public.hybrid_match_subtitle_chunks`, `subtitle_chunks_fts_gin_idx`, and
+`public.subtitle_chunks.fts`. Do not run ad-hoc destructive SQL as part of the
+normal deployment workflow. `search-subtitles` remains available throughout.
 
 The CLI can also retrieve a subtitle through the official OpenSubtitles API when your credentials and rights permit it:
 
