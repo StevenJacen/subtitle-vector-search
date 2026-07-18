@@ -118,8 +118,9 @@ it('scopes migration and authenticated requests to the video candidate workflow'
 it('documents private candidate records and synthetic examples in its own section', () => {
   const workflow = sectionBetween('## Video Candidate Matching', '## Movie Quote Montage')
   const matchExample = requestExample(workflow, 'match-video-assets')
+  const approvedSyntheticBody = '{"theme":"a fresh start after uncertainty","candidateCount":8}'
 
-  expect(matchExample).toMatch(/-Body\s+'\{[^']*"theme"[^']*"candidateCount"[^']*\}'/)
+  expect(matchExample).toContain(`-Body '${approvedSyntheticBody}'`)
   expect(matchExample).not.toMatch(/"(?:text|subtitleChunkId)"\s*:/)
   expect(workflow).toContain('inclusive range 5-10')
   expect(workflow).toContain('`literal`, `action`, and `metaphor`')
