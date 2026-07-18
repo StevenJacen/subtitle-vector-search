@@ -1,5 +1,3 @@
-import { VISUAL_CONCEPT_SEEDS } from './visual-concept-seeds.ts'
-
 export type QueryKind = 'literal' | 'action' | 'metaphor'
 export type VideoAssetProvider = 'vecteezy'
 export type VideoAssetRunStatus = 'planning' | 'completed' | 'degraded' | 'failed'
@@ -85,10 +83,10 @@ const protectedDescriptors = new Set([
   'boy', 'girl', 'man', 'woman', 'male', 'female', 'nonbinary', 'transgender',
   'asian', 'latino', 'latina', 'hispanic', 'indigenous', 'arab',
   'disabled', 'autistic', 'wheelchair', 'pregnant', 'gay', 'lesbian', 'bisexual',
-  'muslim', 'christian', 'jewish', 'hindu', 'immigrant',
+  'muslim', 'christian', 'jewish', 'hindu', 'immigrant', 'veteran',
 ])
 const ambiguousProtectedDescriptors = new Set([
-  'young', 'old', 'senior', 'black', 'white', 'blind', 'deaf', 'veteran',
+  'young', 'old', 'senior', 'black', 'white', 'blind', 'deaf',
 ])
 const humanTerms = new Set([
   'person', 'people', 'customer', 'worker', 'traveler', 'athlete', 'adult', 'parent',
@@ -97,14 +95,13 @@ const humanTerms = new Set([
 const protectedIdentifiers = [
   'nike', 'adidas', 'coca cola', 'disney', 'marvel', 'pixar', 'netflix',
   'star wars', 'harry potter', 'lord of the rings', 'pokemon', 'batman', 'superman',
-]
-const compoundTokens: Array<{ parts: string[]; token: string }> = [
-  { parts: ['re', 'enact'], token: 'reenact' },
-  { parts: ['re', 'create'], token: 'recreate' },
-  { parts: ['non', 'binary'], token: 'nonbinary' },
+  'taylor', 'taylor swift', 'gandalf',
 ]
 const protectedIdentifierTokens = protectedIdentifiers.map(identifier => tokens(identifier))
 const protectedIdentifierCompacts = protectedIdentifierTokens.map(identifier => identifier.join(''))
+const protectedIdentifierSuffixes = new Set([
+  'land', 'brand', 'branded', 'theme', 'themed', 'style', 'styled', 'inspired',
+])
 const protectedReferenceTokens = [
   'inspired by', 'in the style of', 'based on', 'as seen in', 'reference to', 'homage to',
 ].map(reference => tokens(reference))
@@ -124,24 +121,6 @@ const descriptorCanonicalForms: Record<string, string> = {
   customers: 'customer', workers: 'worker', travelers: 'traveler', athletes: 'athlete',
   parents: 'parent', families: 'family', friends: 'friend', adults: 'adult',
 }
-const genericVisualBaseTerms = [
-  'a', 'an', 'the', 'and', 'or', 'of', 'in', 'on', 'at', 'by', 'for', 'from',
-  'into', 'through', 'with', 'without', 'toward', 'towards', 'over', 'under',
-  'after', 'before', 'near', 'beside', 'across', 'up', 'down', 'while',
-  'scene', 'video', 'footage', 'cinematic', 'natural', 'lighting', 'shot', 'view',
-  'close', 'wide', 'medium', 'aerial', 'macro', 'slow', 'motion', 'time', 'lapse',
-  'symbolic', 'expressing', 'everyday', 'environment', 'marvelous',
-]
-const safeVisualTerms = new Set([
-  ...genericVisualBaseTerms,
-  ...VISUAL_CONCEPT_SEEDS.flatMap(seed => [
-    seed.description,
-    seed.literalQuery,
-    seed.actionQuery,
-    seed.metaphorQuery,
-  ]).flatMap(canonicalTokens),
-])
-
 export function parseVideoAssetRequest(value: unknown): VideoAssetRequest {
   const input = object(value)
   const subtitleChunkId = optionalPositiveInteger(input.subtitleChunkId)
@@ -327,23 +306,33 @@ function containsProtectedPhrase(valueTokens: string[], phraseTokens: string[]):
 }
 
 function containsProtectedIdentifier(valueTokens: string[]): boolean {
-  return protectedIdentifierTokens.some(identifier => containsTokenSequence(valueTokens, identifier))
-    || protectedIdentifierCompacts.some(compact => valueTokens.includes(compact))
+  if (protectedIdentifierTokens.some(identifier => containsTokenSequence(valueTokens, identifier))) {
+    return true
+  }
+  return protectedIdentifierCompacts.some(compact => valueTokens.some(token => {
+    if (token === compact) return true
+    if (!token.startsWith(compact)) return false
+    return protectedIdentifierSuffixes.has(token.slice(compact.length))
+  }))
 }
 
 function mergeCompounds(valueTokens: string[]): string[] {
   const result: string[] = []
   for (let index = 0; index < valueTokens.length;) {
-    const compound = compoundTokens.find(candidate => (
-      candidate.parts.every((part, offset) => valueTokens[index + offset] === part)
-    ))
-    if (compound === undefined) {
-      result.push(valueTokens[index])
-      index += 1
-    } else {
-      result.push(compound.token)
-      index += compound.parts.length
+    const current = valueTokens[index]
+    const next = valueTokens[index + 1]
+    if (current === 're' && /^(?:enact(?:s|ed|ing|ment)?|creat(?:e|es|ed|ing|ion))$/.test(next ?? '')) {
+      result.push(`re${next}`)
+      index += 2
+      continue
     }
+    if (current === 'non' && /^(?:binary|binaries)$/.test(next ?? '')) {
+      result.push(next === 'binaries' ? 'nonbinaries' : 'nonbinary')
+      index += 2
+      continue
+    }
+    result.push(current)
+    index += 1
   }
   return result
 }
@@ -373,10 +362,14 @@ function hasUngroundedProperName(value: string, sourceLexicon: Set<string>): boo
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
     .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
     .match(/[A-Za-z][A-Za-z0-9]*/g) ?? []
-  return words.some(word => {
-    if (!/^[A-Z][a-z]+$/.test(word) && !/^[A-Z]{2,}$/.test(word)) return false
+  const looksNamed = (word: string) => /^[A-Z][a-z]+$/.test(word) || /^[A-Z]+$/.test(word)
+  const titleCasePhrase = words.length > 1 && words.every(looksNamed)
+  if (titleCasePhrase) return false
+
+  return words.some((word, index) => {
+    if (index === 0 || !looksNamed(word)) return false
     const normalized = descriptorCanonicalForms[word.toLowerCase()] ?? word.toLowerCase()
-    return !sourceLexicon.has(normalized) && !safeVisualTerms.has(normalized)
+    return !sourceLexicon.has(normalized)
   })
 }
 
