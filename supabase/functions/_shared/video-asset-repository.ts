@@ -148,7 +148,7 @@ export function createVideoAssetRepository(client: SupabaseRepositoryClient): Vi
     },
 
     async beginRun(input) {
-      const result = rows(await database(await client.rpc('begin_video_search_run', {
+      const result = rows(await database(client.rpc('begin_video_search_run', {
         p_subtitle_chunk_id: input.subtitleChunkId ?? null,
         p_input_kind: input.inputKind,
         p_input_digest: input.inputDigest,
@@ -219,7 +219,7 @@ export function createVideoAssetRepository(client: SupabaseRepositoryClient): Vi
     },
 
     async finishRun(input) {
-      await database(await client.rpc('finish_video_search_run', {
+      await database(client.rpc('finish_video_search_run', {
         p_run_id: input.runId,
         p_status: input.status,
         p_fallback_used: input.fallbackUsed,
@@ -255,7 +255,7 @@ export function createVideoAssetRepository(client: SupabaseRepositoryClient): Vi
     },
 
     async matchVisualConcept(embedding) {
-      const result = rows(await database(await client.rpc('match_visual_concept', {
+      const result = rows(await database(client.rpc('match_visual_concept', {
         query_embedding: embedding,
       })))[0]
       if (result === undefined) return null
@@ -270,7 +270,7 @@ export function createVideoAssetRepository(client: SupabaseRepositoryClient): Vi
     },
 
     async selectCandidate(input) {
-      const result = rows(await database(await client.rpc('select_video_asset', {
+      const result = rows(await database(client.rpc('select_video_asset', {
         p_run_id: input.runId,
         p_provider_resource_id: input.providerResourceId,
         p_note: input.note,

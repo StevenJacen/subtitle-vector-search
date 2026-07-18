@@ -267,6 +267,26 @@ describe('video asset matching orchestration', () => {
   })
 
   it('reuses a completed run, skips planning and search, and refreshes persisted IDs only', async () => {
+    const stored = persistedRun()
+    const repo = repository({
+      beginRun: vi.fn().mockResolvedValue({ runId, status: 'completed', isExisting: true }),
+      loadRun: vi.fn().mockResolvedValue(stored),
+    })
+    const deps = dependencies(repo)
+
+    const result = await matchVideoAssets({ subtitleChunkId: 42, candidateCount: 5 }, deps)
+
+    expect(repo.loadChunkContext).not.toHaveBeenCalled()
+    expect(deps.plan).not.toHaveBeenCalled()
+    expect(deps.search).not.toHaveBeenCalled()
+    expect(repo.finishRun).not.toHaveBeenCalled()
+    expect(deps.detail).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(deps.detail).mock.calls.map(call => call[0])).toEqual([1, 2])
+    expect(result.status).toBe('completed')
+    expect(result.candidates[0].previewUrl).toBe('https://fresh.example/1.mp4')
+  })
+
+  it('reuses a degraded chunk run without loading chunk context', async () => {
     const stored = persistedRun({
       status: 'degraded',
       planner: { model: 'gemma4:12b', promptVersion: 'visual-plan-v1', fallbackUsed: true },
@@ -282,16 +302,14 @@ describe('video asset matching orchestration', () => {
     })
     const deps = dependencies(repo)
 
-    const result = await matchVideoAssets({ text: 'English source', candidateCount: 5 }, deps)
+    const result = await matchVideoAssets({ subtitleChunkId: 42, candidateCount: 5 }, deps)
 
+    expect(repo.loadChunkContext).not.toHaveBeenCalled()
     expect(deps.plan).not.toHaveBeenCalled()
     expect(deps.search).not.toHaveBeenCalled()
     expect(repo.finishRun).not.toHaveBeenCalled()
-    expect(deps.detail).toHaveBeenCalledTimes(2)
-    expect(vi.mocked(deps.detail).mock.calls.map(call => call[0])).toEqual([1, 2])
     expect(result.status).toBe('degraded')
     expect(result.queries[2]).toEqual({ ...plan.queries[2], status: 'failed', errorCode: 'provider_unavailable' })
-    expect(result.candidates[0].previewUrl).toBe('https://fresh.example/1.mp4')
   })
 
   it('throws a controlled 409 with retry metadata for an active run', async () => {
@@ -300,12 +318,13 @@ describe('video asset matching orchestration', () => {
     })
     const deps = dependencies(repo)
 
-    await expect(matchVideoAssets({ text: 'English source', candidateCount: 5 }, deps)).rejects.toMatchObject({
+    await expect(matchVideoAssets({ subtitleChunkId: 42, candidateCount: 5 }, deps)).rejects.toMatchObject({
       status: 409,
       code: 'run_in_progress',
       message: 'video asset search is in progress',
       retryAfterSeconds: 3,
     })
+    expect(repo.loadChunkContext).not.toHaveBeenCalled()
     expect(repo.loadRun).not.toHaveBeenCalled()
     expect(deps.plan).not.toHaveBeenCalled()
     expect(deps.search).not.toHaveBeenCalled()
@@ -324,6 +343,8 @@ describe('video asset matching orchestration', () => {
     await matchVideoAssets({ subtitleChunkId: 42, theme: 'hope', candidateCount: 5 }, deps)
 
     expect(repo.loadChunkContext).toHaveBeenCalledWith(42)
+    expect(vi.mocked(repo.beginRun).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(repo.loadChunkContext).mock.invocationCallOrder[0])
     expect(deps.plan).toHaveBeenCalledWith({
       sourceText: 'The selected subtitle chunk.',
       contextText: 'Cue immediately before.\nCue immediately after.',
@@ -338,7 +359,7 @@ describe('video asset matching orchestration', () => {
     }))
   })
 
-  it('rejects a missing or non-ready chunk before planning or run creation', async () => {
+  it('finishes a fresh missing or non-ready chunk before rethrowing 404', async () => {
     const repo = repository({ loadChunkContext: vi.fn().mockResolvedValue(null) })
     const deps = dependencies(repo)
 
@@ -347,7 +368,24 @@ describe('video asset matching orchestration', () => {
       code: 'subtitle_chunk_not_ready',
       message: 'subtitle chunk is not available',
     })
-    expect(repo.beginRun).not.toHaveBeenCalled()
+    expect(repo.beginRun).toHaveBeenCalledOnce()
+    expect(repo.loadChunkContext).toHaveBeenCalledWith(404)
+    expect(vi.mocked(repo.beginRun).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(repo.loadChunkContext).mock.invocationCallOrder[0])
+    expect(repo.finishRun).toHaveBeenCalledWith(expect.objectContaining({
+      runId,
+      status: 'failed',
+      fallbackUsed: false,
+      visualIntent: null,
+      plannerElapsedMs: 0,
+      failureCode: 'subtitle_chunk_not_ready',
+      queries: expect.arrayContaining([
+        expect.objectContaining({ kind: 'literal', status: 'failed' }),
+        expect.objectContaining({ kind: 'action', status: 'failed' }),
+        expect.objectContaining({ kind: 'metaphor', status: 'failed' }),
+      ]),
+      candidates: [],
+    }))
     expect(deps.plan).not.toHaveBeenCalled()
   })
 
@@ -638,6 +676,77 @@ describe('video asset repository', () => {
       plannerModel: 'gemma4:12b',
       promptVersion: 'visual-plan-v1',
     })).rejects.not.toThrow(secret)
+  })
+
+  it('suppresses a rejected beginRun RPC promise', async () => {
+    const repo = createVideoAssetRepository({
+      from: vi.fn(),
+      rpc: vi.fn().mockRejectedValue(new Error('rejected begin details')),
+    })
+
+    const promise = repo.beginRun({
+      inputKind: 'text',
+      inputDigest: digest,
+      candidateCount: 5,
+      plannerModel: 'gemma4:12b',
+      promptVersion: 'visual-plan-v1',
+    })
+
+    await expect(promise).rejects.toStrictEqual(new Error('database operation failed'))
+    await expect(promise).rejects.not.toThrow('rejected begin details')
+  })
+
+  it('suppresses a rejected finishRun RPC promise', async () => {
+    const repo = createVideoAssetRepository({
+      from: vi.fn(),
+      rpc: vi.fn().mockRejectedValue(new Error('rejected finish details')),
+    })
+
+    const promise = repo.finishRun({
+      runId,
+      status: 'failed',
+      fallbackUsed: false,
+      visualIntent: null,
+      plannerElapsedMs: 0,
+      totalElapsedMs: 0,
+      failureCode: 'planner_unavailable',
+      queries: plan.queries.map((query, index) => ({
+        ...query,
+        weight: index === 2 ? 0.2 : 0.4,
+        filters: { contentType: 'video' },
+        providerTotal: null,
+        status: 'failed',
+        elapsedMs: 0,
+      })),
+      candidates: [],
+    })
+
+    await expect(promise).rejects.toStrictEqual(new Error('database operation failed'))
+    await expect(promise).rejects.not.toThrow('rejected finish details')
+  })
+
+  it('suppresses a rejected matchVisualConcept RPC promise', async () => {
+    const repo = createVideoAssetRepository({
+      from: vi.fn(),
+      rpc: vi.fn().mockRejectedValue(new Error('rejected concept details')),
+    })
+
+    const promise = repo.matchVisualConcept([0.1, 0.2])
+
+    await expect(promise).rejects.toStrictEqual(new Error('database operation failed'))
+    await expect(promise).rejects.not.toThrow('rejected concept details')
+  })
+
+  it('suppresses a rejected selectCandidate RPC promise', async () => {
+    const repo = createVideoAssetRepository({
+      from: vi.fn(),
+      rpc: vi.fn().mockRejectedValue(new Error('rejected selection details')),
+    })
+
+    const promise = repo.selectCandidate({ runId, providerResourceId: 1, note: 'chosen' })
+
+    await expect(promise).rejects.toStrictEqual(new Error('database operation failed'))
+    await expect(promise).rejects.not.toThrow('rejected selection details')
   })
 
   it('suppresses rejected PostgREST hydration promises', async () => {

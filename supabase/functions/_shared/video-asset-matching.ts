@@ -52,7 +52,6 @@ export async function matchVideoAssets(
   request: VideoAssetRequest,
   dependencies: VideoAssetMatchingDependencies,
 ): Promise<VideoAssetMatchResponse> {
-  const source = await planningSource(request, dependencies.repository)
   const inputKind = request.subtitleChunkId !== undefined
     ? 'chunk'
     : request.text !== undefined ? 'text' : 'theme'
@@ -80,6 +79,25 @@ export async function matchVideoAssets(
   }
 
   const totalStartedAt = dependencies.now()
+  let source: VisualPlannerInput
+  try {
+    source = await planningSource(request, dependencies.repository)
+  } catch (error) {
+    if (error instanceof VideoAssetError && error.code === 'subtitle_chunk_not_ready') {
+      await dependencies.repository.finishRun({
+        runId: begin.runId,
+        status: 'failed',
+        fallbackUsed: false,
+        visualIntent: null,
+        plannerElapsedMs: 0,
+        totalElapsedMs: elapsed(dependencies, totalStartedAt),
+        failureCode: error.code,
+        queries: failedQueries(error.code, 'subtitle chunk unavailable', 0),
+        candidates: [],
+      })
+    }
+    throw error
+  }
   const plannerStartedAt = dependencies.now()
   let planned: { plan: VisualPlan; fallbackUsed: boolean }
   try {
@@ -95,7 +113,7 @@ export async function matchVideoAssets(
       plannerElapsedMs,
       totalElapsedMs: elapsed(dependencies, totalStartedAt),
       failureCode: controlled.code,
-      queries: failedPlannerQueries(plannerElapsedMs),
+      queries: failedQueries(controlled.code, 'planner unavailable', plannerElapsedMs),
       candidates: [],
     })
     throw controlled
@@ -404,16 +422,16 @@ function requiredQuery(plan: VisualPlan, kind: QueryKind) {
   return query
 }
 
-function failedPlannerQueries(elapsedMs: number): FinishRunQuery[] {
+function failedQueries(errorCode: string, term: string, elapsedMs: number): FinishRunQuery[] {
   return LANE_DEFINITIONS.map(lane => ({
     kind: lane.kind,
-    term: 'planner unavailable',
+    term,
     weight: lane.weight,
     filters: QUERY_FILTERS,
     providerTotal: null,
     status: 'failed',
     elapsedMs,
-    errorCode: 'planner_unavailable',
+    errorCode,
   }))
 }
 
