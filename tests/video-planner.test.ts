@@ -78,6 +78,31 @@ describe('visual planner prompt and repair', () => {
     expect(fallback).not.toHaveBeenCalled()
   })
 
+  it.each([
+    {
+      input: { ...plannerInput, contextText: 'Several women wait beside the window.' },
+      term: 'women opening curtains at sunrise video',
+    },
+    {
+      input: { ...plannerInput, theme: 'elderly resilience' },
+      term: 'elderly person opening curtains at sunrise video',
+    },
+  ])('accepts a generated protected descriptor grounded outside source text: %#', async ({ input, term }) => {
+    const groundedPlan = {
+      ...validPlan,
+      queries: [{ kind: 'literal' as const, term }, validPlan.queries[1], validPlan.queries[2]],
+    }
+    const generate = vi.fn().mockResolvedValue(JSON.stringify(groundedPlan))
+    const fallback = vi.fn()
+
+    await expect(planVisualSearch(input, { generate, fallback })).resolves.toEqual({
+      plan: groundedPlan,
+      fallbackUsed: false,
+    })
+    expect(generate).toHaveBeenCalledTimes(1)
+    expect(fallback).not.toHaveBeenCalled()
+  })
+
   it('repairs malformed JSON exactly once', async () => {
     const outputs = ['not-json', JSON.stringify(validPlan)]
     const generate = vi.fn().mockImplementation(async () => outputs.shift() as string)
@@ -370,6 +395,34 @@ describe('visual concept fallback and seeding', () => {
       { kind: 'action', term: conceptRow.action_query },
       { kind: 'metaphor', term: conceptRow.metaphor_query },
     ])
+  })
+
+  it('grounds fallback concept descriptors in adjacent context and theme', async () => {
+    const embedding = Array(384).fill(0.25)
+    const session = { run: vi.fn().mockResolvedValue(embedding) }
+    const client = { rpc: vi.fn().mockResolvedValue({
+      data: [{
+        concept_key: 'resilience',
+        description: 'Grounded people recover.',
+        literal_query: 'women rebuilding a room video',
+        action_query: 'elderly person walking forward video',
+        metaphor_query: 'green plant growing through concrete video',
+        similarity: 0.9,
+      }],
+      error: null,
+    }) }
+
+    await expect(fallbackVisualPlan({
+      sourceText: 'People recover after difficulty.',
+      contextText: 'Several women work together.',
+      theme: 'elderly resilience',
+      forbiddenTerms: [],
+    }, { session, client })).resolves.toEqual(expect.objectContaining({
+      queries: expect.arrayContaining([
+        expect.objectContaining({ term: 'women rebuilding a room video' }),
+        expect.objectContaining({ term: 'elderly person walking forward video' }),
+      ]),
+    }))
   })
 
   it('validates fallback embeddings before the concept RPC', async () => {

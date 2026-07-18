@@ -196,7 +196,12 @@ export async function fallbackVisualPlan(
         { kind: 'action', term: row.action_query },
         { kind: 'metaphor', term: row.metaphor_query },
       ],
-    }, { sourceText: input.sourceText, forbiddenTerms: plannerForbiddenTerms(input) })
+    }, {
+      sourceText: input.sourceText,
+      ...(input.contextText === undefined ? {} : { contextText: input.contextText }),
+      ...(input.theme === undefined ? {} : { theme: input.theme }),
+      forbiddenTerms: plannerForbiddenTerms(input),
+    })
   } catch {
     throw plannerUnavailable()
   }
@@ -219,6 +224,8 @@ function parseGeneratedPlan(output: string, input: VisualPlannerInput): Generate
       ok: true,
       plan: parseVisualPlan(candidate, {
         sourceText: input.sourceText,
+        ...(input.contextText === undefined ? {} : { contextText: input.contextText }),
+        ...(input.theme === undefined ? {} : { theme: input.theme }),
         forbiddenTerms: plannerForbiddenTerms(input),
       }),
     }

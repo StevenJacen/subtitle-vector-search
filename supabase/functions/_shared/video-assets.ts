@@ -36,6 +36,8 @@ export interface VisualPlan {
 
 export interface PlanValidationContext {
   sourceText: string
+  contextText?: string
+  theme?: string
   forbiddenTerms: string[]
 }
 
@@ -91,20 +93,33 @@ const humanTerms = new Set([
   'friend', 'friends', 'couple', 'family', 'boy', 'girl', 'man', 'woman', 'child', 'kid',
 ])
 const ordinaryStockTerms = new Set([
-  'aerial', 'cinematic', 'city', 'close', 'golden', 'hour', 'lighting', 'macro',
-  'medium', 'motion', 'natural', 'shot', 'skyline', 'slow', 'time', 'video', 'wide',
+  'a', 'an', 'the', 'aerial', 'cinematic', 'city', 'close', 'forest', 'golden',
+  'hour', 'lighting', 'macro', 'medium', 'motion', 'natural', 'person', 'people',
+  'shot', 'skyline', 'slow', 'through', 'time', 'video', 'walking', 'wide',
 ])
 const protectedIdentifiers = [
   'nike', 'adidas', 'coca cola', 'disney', 'marvel', 'pixar', 'netflix',
   'star wars', 'harry potter', 'lord of the rings', 'pokemon', 'batman', 'superman',
 ]
-const protectedReferencePatterns = [
-  /(?:^|\s)(?:copyright|trademark|registered trademark)(?:\s|$)/,
-  /[©®™]/u,
-  /(?:^|\s)(?:inspired by|in the style of|based on|as seen in|reference to|homage to)(?:\s|$)/,
-  /(?:^|\s)(?:recreate|recreates|recreated|recreating|reenact|reenacts|reenacted|reenacting)(?:\s+(?:a|the))?\s+(?:scene|shot|sequence|moment)(?:\s|$)/,
-  /(?:^|\s)(?:scene|film|movie|shot|sequence)\s+recreation(?:\s|$)/,
-]
+const protectedIdentifierTokens = protectedIdentifiers.map(identifier => tokens(identifier))
+const protectedReferenceTokens = [
+  'inspired by', 'in the style of', 'based on', 'as seen in', 'reference to', 'homage to',
+].map(reference => tokens(reference))
+const recreationTokens = new Set([
+  'recreate', 'recreates', 'recreated', 'recreating', 'recreation',
+  'reenact', 'reenacts', 'reenacted', 'reenacting', 'reenactment',
+])
+const sceneReferenceTokens = new Set(['scene', 'shot', 'sequence', 'moment', 'movie', 'film'])
+const descriptorCanonicalForms: Record<string, string> = {
+  babies: 'baby', toddlers: 'toddler', children: 'child', kids: 'kid', teens: 'teen',
+  teenagers: 'teenager', adolescents: 'adolescent', boys: 'boy', girls: 'girl',
+  men: 'man', women: 'woman', males: 'male', females: 'female', asians: 'asian',
+  latinos: 'latino', latinas: 'latina', hispanics: 'hispanic', arabs: 'arab',
+  veterans: 'veteran', muslims: 'muslim', christians: 'christian', jews: 'jewish',
+  hindus: 'hindu', immigrants: 'immigrant', people: 'person', persons: 'person',
+  customers: 'customer', workers: 'worker', travelers: 'traveler', athletes: 'athlete',
+  parents: 'parent', families: 'family', friends: 'friend', adults: 'adult',
+}
 
 export function parseVideoAssetRequest(value: unknown): VideoAssetRequest {
   const input = object(value)
@@ -167,17 +182,21 @@ export function parseVisualPlan(value: unknown, context: PlanValidationContext):
     throw invalidPlan()
   }
 
-  const sourceLexicon = new Set(tokens(context.sourceText))
-  const forbidden = context.forbiddenTerms.map(term => normalizePhrase(requiredString(term)))
+  const groundingLexicon = new Set([
+    context.sourceText,
+    context.contextText,
+    context.theme,
+  ].filter((field): field is string => field !== undefined).flatMap(canonicalTokens))
+  const forbidden = context.forbiddenTerms.map(term => tokens(requiredString(term)))
   for (const valueToCheck of [...Object.values(visualIntent), ...queries.map(query => query.term)]) {
-    const normalized = normalizePhrase(valueToCheck)
-    if (forbidden.some(term => term !== '' && normalized.includes(term))) {
+    const valueTokens = tokens(valueToCheck)
+    if (forbidden.some(term => containsTokenSequence(valueTokens, term))) {
       throw invalidPlan()
     }
-    if (protectedIdentifiers.some(identifier => containsPhrase(normalized, identifier))
-      || protectedReferencePatterns.some(pattern => pattern.test(normalized))
-      || hasUngroundedProperName(valueToCheck, sourceLexicon)
-      || hasUngroundedProtectedDescriptor(valueToCheck, sourceLexicon)) {
+    if (protectedIdentifierTokens.some(identifier => containsTokenSequence(valueTokens, identifier))
+      || hasProtectedReference(valueToCheck, valueTokens)
+      || hasUngroundedProperName(valueToCheck, groundingLexicon)
+      || hasUngroundedProtectedDescriptor(valueToCheck, groundingLexicon)) {
       throw invalidPlan()
     }
   }
@@ -259,6 +278,8 @@ function isValidContext(value: PlanValidationContext): boolean {
   return typeof value === 'object'
     && value !== null
     && typeof value.sourceText === 'string'
+    && (value.contextText === undefined || typeof value.contextText === 'string')
+    && (value.theme === undefined || typeof value.theme === 'string')
     && Array.isArray(value.forbiddenTerms)
     && value.forbiddenTerms.every(term => typeof term === 'string')
 }
@@ -267,12 +288,27 @@ function tokens(value: string): string[] {
   return normalizePhrase(value).match(/[a-z0-9]+/g) ?? []
 }
 
-function containsPhrase(normalized: string, phrase: string): boolean {
-  return (` ${normalized} `).includes(` ${phrase} `)
+function canonicalTokens(value: string): string[] {
+  return tokens(value).map(token => descriptorCanonicalForms[token] ?? token)
+}
+
+function containsTokenSequence(haystack: string[], needle: string[]): boolean {
+  if (needle.length === 0 || needle.length > haystack.length) return false
+  return haystack.some((_, index) => needle.every((token, offset) => haystack[index + offset] === token))
+}
+
+function hasProtectedReference(value: string, valueTokens: string[]): boolean {
+  if (/[\u00a9\u00ae\u2122]/u.test(value)
+    || valueTokens.some(token => token === 'copyright' || token === 'trademark')
+    || protectedReferenceTokens.some(reference => containsTokenSequence(valueTokens, reference))) {
+    return true
+  }
+  return valueTokens.some(token => recreationTokens.has(token))
+    && valueTokens.some(token => sceneReferenceTokens.has(token))
 }
 
 function hasUngroundedProtectedDescriptor(value: string, sourceLexicon: Set<string>): boolean {
-  const valueTokens = tokens(value)
+  const valueTokens = canonicalTokens(value)
   return valueTokens.some((token, index) => {
     if (sourceLexicon.has(token)) return false
     if (protectedDescriptors.has(token)) return true
@@ -283,18 +319,11 @@ function hasUngroundedProtectedDescriptor(value: string, sourceLexicon: Set<stri
 
 function hasUngroundedProperName(value: string, sourceLexicon: Set<string>): boolean {
   const words = value.match(/[A-Za-z][A-Za-z0-9-]*/g) ?? []
-  const capitalized = words.map((word, index) => ({ word, index })).filter(({ word }) => (
-    /^[A-Z][a-z]+$/.test(word) && !ordinaryStockTerms.has(word.toLowerCase())
-  ))
-  for (let index = 0; index < capitalized.length - 1; index += 1) {
-    const current = capitalized[index]
-    const next = capitalized[index + 1]
-    if (next.index === current.index + 1
-      && (!sourceLexicon.has(current.word.toLowerCase()) || !sourceLexicon.has(next.word.toLowerCase()))) {
-      return true
-    }
-  }
-  return capitalized.some(({ word, index }) => index > 0 && !sourceLexicon.has(word.toLowerCase()))
+  return words.some(word => {
+    if (!/^[A-Z][a-z]+$/.test(word)) return false
+    const normalized = descriptorCanonicalForms[word.toLowerCase()] ?? word.toLowerCase()
+    return !sourceLexicon.has(normalized) && !ordinaryStockTerms.has(normalized)
+  })
 }
 
 function normalizePhrase(value: string): string {

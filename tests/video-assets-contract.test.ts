@@ -69,6 +69,12 @@ describe('visual plan', () => {
     'elderly Nike customer opening curtains',
     'recreating a Harry Potter scene at sunrise',
     'customer wearing nike shoes in a quiet room',
+    'customer wearing nike-branded shoes in a quiet room',
+    'recreating a harry-potter scene at sunrise',
+    'recreating a harry.potter scene at sunrise',
+    'recreate this famous scene at sunrise',
+    'women opening curtains at sunrise',
+    'Taylor opening curtains at sunrise',
     'superhero inspired by marvel cinematic scene',
     'person in the style of Acme Hero',
     'quiet room with Acme Hero watching sunrise',
@@ -117,6 +123,51 @@ describe('visual plan', () => {
 
     expect(parseVisualPlan(candidate, { sourceText: 'A hopeful view of a city.', forbiddenTerms: [] }))
       .toEqual(candidate)
+  })
+
+  it('allows a generic title-cased stock-search phrase', () => {
+    const candidate = {
+      ...validPlan,
+      queries: [
+        { kind: 'literal', term: 'Person Walking Through Forest Video' },
+        validPlan.queries[1],
+        validPlan.queries[2],
+      ],
+    }
+
+    expect(parseVisualPlan(candidate, { sourceText: 'A journey brings hope.', forbiddenTerms: [] }))
+      .toEqual(candidate)
+  })
+
+  it.each([
+    { contextText: 'Several women wait by the window.', term: 'women opening curtains at sunrise' },
+    { theme: 'elderly resilience', term: 'elderly person opening curtains at sunrise' },
+  ])('grounds protected descriptors from adjacent context or theme: %#', grounding => {
+    const candidate = {
+      ...validPlan,
+      queries: [{ kind: 'literal', term: grounding.term }, validPlan.queries[1], validPlan.queries[2]],
+    }
+
+    expect(parseVisualPlan(candidate, {
+      sourceText: 'A person finds hope.',
+      ...grounding.contextText === undefined ? {} : { contextText: grounding.contextText },
+      ...grounding.theme === undefined ? {} : { theme: grounding.theme },
+      forbiddenTerms: [],
+    })).toEqual(candidate)
+  })
+
+  it('keeps forbidden terms rejected even when supplied as grounding', () => {
+    const candidate = {
+      ...validPlan,
+      queries: [{ kind: 'literal', term: 'Synthetic-Night-Walk sunrise scene' }, validPlan.queries[1], validPlan.queries[2]],
+    }
+
+    expect(() => parseVisualPlan(candidate, {
+      sourceText: 'Synthetic Night Walk is named in the source.',
+      contextText: 'Synthetic Night Walk appears nearby.',
+      theme: 'Synthetic Night Walk',
+      forbiddenTerms: ['synthetic night walk'],
+    })).toThrow('invalid visual plan')
   })
 })
 
