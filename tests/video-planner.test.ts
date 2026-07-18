@@ -53,6 +53,9 @@ describe('visual planner prompt and repair', () => {
     expect(prompt).toMatch(/English-only search terms/i)
     expect(prompt).toMatch(/no dialogue, movie, or brand references/i)
     expect(prompt).toMatch(/do not invent protected traits/i)
+    expect(prompt).toMatch(/character names/i)
+    expect(prompt).toMatch(/copyright|trademark/i)
+    expect(prompt).toMatch(/recreat/i)
     for (const supplied of [
       plannerInput.sourceText,
       plannerInput.contextText,
@@ -142,6 +145,25 @@ describe('visual planner prompt and repair', () => {
     )
 
     expect(result.plan).toEqual(validPlan)
+    expect(generate).toHaveBeenCalledTimes(2)
+  })
+
+  it('repairs an invented brand and protected age exactly once', async () => {
+    const prohibitedPlan = {
+      ...validPlan,
+      queries: [
+        { kind: 'literal' as const, term: 'elderly Nike customer opening curtains video' },
+        validPlan.queries[1],
+        validPlan.queries[2],
+      ],
+    }
+    const outputs = [JSON.stringify(prohibitedPlan), JSON.stringify(validPlan)]
+    const generate = vi.fn().mockImplementation(async () => outputs.shift() as string)
+
+    await expect(planVisualSearch(plannerInput, { generate, fallback: vi.fn() })).resolves.toEqual({
+      plan: validPlan,
+      fallbackUsed: false,
+    })
     expect(generate).toHaveBeenCalledTimes(2)
   })
 

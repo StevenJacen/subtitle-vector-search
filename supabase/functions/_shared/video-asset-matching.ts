@@ -187,6 +187,20 @@ export async function matchVideoAssets(
   }
 
   const fused = dependencies.fuse(successfulLanes, request.candidateCount)
+  if (fused.length !== request.candidateCount) {
+    await dependencies.repository.finishRun({
+      runId: begin.runId,
+      status: 'failed',
+      fallbackUsed: planned.fallbackUsed,
+      visualIntent: planned.plan.visualIntent,
+      plannerElapsedMs,
+      totalElapsedMs: elapsed(dependencies, totalStartedAt),
+      failureCode: 'provider_unavailable',
+      queries: queryRows,
+      candidates: [],
+    })
+    throw providerError()
+  }
   const candidates = await enrichFreshCandidates(fused, dependencies)
   const status = planned.fallbackUsed || successfulLanes.length < LANE_DEFINITIONS.length
     ? 'degraded'

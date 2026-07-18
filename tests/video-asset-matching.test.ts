@@ -91,8 +91,12 @@ function dependencies(
     sha256: vi.fn().mockResolvedValue(digest.toUpperCase()),
     plan: vi.fn().mockResolvedValue({ plan, fallbackUsed: false }),
     search: vi.fn().mockImplementation(async (_term: string, kind) => ({
-      resources: [resource(kind === 'literal' ? 1 : kind === 'action' ? 2 : 3)],
-      totalResources: 1,
+      resources: kind === 'literal'
+        ? [1, 2, 3, 4, 5].map(id => resource(id))
+        : kind === 'action'
+          ? [2, 3, 4, 5, 6].map(id => resource(id))
+          : [3, 4, 5, 6, 7].map(id => resource(id)),
+      totalResources: 5,
     })),
     detail: vi.fn().mockImplementation(async id => resource(id, `https://fresh.example/${id}.mp4`)),
     fuse: fuseVecteezyLanes,
@@ -125,15 +129,12 @@ describe('video asset matching orchestration', () => {
       promptVersion: 'visual-plan-v1',
     })
     expect(deps.search).toHaveBeenCalledTimes(3)
-    expect(deps.detail).toHaveBeenCalledTimes(3)
+    expect(deps.detail).toHaveBeenCalledTimes(5)
     expect(result.status).toBe('completed')
     expect(result.queries).toHaveLength(3)
     expect(result.queries.every(query => query.status === 'completed')).toBe(true)
-    expect(result.candidates.map(candidate => candidate.previewUrl)).toEqual([
-      'https://fresh.example/1.mp4',
-      'https://fresh.example/2.mp4',
-      'https://fresh.example/3.mp4',
-    ])
+    expect(result.candidates).toHaveLength(5)
+    expect(result.candidates.every(candidate => candidate.previewUrl?.startsWith('https://fresh.example/'))).toBe(true)
 
     const finishInput = vi.mocked(repo.finishRun).mock.calls[0][0]
     expect(finishInput.status).toBe('completed')
@@ -170,16 +171,15 @@ describe('video asset matching orchestration', () => {
 
     expect(result.status).toBe('completed')
     expect(result.candidates[0]).toEqual(expect.objectContaining({
-      providerResourceId: 1,
       licenseType: null,
       orientation: null,
       fileTypes: [],
       downloadSizes: [],
-      previewUrl: 'https://preview.example/1.mp4',
+      previewUrl: 'https://preview.example/3.mp4',
     }))
     expect(repo.finishRun).toHaveBeenCalledWith(expect.objectContaining({
       candidates: expect.arrayContaining([expect.objectContaining({
-        providerResourceId: 1,
+        providerResourceId: 3,
         licenseType: null,
         orientation: null,
         tags: [],
@@ -218,7 +218,7 @@ describe('video asset matching orchestration', () => {
     const repo = repository()
     const search = vi.fn().mockImplementation(async (_term: string, kind: string) => {
       if (kind === 'metaphor') throw new Error('provider leaked a response body')
-      return { resources: [resource(kind === 'literal' ? 1 : 2)], totalResources: 7 }
+      return { resources: [1, 2, 3, 4, 5].map(id => resource(id)), totalResources: 7 }
     })
     const deps = dependencies(repo, { search })
 
@@ -235,6 +235,32 @@ describe('video asset matching orchestration', () => {
       queries: expect.arrayContaining([
         expect.objectContaining({ kind: 'metaphor', status: 'failed', errorCode: 'provider_unavailable' }),
       ]),
+    }))
+  })
+
+  it('fails before detail enrichment when fusion cannot retain the requested count', async () => {
+    const repo = repository()
+    const fuse = vi.fn().mockReturnValue(fuseVecteezyLanes([
+      { kind: 'literal', weight: 0.4, resources: [1, 2, 3, 4].map(id => resource(id)) },
+      { kind: 'action', weight: 0.4, resources: [1, 2, 3, 4].map(id => resource(id)) },
+      { kind: 'metaphor', weight: 0.2, resources: [1, 2, 3, 4].map(id => resource(id)) },
+    ], 5))
+    const deps = dependencies(repo, { fuse })
+
+    const promise = matchVideoAssets({ text: rawSource, candidateCount: 5 }, deps)
+
+    await expect(promise).rejects.toMatchObject({
+      status: 502,
+      code: 'provider_unavailable',
+      message: 'video provider unavailable',
+    })
+    await expect(promise).rejects.not.toThrow(rawSource)
+    expect(fuse).toHaveBeenCalledWith(expect.any(Array), 5)
+    expect(deps.detail).not.toHaveBeenCalled()
+    expect(repo.finishRun).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed',
+      failureCode: 'provider_unavailable',
+      candidates: [],
     }))
   })
 

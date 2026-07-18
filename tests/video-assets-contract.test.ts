@@ -64,6 +64,60 @@ describe('visual plan', () => {
     }
     expect(() => parseVisualPlan(plan, { sourceText: 'hope', forbiddenTerms: ['synthetic night walk'] })).toThrow()
   })
+
+  it.each([
+    'elderly Nike customer opening curtains',
+    'recreating a Harry Potter scene at sunrise',
+    'customer wearing nike shoes in a quiet room',
+    'superhero inspired by marvel cinematic scene',
+    'person in the style of Acme Hero',
+    'quiet room with Acme Hero watching sunrise',
+    'copyright protected film recreation',
+  ])('rejects ungrounded protected traits or protected references: %s', term => {
+    const candidate = {
+      ...validPlan,
+      queries: [{ kind: 'literal', term }, validPlan.queries[1], validPlan.queries[2]],
+    }
+
+    expect(() => parseVisualPlan(candidate, {
+      sourceText: 'A customer opens curtains and watches the sunrise.',
+      forbiddenTerms: [],
+    })).toThrow('invalid visual plan')
+  })
+
+  it.each([
+    'elderly person opening curtains',
+    'woman opening curtains',
+    'Asian person opening curtains',
+    'blind person opening curtains',
+    'pregnant person opening curtains',
+  ])('allows an exact source-grounded personal descriptor: %s', term => {
+    const descriptor = term.split(' ')[0]
+    const candidate = {
+      ...validPlan,
+      visualIntent: { ...validPlan.visualIntent, subject: `${descriptor} person` },
+      queries: [{ kind: 'literal', term }, validPlan.queries[1], validPlan.queries[2]],
+    }
+
+    expect(parseVisualPlan(candidate, {
+      sourceText: `The source explicitly describes an ${descriptor} person.`,
+      forbiddenTerms: [],
+    })).toEqual(candidate)
+  })
+
+  it('allows ordinary title-cased stock-search language', () => {
+    const candidate = {
+      ...validPlan,
+      queries: [
+        { kind: 'literal', term: 'Golden Hour City Skyline Aerial Video' },
+        validPlan.queries[1],
+        validPlan.queries[2],
+      ],
+    }
+
+    expect(parseVisualPlan(candidate, { sourceText: 'A hopeful view of a city.', forbiddenTerms: [] }))
+      .toEqual(candidate)
+  })
 })
 
 describe('manual selection request', () => {

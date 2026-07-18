@@ -77,9 +77,34 @@ export class VideoAssetError extends Error {
 const queryKinds: QueryKind[] = ['literal', 'action', 'metaphor']
 
 const protectedDescriptors = new Set([
-  'boy', 'girl', 'man', 'woman', 'male', 'female', 'young', 'old',
-  'asian', 'black', 'white', 'latino', 'disabled', 'blind', 'deaf',
+  'baby', 'toddler', 'child', 'kid', 'teen', 'teenager', 'adolescent', 'elderly',
+  'boy', 'girl', 'man', 'woman', 'male', 'female', 'nonbinary', 'transgender',
+  'asian', 'latino', 'latina', 'hispanic', 'indigenous', 'arab',
+  'disabled', 'autistic', 'wheelchair', 'pregnant', 'gay', 'lesbian', 'bisexual',
+  'muslim', 'christian', 'jewish', 'hindu', 'immigrant',
 ])
+const ambiguousProtectedDescriptors = new Set([
+  'young', 'old', 'senior', 'black', 'white', 'blind', 'deaf', 'veteran',
+])
+const humanTerms = new Set([
+  'person', 'people', 'customer', 'worker', 'traveler', 'athlete', 'adult', 'parent',
+  'friend', 'friends', 'couple', 'family', 'boy', 'girl', 'man', 'woman', 'child', 'kid',
+])
+const ordinaryStockTerms = new Set([
+  'aerial', 'cinematic', 'city', 'close', 'golden', 'hour', 'lighting', 'macro',
+  'medium', 'motion', 'natural', 'shot', 'skyline', 'slow', 'time', 'video', 'wide',
+])
+const protectedIdentifiers = [
+  'nike', 'adidas', 'coca cola', 'disney', 'marvel', 'pixar', 'netflix',
+  'star wars', 'harry potter', 'lord of the rings', 'pokemon', 'batman', 'superman',
+]
+const protectedReferencePatterns = [
+  /(?:^|\s)(?:copyright|trademark|registered trademark)(?:\s|$)/,
+  /[©®™]/u,
+  /(?:^|\s)(?:inspired by|in the style of|based on|as seen in|reference to|homage to)(?:\s|$)/,
+  /(?:^|\s)(?:recreate|recreates|recreated|recreating|reenact|reenacts|reenacted|reenacting)(?:\s+(?:a|the))?\s+(?:scene|shot|sequence|moment)(?:\s|$)/,
+  /(?:^|\s)(?:scene|film|movie|shot|sequence)\s+recreation(?:\s|$)/,
+]
 
 export function parseVideoAssetRequest(value: unknown): VideoAssetRequest {
   const input = object(value)
@@ -149,10 +174,11 @@ export function parseVisualPlan(value: unknown, context: PlanValidationContext):
     if (forbidden.some(term => term !== '' && normalized.includes(term))) {
       throw invalidPlan()
     }
-    for (const descriptor of protectedDescriptors) {
-      if (tokens(valueToCheck).includes(descriptor) && !sourceLexicon.has(descriptor)) {
-        throw invalidPlan()
-      }
+    if (protectedIdentifiers.some(identifier => containsPhrase(normalized, identifier))
+      || protectedReferencePatterns.some(pattern => pattern.test(normalized))
+      || hasUngroundedProperName(valueToCheck, sourceLexicon)
+      || hasUngroundedProtectedDescriptor(valueToCheck, sourceLexicon)) {
+      throw invalidPlan()
     }
   }
 
@@ -239,6 +265,36 @@ function isValidContext(value: PlanValidationContext): boolean {
 
 function tokens(value: string): string[] {
   return normalizePhrase(value).match(/[a-z0-9]+/g) ?? []
+}
+
+function containsPhrase(normalized: string, phrase: string): boolean {
+  return (` ${normalized} `).includes(` ${phrase} `)
+}
+
+function hasUngroundedProtectedDescriptor(value: string, sourceLexicon: Set<string>): boolean {
+  const valueTokens = tokens(value)
+  return valueTokens.some((token, index) => {
+    if (sourceLexicon.has(token)) return false
+    if (protectedDescriptors.has(token)) return true
+    if (!ambiguousProtectedDescriptors.has(token)) return false
+    return valueTokens.slice(Math.max(0, index - 2), index + 3).some(nearby => humanTerms.has(nearby))
+  })
+}
+
+function hasUngroundedProperName(value: string, sourceLexicon: Set<string>): boolean {
+  const words = value.match(/[A-Za-z][A-Za-z0-9-]*/g) ?? []
+  const capitalized = words.map((word, index) => ({ word, index })).filter(({ word }) => (
+    /^[A-Z][a-z]+$/.test(word) && !ordinaryStockTerms.has(word.toLowerCase())
+  ))
+  for (let index = 0; index < capitalized.length - 1; index += 1) {
+    const current = capitalized[index]
+    const next = capitalized[index + 1]
+    if (next.index === current.index + 1
+      && (!sourceLexicon.has(current.word.toLowerCase()) || !sourceLexicon.has(next.word.toLowerCase()))) {
+      return true
+    }
+  }
+  return capitalized.some(({ word, index }) => index > 0 && !sourceLexicon.has(word.toLowerCase()))
 }
 
 function normalizePhrase(value: string): string {
