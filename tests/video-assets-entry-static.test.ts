@@ -2,35 +2,79 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-const source = readFileSync(
+const seedSource = readFileSync(
+  resolve(process.cwd(), 'supabase/functions/seed-visual-concepts/index.ts'),
+  'utf8',
+)
+
+const matchSource = readFileSync(
   resolve(process.cwd(), 'supabase/functions/match-video-assets/index.ts'),
   'utf8',
 )
 
+describe('visual concept seed Edge entry', () => {
+  it('uses pinned Edge dependencies and authenticates before model or database work', () => {
+    expect(seedSource).toContain("import 'jsr:@supabase/functions-js/edge-runtime.d.ts'")
+    expect(seedSource).toContain("from 'npm:@supabase/supabase-js@2.110.2'")
+    expect(seedSource).toContain('handleAuthenticatedRequest(request, Deno.env')
+    expect(seedSource.indexOf('handleAuthenticatedRequest(request, Deno.env'))
+      .toBeLessThan(seedSource.indexOf("new Supabase.ai.Session('gte-small')"))
+    expect(seedSource.indexOf('handleAuthenticatedRequest(request, Deno.env'))
+      .toBeLessThan(seedSource.indexOf('createClient('))
+    expect(seedSource).not.toContain('request.json()')
+  })
+
+  it('injects built-in inference and the Task 3 RPC into the bounded seed helper', () => {
+    expect(seedSource).toContain("new Supabase.ai.Session('gte-small')")
+    expect(seedSource).toContain('seedVisualConcepts({')
+    expect(seedSource).toContain('session,')
+    expect(seedSource).toContain('client,')
+    expect(seedSource).toContain('jsonResponse(result)')
+  })
+
+  it('returns controlled method and seed errors without logging secrets or payloads', () => {
+    expect(seedSource).toContain("errorResponse(405, 'method_not_allowed', 'only POST is supported')")
+    expect(seedSource).toContain("errorResponse(500, 'visual_concept_seed_failed', 'visual concept seed failed')")
+    expect(seedSource).not.toContain('console.log')
+    expect(seedSource).not.toContain('console.error')
+    expect(seedSource).not.toContain('error.message')
+  })
+})
+
 describe('video asset matching Edge entry', () => {
   it('pins Edge imports and rejects methods other than POST', () => {
-    expect(source).toContain("import 'jsr:@supabase/functions-js/edge-runtime.d.ts'")
-    expect(source).toContain("from 'npm:@supabase/supabase-js@2.110.2'")
-    expect(source).toContain("if (request.method !== 'POST')")
-    expect(source).toContain(
+    const methodGuard = matchSource.indexOf("if (request.method !== 'POST')")
+    const methodResponse = matchSource.indexOf(
+      "errorResponse(405, 'method_not_allowed', 'only POST is supported')",
+    )
+    const auth = matchSource.indexOf('handleAuthenticatedRequest(request, Deno.env')
+
+    expect(matchSource).toContain("import 'jsr:@supabase/functions-js/edge-runtime.d.ts'")
+    expect(matchSource).toContain("from 'npm:@supabase/supabase-js@2.110.2'")
+    expect(methodGuard).toBeGreaterThan(-1)
+    expect(methodResponse).toBeGreaterThan(-1)
+    expect(auth).toBeGreaterThan(-1)
+    expect(methodGuard).toBeLessThan(auth)
+    expect(methodResponse).toBeLessThan(auth)
+    expect(matchSource).toContain(
       "errorResponse(405, 'method_not_allowed', 'only POST is supported')",
     )
   })
 
   it('authenticates before parsing JSON or constructing dependencies', () => {
-    const auth = source.indexOf('handleAuthenticatedRequest(request, Deno.env')
+    const auth = matchSource.indexOf('handleAuthenticatedRequest(request, Deno.env')
 
     expect(auth).toBeGreaterThan(-1)
-    expect(auth).toBeLessThan(source.indexOf('request.json()'))
-    expect(auth).toBeLessThan(source.indexOf('createDependencies(Deno.env)'))
-    expect(source).toContain('parseVideoAssetRequest(await request.json())')
-    expect(source).toContain('matchVideoAssets(input, createDependencies(Deno.env))')
-    expect(source.indexOf('createDependencies(Deno.env)'))
-      .toBeLessThan(source.indexOf('createClient('))
-    expect(source.indexOf('createDependencies(Deno.env)'))
-      .toBeLessThan(source.indexOf("new Supabase.ai.Session('gte-small')"))
-    expect(source.indexOf('createDependencies(Deno.env)'))
-      .toBeLessThan(source.indexOf('createPlannerTransport(environment)'))
+    expect(auth).toBeLessThan(matchSource.indexOf('request.json()'))
+    expect(auth).toBeLessThan(matchSource.indexOf('createDependencies(Deno.env)'))
+    expect(matchSource).toContain('parseVideoAssetRequest(await request.json())')
+    expect(matchSource).toContain('matchVideoAssets(input, createDependencies(Deno.env))')
+    expect(matchSource.indexOf('createDependencies(Deno.env)'))
+      .toBeLessThan(matchSource.indexOf('createClient('))
+    expect(matchSource.indexOf('createDependencies(Deno.env)'))
+      .toBeLessThan(matchSource.indexOf("new Supabase.ai.Session('gte-small')"))
+    expect(matchSource.indexOf('createDependencies(Deno.env)'))
+      .toBeLessThan(matchSource.indexOf('createPlannerTransport(environment)'))
   })
 
   it('reads the exact service and provider secrets only on the server', () => {
@@ -41,17 +85,17 @@ describe('video asset matching Edge entry', () => {
       'VECTEEZY_API_KEY',
     ]
     for (const name of expectedNames) {
-      expect(source).toContain(`requiredEnvironment(environment, '${name}')`)
+      expect(matchSource).toContain(`requiredEnvironment(environment, '${name}')`)
     }
     expect(Array.from(
-      source.matchAll(/requiredEnvironment\(environment, '([^']+)'\)/g),
+      matchSource.matchAll(/requiredEnvironment\(environment, '([^']+)'\)/g),
       match => match[1],
     )).toEqual(expectedNames)
 
-    expect(source).toContain('const value = environment.get(name)')
-    expect(source).not.toContain('input.SUPABASE')
-    expect(source).not.toContain('input.VECTEEZY')
-    expect(source).not.toContain('request.headers.get')
+    expect(matchSource).toContain('const value = environment.get(name)')
+    expect(matchSource).not.toContain('input.SUPABASE')
+    expect(matchSource).not.toContain('input.VECTEEZY')
+    expect(matchSource).not.toContain('request.headers.get')
   })
 
   it('wires the committed matching dependencies', () => {
@@ -66,24 +110,24 @@ describe('video asset matching Edge entry', () => {
       'sha256,',
       'now: Date.now',
     ]) {
-      expect(source).toContain(boundary)
+      expect(matchSource).toContain(boundary)
     }
-    expect(source).toContain('resources: page.resources')
-    expect(source).toContain('totalResources: page.totalResources')
-    expect(source).toContain('fetcher: fetch')
-    expect(source).toContain("crypto.subtle.digest('SHA-256'")
-    expect(source).toContain("byte.toString(16).padStart(2, '0')")
+    expect(matchSource).toContain('resources: page.resources')
+    expect(matchSource).toContain('totalResources: page.totalResources')
+    expect(matchSource).toContain('fetcher: fetch')
+    expect(matchSource).toContain("crypto.subtle.digest('SHA-256'")
+    expect(matchSource).toContain("byte.toString(16).padStart(2, '0')")
   })
 
   it('returns stable controlled errors without logging or download paths', () => {
-    expect(source).toContain('if (error instanceof VideoAssetError)')
-    expect(source).toContain('errorResponse(error.status, error.code, error.message)')
-    expect(source).toContain('if (error instanceof SyntaxError)')
-    expect(source).toContain("errorResponse(400, 'invalid_request', 'invalid request')")
-    expect(source).toContain(
+    expect(matchSource).toContain('if (error instanceof VideoAssetError)')
+    expect(matchSource).toContain('errorResponse(error.status, error.code, error.message)')
+    expect(matchSource).toContain('if (error instanceof SyntaxError)')
+    expect(matchSource).toContain("errorResponse(400, 'invalid_request', 'invalid request')")
+    expect(matchSource).toContain(
       "errorResponse(500, 'video_asset_match_failed', 'video asset matching failed')",
     )
-    expect(source).not.toContain('console.')
-    expect(source.toLocaleLowerCase('en-US')).not.toContain('download')
+    expect(matchSource).not.toContain('console.')
+    expect(matchSource.toLocaleLowerCase('en-US')).not.toContain('download')
   })
 })
