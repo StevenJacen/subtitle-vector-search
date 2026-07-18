@@ -45,7 +45,15 @@ OLLAMA_GATEWAY_SECURITY_CONFIRMED=true
 
 Before enabling hosted inference, an unauthenticated `GET /api/tags` must return HTTP 401 or 403 from `AI_INFERENCE_API_HOST`. A public response means the gateway is not ready: keep hosted inference disabled and fix its authentication. Never bypass this gate.
 
-The default `supabase-ai` transport uses the configured authenticated gateway. A direct authenticated fallback is available only for a protected Ollama endpoint and requires its own function secret:
+The `supabase-ai` transport instantiates `Supabase.ai.Session('gemma4:12b')`
+directly; this code path does not itself read `AI_INFERENCE_API_HOST` or
+`OLLAMA_MODEL`, and its hosted compatibility with `AI_INFERENCE_API_HOST` is not
+yet proven. Keep hosted inference disabled until both the security gate and the
+hosted compatibility spike pass.
+
+The direct authenticated fallback is available only for a protected Ollama
+endpoint. The `ollama-http` transport explicitly consumes
+`AI_INFERENCE_API_HOST`, `OLLAMA_AUTH_TOKEN`, and `OLLAMA_MODEL`:
 
 ```dotenv
 VIDEO_PLANNER_TRANSPORT=ollama-http
@@ -102,7 +110,7 @@ npx tsx src/cli.ts import <authorized-file.srt> --title "The Shawshank Redemptio
 npx tsx src/cli.ts search "hope during hard times"
 ```
 
-Migrations must be pushed before either function is deployed. The project ref above is the target project for this workflow; substitute a different ref only when intentionally deploying elsewhere. Remote deployment compilation is mandatory because local Deno semantic checking is not available in every Node development environment.
+Migrations must be pushed before any function is deployed. The project ref above is the target project for this workflow; substitute a different ref only when intentionally deploying elsewhere. Remote deployment compilation is mandatory because local Deno semantic checking is not available in every Node development environment.
 
 Verify the linked migration state and run hosted database advisors after deployment:
 
