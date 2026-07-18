@@ -72,7 +72,7 @@ export async function planVisualSearch(
   }
 
   try {
-    const repairedOutput = await dependencies.generate(buildRepairPrompt(firstAttempt))
+    const repairedOutput = await dependencies.generate(buildRepairPrompt(input, firstAttempt))
     const repaired = parseGeneratedPlan(repairedOutput, input)
     if (repaired.ok) {
       return { plan: repaired.plan, fallbackUsed: false }
@@ -247,8 +247,13 @@ function validationMessages(candidate: unknown): string[] {
   return ['visual plan failed schema validation']
 }
 
-function buildRepairPrompt(attempt: Extract<GeneratedPlanResult, { ok: false }>): string {
+function buildRepairPrompt(
+  input: VisualPlannerInput,
+  attempt: Extract<GeneratedPlanResult, { ok: false }>,
+): string {
   return [
+    buildPlannerPrompt(input),
+    'Repair the previous response using these details.',
     `Validation errors: ${attempt.messages.join('; ')}`,
     `Malformed structured object: ${JSON.stringify(attempt.malformed)}`,
     'Return only the corrected JSON object.',

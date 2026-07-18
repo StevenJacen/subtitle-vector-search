@@ -86,6 +86,28 @@ describe('visual planner prompt and repair', () => {
     expect(generate.mock.calls[1][0]).toContain('invalid JSON')
   })
 
+  it('grounds a non-JSON repair in the complete original contract and context', async () => {
+    const malformedOutput = 'not-json'
+    const outputs = [malformedOutput, JSON.stringify(validPlan)]
+    const generate = vi.fn().mockImplementation(async () => outputs.shift() as string)
+
+    await planVisualSearch(plannerInput, { generate, fallback: vi.fn() })
+
+    expect(generate).toHaveBeenCalledTimes(2)
+    const repairPrompt = generate.mock.calls[1][0]
+    expect(repairPrompt).toContain(buildPlannerPrompt(plannerInput))
+    for (const groundedValue of [
+      plannerInput.sourceText,
+      plannerInput.contextText,
+      plannerInput.theme,
+      plannerInput.movieTitle,
+    ]) {
+      expect(repairPrompt).toContain(groundedValue)
+    }
+    expect(repairPrompt).toContain('Validation errors: invalid JSON')
+    expect(repairPrompt).toContain(`Malformed structured object: ${JSON.stringify(malformedOutput)}`)
+  })
+
   it('repairs duplicate query kinds with validation details and the malformed object', async () => {
     const duplicatePlan = {
       ...validPlan,
