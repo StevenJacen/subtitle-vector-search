@@ -1,9 +1,10 @@
-import type {
-  QueryKind,
-  VideoAssetProvider,
-  VideoAssetRunStatus,
-  VideoAssetSelectionRequest,
-  VisualIntent,
+import {
+  VideoAssetError,
+  type QueryKind,
+  type VideoAssetProvider,
+  type VideoAssetRunStatus,
+  type VideoAssetSelectionRequest,
+  type VisualIntent,
 } from './video-assets.ts'
 import type { StableVecteezyResource } from './vecteezy.ts'
 
@@ -148,7 +149,7 @@ export function createVideoAssetRepository(client: SupabaseRepositoryClient): Vi
     },
 
     async beginRun(input) {
-      const result = rows(await database(client.rpc('begin_video_search_run', {
+      const result = rows(await beginRunDatabase(client.rpc('begin_video_search_run', {
         p_subtitle_chunk_id: input.subtitleChunkId ?? null,
         p_input_kind: input.inputKind,
         p_input_digest: input.inputDigest,
@@ -156,7 +157,7 @@ export function createVideoAssetRepository(client: SupabaseRepositoryClient): Vi
         p_candidate_count: input.candidateCount,
         p_planner_model: input.plannerModel,
         p_prompt_version: input.promptVersion,
-      })))[0]
+      }), input.subtitleChunkId !== undefined))[0]
       if (result === undefined) throw databaseFailure()
       return {
         runId: string(result.run_id),
@@ -290,6 +291,31 @@ async function database(result: DatabaseResult | PromiseLike<DatabaseResult>): P
   }
   if (resolved.error !== null) throw databaseFailure()
   return resolved.data
+}
+
+async function beginRunDatabase(
+  result: DatabaseResult | PromiseLike<DatabaseResult>,
+  hasSubtitleChunkId: boolean,
+): Promise<unknown> {
+  let resolved: DatabaseResult
+  try {
+    resolved = await result
+  } catch {
+    throw databaseFailure()
+  }
+  if (resolved.error !== null) {
+    if (hasSubtitleChunkId && databaseErrorCode(resolved.error) === '23503') {
+      throw new VideoAssetError(404, 'subtitle_chunk_not_ready', 'subtitle chunk is not available')
+    }
+    throw databaseFailure()
+  }
+  return resolved.data
+}
+
+function databaseErrorCode(error: unknown): string | null {
+  if (typeof error !== 'object' || error === null || Array.isArray(error)) return null
+  const code = (error as Record<string, unknown>).code
+  return typeof code === 'string' ? code : null
 }
 
 function row(value: unknown): Record<string, unknown> | null {

@@ -389,6 +389,69 @@ describe('video asset matching orchestration', () => {
     expect(deps.plan).not.toHaveBeenCalled()
   })
 
+  it('maps only a beginRun chunk foreign-key error to controlled 404 without finishing', async () => {
+    const rawDetails = 'insert on video_search_runs violates subtitle chunk foreign key'
+    const client = {
+      from: vi.fn(),
+      rpc: vi.fn().mockResolvedValue({
+        data: null,
+        error: { code: '23503', message: rawDetails, details: 'subtitle_chunk_id=404' },
+      }),
+    }
+    const deps = dependencies(createVideoAssetRepository(client))
+
+    const promise = matchVideoAssets({ subtitleChunkId: 404, candidateCount: 5 }, deps)
+
+    await expect(promise).rejects.toMatchObject({
+      status: 404,
+      code: 'subtitle_chunk_not_ready',
+      message: 'subtitle chunk is not available',
+    })
+    await expect(promise).rejects.not.toThrow(rawDetails)
+    expect(client.from).not.toHaveBeenCalled()
+    expect(client.rpc).toHaveBeenCalledTimes(1)
+    expect(client.rpc).toHaveBeenCalledWith('begin_video_search_run', expect.any(Object))
+  })
+
+  it('finishes malformed fresh source context before rethrowing the fixed database error', async () => {
+    const chunkQuery = query({ data: {
+      track_id: 'malformed database value',
+      text: 'Selected chunk',
+      first_cue_index: 10,
+      last_cue_index: 11,
+    }, error: null })
+    const rpc = vi.fn().mockImplementation(async (name: string) => name === 'begin_video_search_run'
+      ? { data: [{ run_id: runId, status: 'planning', is_existing: false }], error: null }
+      : { data: null, error: null })
+    const deps = dependencies(createVideoAssetRepository({
+      from: vi.fn(() => chunkQuery),
+      rpc,
+    }))
+
+    const promise = matchVideoAssets({ subtitleChunkId: 42, candidateCount: 5 }, deps)
+
+    await expect(promise).rejects.toStrictEqual(new Error('database operation failed'))
+    const finishCall = rpc.mock.calls.find(call => call[0] === 'finish_video_search_run')
+    expect(finishCall).toBeDefined()
+    expect(finishCall?.[1]).toEqual(expect.objectContaining({
+      p_run_id: runId,
+      p_status: 'failed',
+      p_fallback_used: false,
+      p_visual_intent: null,
+      p_planner_elapsed_ms: 0,
+      p_failure_code: 'source_context_failed',
+      p_candidates: [],
+    }))
+    expect(finishCall?.[1].p_queries).toHaveLength(3)
+    expect(finishCall?.[1].p_queries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'literal', status: 'failed' }),
+      expect.objectContaining({ kind: 'action', status: 'failed' }),
+      expect.objectContaining({ kind: 'metaphor', status: 'failed' }),
+    ]))
+    expect(deps.plan).not.toHaveBeenCalled()
+    expect(deps.search).not.toHaveBeenCalled()
+  })
+
   it('finishes planner failures and suppresses planner details and source text', async () => {
     const repo = repository()
     const deps = dependencies(repo, {

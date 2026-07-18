@@ -83,20 +83,25 @@ export async function matchVideoAssets(
   try {
     source = await planningSource(request, dependencies.repository)
   } catch (error) {
-    if (error instanceof VideoAssetError && error.code === 'subtitle_chunk_not_ready') {
-      await dependencies.repository.finishRun({
-        runId: begin.runId,
-        status: 'failed',
-        fallbackUsed: false,
-        visualIntent: null,
-        plannerElapsedMs: 0,
-        totalElapsedMs: elapsed(dependencies, totalStartedAt),
-        failureCode: error.code,
-        queries: failedQueries(error.code, 'subtitle chunk unavailable', 0),
-        candidates: [],
-      })
-    }
-    throw error
+    const missingChunk = error instanceof VideoAssetError && error.code === 'subtitle_chunk_not_ready'
+    const failureCode = missingChunk ? error.code : 'source_context_failed'
+    const controlled = missingChunk ? error : new Error('database operation failed')
+    await dependencies.repository.finishRun({
+      runId: begin.runId,
+      status: 'failed',
+      fallbackUsed: false,
+      visualIntent: null,
+      plannerElapsedMs: 0,
+      totalElapsedMs: elapsed(dependencies, totalStartedAt),
+      failureCode,
+      queries: failedQueries(
+        failureCode,
+        missingChunk ? 'subtitle chunk unavailable' : 'source context unavailable',
+        0,
+      ),
+      candidates: [],
+    })
+    throw controlled
   }
   const plannerStartedAt = dependencies.now()
   let planned: { plan: VisualPlan; fallbackUsed: boolean }
