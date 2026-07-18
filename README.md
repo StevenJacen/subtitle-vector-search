@@ -29,6 +29,29 @@ OPENSUBTITLES_USER_AGENT=private-subtitle-search v1.0
 
 `OPENSUBTITLES_API_KEY`, `OPENSUBTITLES_TOKEN`, and `OPENSUBTITLES_USER_AGENT` are required only when using `subtitle download`. Obtain and use OpenSubtitles credentials in accordance with its terms and your account permissions. Keep `.env`, database passwords, and personal tokens out of source control.
 
+### Video Candidate Matching Configuration
+
+The Vecteezy matching workflow uses server-only Edge Function secrets. Do not put
+these values in a browser, CLI request, commit, or client-side application:
+
+```dotenv
+VECTEEZY_ACCOUNT=<account-id>
+VECTEEZY_API_KEY=<api-key>
+AI_INFERENCE_API_HOST=https://<authenticated-ollama-gateway>
+OLLAMA_MODEL=gemma4:12b
+VIDEO_PLANNER_TRANSPORT=supabase-ai
+OLLAMA_GATEWAY_SECURITY_CONFIRMED=true
+```
+
+Before enabling hosted inference, an unauthenticated `GET /api/tags` must return HTTP 401 or 403 from `AI_INFERENCE_API_HOST`. A public response means the gateway is not ready: keep hosted inference disabled and fix its authentication. Never bypass this gate.
+
+The default `supabase-ai` transport uses the configured authenticated gateway. A direct authenticated fallback is available only for a protected Ollama endpoint and requires its own function secret:
+
+```dotenv
+VIDEO_PLANNER_TRANSPORT=ollama-http
+OLLAMA_AUTH_TOKEN=<bearer-token>
+```
+
 ## Local Testing
 
 Local Supabase uses Docker. The seed adds one synthetic ready track with three synthetic cues and two normalized 384-dimensional vectors; it never adds real subtitle dialogue.
@@ -72,6 +95,9 @@ npx supabase functions deploy ingest-subtitles --no-verify-jwt
 npx supabase functions deploy search-subtitles --no-verify-jwt
 npx supabase functions deploy movie-quote-montage --no-verify-jwt
 npx supabase functions deploy hybrid-subtitle-search --no-verify-jwt
+npx supabase functions deploy seed-visual-concepts --no-verify-jwt
+npx supabase functions deploy match-video-assets --no-verify-jwt
+npx supabase functions deploy select-video-asset --no-verify-jwt
 npx tsx src/cli.ts import <authorized-file.srt> --title "The Shawshank Redemption" --year 1994 --imdb tt0111161 --source manual
 npx tsx src/cli.ts search "hope during hard times"
 ```
@@ -86,6 +112,70 @@ npx supabase db lint --linked --level warning
 ```
 
 The schema and Edge Functions are deployed to the project above. Deployment does not import subtitle content; import only English subtitle files you are authorized to retain and use.
+
+## Video Candidate Matching
+
+`match-video-assets` turns a stored chunk, supplied text, or a theme into 5-10
+Vecteezy video candidates for manual selection. It uses exactly three English
+search query kinds: `literal`, `action`, and `metaphor`. Candidate counts are in
+the inclusive range 5-10; use the default of eight unless a review needs a
+smaller or larger short list.
+
+Push the matching migration before deploying any of its functions. Then set the
+server-only values above with `npx supabase secrets set`, deploy in this exact
+order, and seed the private fallback concepts once:
+
+```powershell
+npx supabase db push
+npx supabase functions deploy seed-visual-concepts --no-verify-jwt
+npx supabase functions deploy match-video-assets --no-verify-jwt
+npx supabase functions deploy select-video-asset --no-verify-jwt
+
+Invoke-RestMethod -Method Post `
+  -Uri https://kwoppqigrtvgmmbnzbpx.supabase.co/functions/v1/seed-visual-concepts `
+  -Headers @{ 'x-subtitle-token' = $env:SUBTITLE_PERSONAL_TOKEN } `
+  -ContentType 'application/json' `
+  -Body '{}'
+```
+
+Use a generic synthetic visual theme or non-sensitive context in requests. Do
+not send real movie dialogue as ad hoc text. This request returns an idempotent
+run and temporary previews for review; retrying the same request reuses the
+persisted result rather than repeating planning and provider search:
+
+```powershell
+$match = Invoke-RestMethod -Method Post `
+  -Uri https://kwoppqigrtvgmmbnzbpx.supabase.co/functions/v1/match-video-assets `
+  -Headers @{ 'x-subtitle-token' = $env:SUBTITLE_PERSONAL_TOKEN } `
+  -ContentType 'application/json' `
+  -Body '{"theme":"a fresh start after uncertainty","candidateCount":8}'
+
+Invoke-RestMethod -Method Post `
+  -Uri https://kwoppqigrtvgmmbnzbpx.supabase.co/functions/v1/select-video-asset `
+  -Headers @{ 'x-subtitle-token' = $env:SUBTITLE_PERSONAL_TOKEN } `
+  -ContentType 'application/json' `
+  -Body ("{`"runId`":`"{0}`",`"providerResourceId`":{1},`"note`":`"selected after manual review`"}" -f $match.runId, $match.candidates[0].providerResourceId)
+```
+
+Inspect private matching records in the Supabase Dashboard with a service-role
+administrator only: `visual_concepts`, `video_search_runs`,
+`video_search_queries`, `video_search_candidates`, and
+`video_asset_selections`. These tables have forced RLS and are not a public API.
+The selection endpoint records one manual selection for a run and replaces a
+previous selection atomically.
+
+This phase does not call a Vecteezy download endpoint, does not fetch media,
+does not store preview URLs, and does not train on Vecteezy material. It only
+persists stable candidate metadata and the selected provider resource ID.
+
+### Rollback and deactivation
+
+To stop the workflow immediately, stop calling the two matching endpoints or
+delete the `match-video-assets` and `select-video-asset` deployments; the
+subtitle search endpoints remain independent. Use a reviewed follow-up
+migration to remove the five private matching tables and their RPCs only when
+their audit records are no longer needed. Do not call Vecteezy media or download
+routes as part of rollback.
 
 ## Movie Quote Montage
 
