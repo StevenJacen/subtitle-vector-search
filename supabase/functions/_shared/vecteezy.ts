@@ -41,6 +41,9 @@ export async function searchVecteezy(
     content_type: 'video',
     license_type: 'commercial',
     duration: '3_15',
+    sort_by: 'relevance',
+    family_friendly: 'true',
+    per_page: '10',
   })
   const payload = await request(url, options)
   const input = record(payload)
