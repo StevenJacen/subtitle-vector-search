@@ -94,6 +94,18 @@ npx tsx src/cli.ts search "quiet determination" --limit 10
 npx tsx src/cli.ts search "quiet determination" --movie-id 7
 ```
 
+To add a large classic-film batch, use the resumable importer. It uses the
+ranked candidate pool in `data/classic-movie-candidates.json`, stores downloaded
+subtitle files under ignored `downloads/classics`, and writes resume progress to
+ignored `.batch-state/classic-import-state.json`.
+
+```powershell
+npx tsx src/batch-classics.ts --target 200
+```
+
+If OpenSubtitles returns a daily quota or rate-limit response, the command stops
+cleanly. Rerun the same command later to continue from the saved state.
+
 Search output is compact and timestamped:
 
 ```text

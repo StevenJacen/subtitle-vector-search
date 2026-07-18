@@ -1,5 +1,7 @@
 .worktrees/
 .superpowers/
+.cache/
+.batch-state/
 node_modules/
 coverage/
 dist/
