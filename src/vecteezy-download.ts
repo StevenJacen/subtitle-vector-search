@@ -264,6 +264,7 @@ export class VecteezyDownloadClient {
     try {
       response = await this.#options.fetcher(providerUrl.toString(), {
         headers: { authorization: `Bearer ${this.#options.apiKey}`, accept: 'application/json' },
+        redirect: 'error',
         signal: AbortSignal.timeout(10_000),
       })
     } catch {

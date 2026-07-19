@@ -118,6 +118,25 @@ describe('Vecteezy formal downloads', () => {
     expect(JSON.stringify(requested)).not.toContain('status.test')
   })
 
+  it('blocks redirects on every authenticated provider fetch', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(downloadInfo(5))
+      .mockResolvedValueOnce(formalDownload())
+      .mockResolvedValueOnce(Response.json({ data: { progress: 100, url: 'https://signed.test/ready-secret' } }))
+    const downloadClient = client(fetcher)
+    const requested = await downloadClient.requestDownload(42, new FormalDownloadBudget(4))
+
+    await downloadClient.waitForDownload(requested)
+
+    expect(fetcher).toHaveBeenCalledTimes(3)
+    for (const [, init] of fetcher.mock.calls) {
+      expect(init).toMatchObject({
+        redirect: 'error',
+        headers: { authorization: `Bearer ${credentials.apiKey}` },
+      })
+    }
+  })
+
   it.each([
     'https://attacker.test/private-status',
     'http://api.vecteezy.com/v2/161976/downloads/status/private-ticket',
