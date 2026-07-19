@@ -9,7 +9,7 @@ export interface VideoProductionRepository {
   beginRender(renderId: string): Promise<{ status: 'rendering' }>
   complete(input: Extract<VideoProductionRequest, { action: 'complete' }>): Promise<{ status: 'completed' }>
   fail(input: Extract<VideoProductionRequest, { action: 'fail' }>): Promise<{ status: 'failed' }>
-  retry(renderId: string): Promise<{ status: 'planned' }>
+  retry(renderId: string): Promise<{ status: 'planned' | 'downloading' }>
 }
 
 interface DatabaseResult {
@@ -108,8 +108,8 @@ export function createVideoProductionRepository(client: SupabaseRepositoryClient
 
     async retry(renderId) {
       const result = firstRow(await database(client.rpc('retry_video_render', { p_render_id: renderId })))
-      if (result.status !== 'planned') throw productionFailure()
-      return { status: 'planned' }
+      if (result.status !== 'planned' && result.status !== 'downloading') throw productionFailure()
+      return { status: result.status }
     },
   }
 }

@@ -101,6 +101,17 @@ describe('video production metadata handler', () => {
     expect(JSON.parse(body)).toEqual({ error: { code: 'production_metadata_failed', message: 'production metadata failed' } })
     expect(body).not.toContain(secret)
   })
+
+  it('returns downloading when a retained-download retry resumes', async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: [{ status: 'downloading' }], error: null })
+    const repo = createVideoProductionRepository({ rpc })
+
+    const response = await handleVideoProductionRequest(request(input('retry')), environment, () => repo)
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({ status: 'downloading' })
+    expect(rpc).toHaveBeenCalledWith('retry_video_render', { p_render_id: renderId })
+  })
 })
 
 describe('video production repository', () => {
@@ -135,5 +146,23 @@ describe('video production repository', () => {
 
     await expect(repo.start(input('start'))).rejects.toStrictEqual(new VideoProductionError(status, code, code.replaceAll('_', ' ')))
     await expect(repo.start(input('start'))).rejects.not.toThrow(secret)
+  })
+
+  it('accepts downloading from retry_video_render for retained downloads', async () => {
+    const repo = createVideoProductionRepository({
+      rpc: vi.fn().mockResolvedValue({ data: [{ status: 'downloading' }], error: null }),
+    })
+
+    await expect(repo.retry(renderId)).resolves.toEqual({ status: 'downloading' })
+  })
+
+  it('rejects an invalid retry RPC status with the stable failure', async () => {
+    const repo = createVideoProductionRepository({
+      rpc: vi.fn().mockResolvedValue({ data: [{ status: 'rendering' }], error: null }),
+    })
+
+    await expect(repo.retry(renderId)).rejects.toStrictEqual(
+      new VideoProductionError(500, 'production_metadata_failed', 'production metadata failed'),
+    )
   })
 })
