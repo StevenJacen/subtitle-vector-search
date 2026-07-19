@@ -7,6 +7,8 @@ const matchingMigrations = readdirSync(migrationDirectory)
   .filter(fileName => fileName.endsWith('_video_production.sql'))
 const failRenderLintMigrations = readdirSync(migrationDirectory)
   .filter(fileName => fileName.endsWith('_silence_fail_video_render_lint.sql'))
+const foreignKeyIndexMigrations = readdirSync(migrationDirectory)
+  .filter(fileName => fileName.endsWith('_cover_video_production_foreign_keys.sql'))
 const databaseTestPath = resolve(process.cwd(), 'supabase/tests/database/video_production.sql')
 
 function migrationSource(): string {
@@ -110,6 +112,15 @@ describe('video production migration', () => {
 
     expect(source).toContain('perform pg_catalog.length(p_failure_message)')
     expect(source).not.toContain('failure_message = p_failure_message')
+  })
+
+  it('covers every composite production foreign key in constraint order', () => {
+    expect(foreignKeyIndexMigrations).toHaveLength(1)
+    const source = readFileSync(resolve(migrationDirectory, foreignKeyIndexMigrations[0]), 'utf8')
+
+    expect(source).toContain('video_asset_downloads (selection_id, candidate_id)')
+    expect(source).toContain('video_asset_selections (run_id, candidate_id)')
+    expect(source).toContain('video_render_segments (render_id, download_id)')
   })
 
   it('retries to downloading when verified downloads already exist', () => {
