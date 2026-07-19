@@ -126,7 +126,7 @@ export class VecteezyDownloadClient {
   async getDownloadInfo(resourceId: number, fileType = FILE_TYPE): Promise<VecteezyDownloadInfo> {
     validateResourceId(resourceId)
     const response = await this.#providerRequest(this.#resourceUrl(resourceId, 'download_info', fileType))
-    const payload = providerData(await response.json())
+    const payload = await providerJson(response)
     const sourceSizeBytes = normalizePositiveInteger(payload.file_size)
     if (sourceSizeBytes === null) {
       throw new VecteezyDownloadError('invalid_provider_payload', 'Vecteezy download info payload is invalid')
@@ -158,7 +158,7 @@ export class VecteezyDownloadClient {
     budget.reserve()
     this.#aggregateSizeBytes += info.sourceSizeBytes
     const response = await this.#providerRequest(this.#resourceUrl(resourceId, 'download', fileType))
-    const payload = providerData(await response.json())
+    const payload = await providerJson(response)
     const signedUrl = signedUrlFrom(payload)
     const statusUrl = stringOrNull(payload.download_status_url)
     if (statusUrl !== null && approvedProviderUrl(statusUrl) === null) {
@@ -184,7 +184,7 @@ export class VecteezyDownloadClient {
 
       for (let attempt = 0; attempt < this.#options.maxStatusPolls; attempt += 1) {
         const response = await this.#providerRequest(pending.statusUrl)
-        const payload = providerData(await response.json())
+        const payload = await providerJson(response)
         const signedUrl = signedUrlFrom(payload)
         if (signedUrl !== null && normalizeNonNegativeInteger(payload.progress) === 100) {
           pending.signedUrl = signedUrl
@@ -293,10 +293,18 @@ const defaultFileOperations: VecteezyDownloadFileOperations = {
   readFile,
 }
 
+async function providerJson(response: Response): Promise<Record<string, unknown>> {
+  try {
+    return providerData(await response.json())
+  } catch {
+    throw new VecteezyDownloadError('invalid_provider_payload', 'Vecteezy provider payload is invalid')
+  }
+}
+
 function providerData(value: unknown): Record<string, unknown> {
   const input = record(value)
-  const data = record(input.data)
-  return Object.keys(data).length > 0 ? data : input
+  const data = 'data' in input ? record(input.data) : input
+  return { ...data }
 }
 
 function quotaFromHeaders(headers: Headers): DownloadQuota {
@@ -344,9 +352,10 @@ function validateRelativeDestination(destination: string): void {
 }
 
 function record(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {}
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('provider payload is not an object')
+  }
+  return value as Record<string, unknown>
 }
 
 function stringOrNull(value: unknown): string | null {

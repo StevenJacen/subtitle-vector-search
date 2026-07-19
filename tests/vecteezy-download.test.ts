@@ -16,6 +16,7 @@ beforeEach(async () => {
 const credentials = { accountId: '161976', apiKey: 'secret' }
 const MiB = 1024 * 1024
 const SAFE_STATUS_URL = 'https://api.vecteezy.com/v2/161976/downloads/status/private-ticket'
+const PRIVATE_STATUS_URL = 'https://api.vecteezy.com/v2/161976/downloads/status/private-ticket?signature=synthetic-secret'
 
 function downloadInfo(size: number | string, headers: HeadersInit = {}): Response {
   return Response.json({
@@ -29,6 +30,25 @@ function downloadInfo(size: number | string, headers: HeadersInit = {}): Respons
 
 function formalDownload(statusUrl = SAFE_STATUS_URL): Response {
   return Response.json({ data: { download_status_url: statusUrl } })
+}
+
+function providerJson(body: unknown | (() => unknown)): Response {
+  return {
+    ok: true,
+    status: 200,
+    headers: new Headers(),
+    json: vi.fn(async () => typeof body === 'function' ? body() : body),
+  } as unknown as Response
+}
+
+function expectRedactedProviderPayloadError(error: unknown, privateUrl: string): void {
+  expect(error).toBeInstanceOf(VecteezyDownloadError)
+  expect(error).toMatchObject({
+    code: 'invalid_provider_payload',
+    message: 'Vecteezy provider payload is invalid',
+  })
+  expect(String(error)).not.toContain(privateUrl)
+  expect(String(error)).not.toContain(credentials.apiKey)
 }
 
 function client(
@@ -141,6 +161,41 @@ describe('Vecteezy formal downloads', () => {
 
     await expect(client(fetcher).getDownloadInfo(42)).rejects.toMatchObject({ code: 'invalid_provider_payload' })
     expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+
+  it('redacts a rejected provider JSON body while reading download info', async () => {
+    const fetcher = vi.fn().mockResolvedValue(providerJson(() => {
+      throw new Error(`failed to parse ${PRIVATE_STATUS_URL} with ${credentials.apiKey}`)
+    }))
+
+    const error = await client(fetcher).getDownloadInfo(42).catch(error => error)
+
+    expectRedactedProviderPayloadError(error, PRIVATE_STATUS_URL)
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+
+  it('redacts a malformed provider shape while reading the formal download response', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(downloadInfo(5))
+      .mockResolvedValueOnce(providerJson({ data: [] }))
+
+    const error = await client(fetcher).requestDownload(42, new FormalDownloadBudget(4)).catch(error => error)
+
+    expectRedactedProviderPayloadError(error, PRIVATE_STATUS_URL)
+    expect(fetcher).toHaveBeenCalledTimes(2)
+  })
+
+  it('redacts a rejected provider JSON body while reading the formal download response', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(downloadInfo(5))
+      .mockResolvedValueOnce(providerJson(() => {
+        throw new Error(`failed to parse ${PRIVATE_STATUS_URL} with ${credentials.apiKey}`)
+      }))
+
+    const error = await client(fetcher).requestDownload(42, new FormalDownloadBudget(4)).catch(error => error)
+
+    expectRedactedProviderPayloadError(error, PRIVATE_STATUS_URL)
+    expect(fetcher).toHaveBeenCalledTimes(2)
   })
 
   it.each([401, 402, 403, 404, 422])('does not retry provider %i responses', async status => {
@@ -288,6 +343,45 @@ describe('Vecteezy signed transfers', () => {
     expect(fetcher.mock.calls.filter(([url]) => String(url).includes('signed.test/reused-secret'))).toHaveLength(2)
     expect(delay.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([1000, 500])
     expect(delay.mock.calls.every(([milliseconds]) => milliseconds <= 1000)).toBe(true)
+  })
+
+  it('sends credentials only to the exact approved status URL and redacts rejected status JSON', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(downloadInfo(5))
+      .mockResolvedValueOnce(formalDownload(PRIVATE_STATUS_URL))
+      .mockResolvedValueOnce(providerJson(() => {
+        throw new Error(`status JSON failed at ${PRIVATE_STATUS_URL} using ${credentials.apiKey}`)
+      }))
+    const downloadClient = client(fetcher)
+    const requested = await downloadClient.requestDownload(42, new FormalDownloadBudget(4))
+
+    const error = await downloadClient.waitForDownload(requested).catch(error => error)
+
+    expect(fetcher.mock.calls[2][0]).toBe(PRIVATE_STATUS_URL)
+    expect(fetcher.mock.calls[2][1].headers.authorization).toBe(`Bearer ${credentials.apiKey}`)
+    expect(fetcher.mock.calls.some(([url]) => String(url) === 'https://attacker.test/private-status')).toBe(false)
+    expectRedactedProviderPayloadError(error, PRIVATE_STATUS_URL)
+  })
+
+  it('redacts provider-data structural failures while polling download status', async () => {
+    const structuralPayload = new Proxy({}, {
+      has: (_target, key) => key === 'data',
+      get: () => {
+        throw new Error(`provider structure exposed ${PRIVATE_STATUS_URL} and ${credentials.apiKey}`)
+      },
+    })
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(downloadInfo(5))
+      .mockResolvedValueOnce(formalDownload(PRIVATE_STATUS_URL))
+      .mockResolvedValueOnce(providerJson(structuralPayload))
+    const downloadClient = client(fetcher)
+    const requested = await downloadClient.requestDownload(42, new FormalDownloadBudget(4))
+
+    const error = await downloadClient.waitForDownload(requested).catch(error => error)
+
+    expectRedactedProviderPayloadError(error, PRIVATE_STATUS_URL)
+    await expect(downloadClient.waitForDownload(requested))
+      .rejects.toMatchObject({ code: 'invalid_download_request' })
   })
 
   it('uses an inline URL from a completed status payload', async () => {
