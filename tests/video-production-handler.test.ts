@@ -119,7 +119,6 @@ describe('video production repository', () => {
     ['start', input('start'), 'start_video_render', { p_request_digest: sha256, p_theme: 'Classic cinema' }, [{ render_id: renderId, status: 'planned', is_existing: false }]],
     ['recordDownload', input('recordDownload'), 'record_video_asset_download', expect.any(Object), [{ render_id: renderId, download_id: 4 }]],
     ['beginRender', input('beginRender'), 'begin_video_render', { p_render_id: renderId }, [{ status: 'rendering' }]],
-    ['complete', input('complete'), 'complete_video_render', expect.any(Object), [{ status: 'completed' }]],
     ['fail', input('fail'), 'fail_video_render', { p_render_id: renderId, p_failure_code: 'render_failure', p_failure_message: 'video render failed' }, [{ status: 'failed' }]],
     ['retry', input('retry'), 'retry_video_render', { p_render_id: renderId }, [{ status: 'planned' }]],
   ] as const)('uses %s RPC with snake_case payload', async (method, value, rpcName, payload, data) => {
@@ -129,13 +128,40 @@ describe('video production repository', () => {
     await (method === 'start' ? repo.start(value as Extract<VideoProductionRequest, { action: 'start' }>)
       : method === 'recordDownload' ? repo.recordDownload(value as Extract<VideoProductionRequest, { action: 'recordDownload' }>)
       : method === 'beginRender' ? repo.beginRender(renderId)
-      : method === 'complete' ? repo.complete(value as Extract<VideoProductionRequest, { action: 'complete' }>)
       : method === 'fail' ? repo.fail(value as Extract<VideoProductionRequest, { action: 'fail' }>)
       : repo.retry(renderId))
 
     expect(rpc).toHaveBeenCalledWith(rpcName, payload)
     if (method === 'recordDownload') expect(rpc.mock.calls[0][1]).toEqual({ p_render_id: renderId, p_selection_id: 1, p_artifact_key: `video-runs/${renderId}/source.mp4`, p_file_type: 'mp4', p_source_size_bytes: 1, p_source_sha256: sha256, p_width: 1, p_height: 1, p_duration_ms: 1, p_frame_rate: 1, p_video_codec: 'h264', p_audio_codec: null, p_requires_attribution: false, p_required_attribution_url: null, p_quota_limit: null, p_quota_remaining: null })
-    if (method === 'complete') expect(rpc.mock.calls[0][1]).toEqual(expect.objectContaining({ p_render_id: renderId, p_segments: expect.any(Array), p_output: expect.objectContaining({ artifact_key: `video-runs/${renderId}/output.mp4`, output_sha256: sha256 }) }))
+  })
+
+  it('sends the exact complete_video_render payload', async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: [{ status: 'completed' }], error: null })
+    const repo = createVideoProductionRepository({ rpc })
+
+    await repo.complete(input('complete'))
+
+    expect(rpc).toHaveBeenCalledTimes(1)
+    expect(rpc).toHaveBeenCalledWith('complete_video_render', {
+      p_render_id: renderId,
+      p_segments: [
+        { segment_index: 0, download_id: 1, timeline_start_ms: 0, timeline_end_ms: 1, source_in_ms: 0, source_out_ms: 1, caption_kind: 'quote', caption_en: 'caption', caption_zh: '\u5b57\u5e55', source_track_id: 1, source_cue_index: 1 },
+        { segment_index: 1, download_id: 2, timeline_start_ms: 1, timeline_end_ms: 2, source_in_ms: 0, source_out_ms: 1, caption_kind: 'original', caption_en: 'caption', caption_zh: '\u5b57\u5e55', source_track_id: null, source_cue_index: null },
+        { segment_index: 2, download_id: 3, timeline_start_ms: 2, timeline_end_ms: 3, source_in_ms: 0, source_out_ms: 1, caption_kind: 'original', caption_en: 'caption', caption_zh: '\u5b57\u5e55', source_track_id: null, source_cue_index: null },
+        { segment_index: 3, download_id: 4, timeline_start_ms: 3, timeline_end_ms: 4, source_in_ms: 0, source_out_ms: 1, caption_kind: 'original', caption_en: 'caption', caption_zh: '\u5b57\u5e55', source_track_id: null, source_cue_index: null },
+      ],
+      p_output: {
+        artifact_key: `video-runs/${renderId}/output.mp4`,
+        output_sha256: sha256,
+        output_size_bytes: 1,
+        output_duration_ms: 1,
+        video_codec: 'h264',
+        audio_codec: 'aac',
+        pixel_format: 'yuv420p',
+        ffmpeg_version: '7.1',
+        manifest_sha256: sha256,
+      },
+    })
   })
 
   it.each([

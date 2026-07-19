@@ -114,6 +114,15 @@ describe('video production request contract', () => {
     ['failure text longer than 500 characters', { ...request('fail'), failureMessage: 'x'.repeat(501) }],
   ])('rejects %s', (_label, value) => invalid(value))
 
+  it.each([
+    ['a post-render suffix that starts with a slash', `video-runs/${renderId}//tmp/file.mp4`],
+    ['a post-render suffix with an empty segment', `video-runs/${renderId}/tmp//file.mp4`],
+    ['a post-render suffix with a dot segment', `video-runs/${renderId}/tmp/./file.mp4`],
+  ])('rejects %s for download and output artifacts', (_label, invalidArtifactKey) => {
+    invalid({ ...request('recordDownload'), artifactKey: invalidArtifactKey })
+    invalid({ ...request('complete'), output: { ...request('complete').output, artifactKey: invalidArtifactKey } })
+  })
+
   it('requires exactly four ordered segments and valid quote sources', () => {
     const complete = request('complete')
     invalid({ ...complete, segments: complete.segments.slice(0, 3) })
@@ -125,5 +134,28 @@ describe('video production request contract', () => {
     invalid({ ...complete, segments: complete.segments.map(segment => segment.captionKind === 'original'
       ? { ...segment, sourceTrackId: 7, sourceCueIndex: 12 }
       : segment) })
+  })
+
+  it('rejects complete requests with zero quote segments', () => {
+    const complete = request('complete')
+    invalid({
+      ...complete,
+      segments: complete.segments.map(segment => ({
+        ...segment,
+        captionKind: 'original' as const,
+        sourceTrackId: null,
+        sourceCueIndex: null,
+      })),
+    })
+  })
+
+  it('rejects complete requests with multiple quote segments', () => {
+    const complete = request('complete')
+    invalid({
+      ...complete,
+      segments: complete.segments.map((segment, index) => index < 2
+        ? { ...segment, captionKind: 'quote' as const, sourceTrackId: 7, sourceCueIndex: 12 }
+        : segment),
+    })
   })
 })

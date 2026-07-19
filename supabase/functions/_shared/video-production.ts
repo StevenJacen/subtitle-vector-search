@@ -279,7 +279,10 @@ function renderId(value: unknown): string {
 function artifactKey(value: unknown, expectedRenderId: string): value is string {
   if (typeof value !== 'string' || !artifactKeyPattern.test(value) || /(^|\/)\.\.(\/|$)/.test(value)) return false
   const match = /^video-runs\/([^/]+)\/(.+)$/.exec(value)
-  return match !== null && uuidPattern.test(match[1]) && match[1].toLocaleLowerCase('en-US') === expectedRenderId.toLocaleLowerCase('en-US') && !match[2].endsWith('/')
+  return match !== null
+    && uuidPattern.test(match[1])
+    && match[1].toLocaleLowerCase('en-US') === expectedRenderId.toLocaleLowerCase('en-US')
+    && match[2].split('/').every(segment => segment !== '' && segment !== '.' && segment !== '..')
 }
 
 function sha256(value: unknown): value is string {
