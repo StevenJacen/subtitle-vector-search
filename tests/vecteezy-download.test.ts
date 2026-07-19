@@ -1,10 +1,17 @@
 import { createHash } from 'node:crypto'
 import { Writable } from 'node:stream'
-import { describe, expect, it, vi } from 'vitest'
-import {
-  FormalDownloadBudget,
-  VecteezyDownloadClient,
-} from '../src/vecteezy-download.js'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+type DownloadModule = typeof import('../src/vecteezy-download.js')
+
+let FormalDownloadBudget: DownloadModule['FormalDownloadBudget']
+let VecteezyDownloadClient: DownloadModule['VecteezyDownloadClient']
+let VecteezyDownloadError: DownloadModule['VecteezyDownloadError']
+
+beforeEach(async () => {
+  vi.resetModules()
+  ;({ FormalDownloadBudget, VecteezyDownloadClient, VecteezyDownloadError } = await import('../src/vecteezy-download.js'))
+})
 
 const credentials = { accountId: '161976', apiKey: 'secret' }
 const MiB = 1024 * 1024
@@ -26,7 +33,7 @@ function formalDownload(): Response {
 function client(
   fetcher: (...args: any[]) => Promise<Response>,
   overrides: Record<string, unknown> = {},
-): VecteezyDownloadClient {
+): InstanceType<DownloadModule['VecteezyDownloadClient']> {
   return new VecteezyDownloadClient({ ...credentials, fetcher: fetcher as typeof fetch, ...overrides })
 }
 
@@ -145,7 +152,7 @@ describe('Vecteezy formal downloads', () => {
       ? Promise.resolve(downloadInfo(511 * MiB))
       : Promise.resolve(formalDownload()))
     const downloadClient = client(fetcher)
-    const budget = new FormalDownloadBudget(5)
+    const budget = new FormalDownloadBudget(4)
 
     for (const id of [1, 2, 3, 4]) {
       await downloadClient.requestDownload(id, budget)
@@ -157,16 +164,52 @@ describe('Vecteezy formal downloads', () => {
     expect(budget.used).toBe(4)
   })
 
-  it('reserves formal download budget synchronously before fetch and never exceeds four', async () => {
+  it.each([5, 10, Number.MAX_SAFE_INTEGER])('rejects a configured maximum above four: %i', maximum => {
+    expect(() => new FormalDownloadBudget(maximum)).toThrow('formal download maximum cannot exceed four')
+  })
+
+  it('shares formal usage across budget instances and rejects the fifth request', async () => {
+    const firstBudget = new FormalDownloadBudget(4)
+    const secondBudget = new FormalDownloadBudget(4)
+    const fetcher = vi.fn((url: string) => url.includes('/download_info')
+      ? Promise.resolve(downloadInfo(123))
+      : Promise.resolve(formalDownload()))
+    const downloadClient = client(fetcher)
+
+    await Promise.all([
+      downloadClient.requestDownload(1, firstBudget),
+      downloadClient.requestDownload(2, firstBudget),
+      downloadClient.requestDownload(3, secondBudget),
+      downloadClient.requestDownload(4, secondBudget),
+    ])
+
+    await expect(downloadClient.requestDownload(5, secondBudget))
+      .rejects.toMatchObject({ code: 'download_budget_exhausted' })
+    expect(firstBudget.used).toBe(4)
+    expect(secondBudget.used).toBe(4)
+    expect(fetcher.mock.calls.filter(([url]) => String(url).endsWith('/download?file_type=mp4'))).toHaveLength(4)
+  })
+
+  it('makes each synchronous reservation visible before its concurrent fetch starts', async () => {
     const budget = new FormalDownloadBudget(4)
+    let releaseFormalFetch!: () => void
+    const formalFetchGate = new Promise<void>(resolve => {
+      releaseFormalFetch = resolve
+    })
+    const usedWhenFormalFetchStarted: number[] = []
     const fetcher = vi.fn((url: string) => {
       if (url.includes('/download_info')) return Promise.resolve(downloadInfo(123))
-      expect(budget.used).toBeLessThanOrEqual(4)
-      return Promise.resolve(formalDownload())
+      usedWhenFormalFetchStarted.push(budget.used)
+      return formalFetchGate.then(() => formalDownload())
     })
     const downloadClient = client(fetcher)
 
-    await Promise.all([1, 2, 3, 4].map(id => downloadClient.requestDownload(id, budget)))
+    const requests = [1, 2, 3, 4].map(id => downloadClient.requestDownload(id, budget))
+    await vi.waitFor(() => expect(usedWhenFormalFetchStarted).toHaveLength(4))
+    expect(usedWhenFormalFetchStarted).toEqual([1, 2, 3, 4])
+    releaseFormalFetch()
+    await Promise.all(requests)
+
     await expect(downloadClient.requestDownload(5, budget))
       .rejects.toMatchObject({ code: 'download_budget_exhausted' })
     expect(budget.used).toBe(4)
@@ -240,6 +283,72 @@ describe('Vecteezy signed transfers', () => {
     await downloadClient.transferSignedUrl(ready, 'assets/inline.mp4')
 
     expect(fetcher.mock.calls[3][0]).toBe('https://signed.test/inline-secret')
+  })
+
+  it.each([401, 403, 404, 422])('treats signed-URL HTTP %i as terminal after one attempt', async status => {
+    const disk = storage()
+    const delay = vi.fn(async (_milliseconds: number) => undefined)
+    const signedUrl = `https://signed.test/terminal-${status}`
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(downloadInfo(5))
+      .mockResolvedValueOnce(Response.json({ data: { url: signedUrl } }))
+      .mockResolvedValueOnce(new Response('terminal signed response', { status }))
+    const downloadClient = client(fetcher, { delay, fileOperations: disk.fileOperations })
+    const requested = await downloadClient.requestDownload(42, new FormalDownloadBudget(4))
+    const ready = await downloadClient.waitForDownload(requested)
+
+    const error = await downloadClient.transferSignedUrl(ready, `assets/terminal-${status}.mp4`).catch(error => error)
+
+    expect(error).toMatchObject({ code: 'transfer_failed' })
+    expect(String(error)).not.toContain(signedUrl)
+    expect(fetcher.mock.calls.filter(([url]) => String(url) === signedUrl)).toHaveLength(1)
+    expect(fetcher.mock.calls.filter(([url]) => String(url).endsWith('/download?file_type=mp4'))).toHaveLength(1)
+    expect(delay).not.toHaveBeenCalled()
+    expect(disk.files.has(`assets/terminal-${status}.mp4.part`)).toBe(false)
+    await expect(downloadClient.transferSignedUrl(ready, `assets/terminal-${status}.mp4`))
+      .rejects.toMatchObject({ code: 'invalid_download_request' })
+  })
+
+  it('retries network and 5xx failures only against the same signed URL', async () => {
+    const disk = storage()
+    const delay = vi.fn(async (_milliseconds: number) => undefined)
+    const signedUrl = 'https://signed.test/retry-private-secret'
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(downloadInfo(5))
+      .mockResolvedValueOnce(Response.json({ data: { url: signedUrl } }))
+      .mockRejectedValueOnce(new Error(`network failed for ${signedUrl}`))
+      .mockResolvedValueOnce(new Response('temporary failure', { status: 503 }))
+      .mockResolvedValueOnce(new Response('video'))
+    const downloadClient = client(fetcher, { delay, fileOperations: disk.fileOperations })
+    const requested = await downloadClient.requestDownload(42, new FormalDownloadBudget(4))
+    const ready = await downloadClient.waitForDownload(requested)
+
+    const completed = await downloadClient.transferSignedUrl(ready, 'assets/retry-policy.mp4')
+
+    expect(fetcher.mock.calls.filter(([url]) => String(url) === signedUrl)).toHaveLength(3)
+    expect(fetcher.mock.calls.filter(([url]) => String(url).endsWith('/download?file_type=mp4'))).toHaveLength(1)
+    expect(delay.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([500, 1000])
+    expect(JSON.stringify(completed)).not.toContain('signed.test')
+  })
+
+  it('redacts a thrown signed-fetch error containing the private URL', async () => {
+    const delay = vi.fn(async (_milliseconds: number) => undefined)
+    const signedUrl = 'https://signed.test/thrown-private-secret'
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(downloadInfo(5))
+      .mockResolvedValueOnce(Response.json({ data: { url: signedUrl } }))
+      .mockRejectedValue(new VecteezyDownloadError('synthetic_fetch_error', `socket failed while fetching ${signedUrl}`))
+    const downloadClient = client(fetcher, { delay })
+    const requested = await downloadClient.requestDownload(42, new FormalDownloadBudget(4))
+    const ready = await downloadClient.waitForDownload(requested)
+
+    const error = await downloadClient.transferSignedUrl(ready, 'assets/thrown.mp4').catch(error => error)
+
+    expect(error).toMatchObject({ code: 'transfer_failed', message: 'Vecteezy signed transfer failed' })
+    expect(String(error)).not.toContain(signedUrl)
+    expect(fetcher.mock.calls.filter(([url]) => String(url) === signedUrl)).toHaveLength(3)
+    await expect(downloadClient.transferSignedUrl(ready, 'assets/thrown.mp4'))
+      .rejects.toMatchObject({ code: 'invalid_download_request' })
   })
 
   it('stops after three failed transfers and discards the private ticket', async () => {

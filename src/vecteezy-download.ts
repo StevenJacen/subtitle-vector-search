@@ -9,6 +9,9 @@ const API_BASE_URL = 'https://api.vecteezy.com'
 const FILE_TYPE = 'mp4'
 const MAX_FILE_SIZE_BYTES = 512 * 1024 * 1024
 const MAX_AGGREGATE_SIZE_BYTES = 2 * 1024 * 1024 * 1024
+const MAX_FORMAL_DOWNLOADS = 4
+
+let formalDownloadsUsed = 0
 
 export interface DownloadQuota {
   limit: number | null
@@ -73,25 +76,27 @@ export class VecteezyDownloadError extends Error {
 
 export class FormalDownloadBudget {
   readonly maximum: number
-  #used = 0
 
   constructor(maximum: number) {
     if (!Number.isSafeInteger(maximum) || maximum < 0) {
       throw new Error('formal download maximum must be a non-negative integer')
     }
+    if (maximum > MAX_FORMAL_DOWNLOADS) {
+      throw new Error('formal download maximum cannot exceed four')
+    }
     this.maximum = maximum
   }
 
   get used(): number {
-    return this.#used
+    return formalDownloadsUsed
   }
 
   reserve(): number {
-    if (this.#used >= this.maximum) {
+    if (formalDownloadsUsed >= this.maximum) {
       throw new VecteezyDownloadError('download_budget_exhausted', 'formal download budget exhausted')
     }
-    this.#used += 1
-    return this.#used
+    formalDownloadsUsed += 1
+    return formalDownloadsUsed
   }
 }
 
@@ -203,6 +208,9 @@ export class VecteezyDownloadClient {
       try {
         const response = await this.#options.fetcher(pending.signedUrl)
         if (!response.ok || response.body === null) {
+          if (response.status < 500 || response.status > 599) {
+            throw new TerminalSignedTransferError()
+          }
           throw new VecteezyDownloadError('transfer_failed', 'Vecteezy signed transfer failed')
         }
         await pipeline(
@@ -223,9 +231,12 @@ export class VecteezyDownloadClient {
         return completed
       } catch (error) {
         await this.#options.fileOperations.rm(partDestination).catch(() => undefined)
+        if (error instanceof TerminalSignedTransferError) {
+          this.#pending.delete(readyDownload.requestId)
+          throw new VecteezyDownloadError('transfer_failed', 'Vecteezy signed transfer failed')
+        }
         if (attempt === 2) {
           this.#pending.delete(readyDownload.requestId)
-          if (error instanceof VecteezyDownloadError) throw error
           throw new VecteezyDownloadError('transfer_failed', 'Vecteezy signed transfer failed')
         }
         await this.#options.delay(attempt === 0 ? 500 : 1000)
@@ -264,6 +275,8 @@ export class VecteezyDownloadClient {
     return pending
   }
 }
+
+class TerminalSignedTransferError extends Error {}
 
 const defaultFileOperations: VecteezyDownloadFileOperations = {
   createWriteStream,
