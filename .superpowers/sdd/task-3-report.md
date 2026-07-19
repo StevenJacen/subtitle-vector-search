@@ -105,3 +105,49 @@ PASS (run before commit)
 - The client intentionally does not refresh or persist provider preview URLs; callers must consume them while the match response is in memory.
 - Default retry delays use timers when `delayFn` is not injected, matching the existing `SubtitleApi` behavior.
 - Endpoint authentication and provider behavior remain owned by the already-approved edge functions and are not exercised through remote integration tests by design.
+
+## Task 3 Review Fix Evidence
+
+### Scope
+
+Hardened only the local `VideoProductionApi` request boundary and its unit tests. No remote calls, provider activity, quota activity, Edge-function changes, migrations, or dependency changes were made.
+
+### TDD Record
+
+Added the review tests before production edits, then ran:
+
+```text
+npm test -- tests/video-production-api.test.ts
+FAIL: 3 tests failed, 22 passed
+```
+
+The failing assertions demonstrated that runtime-only keys crossed every object-taking request boundary, method-owned `action` values could be overwritten, `http` preview URLs were rejected, and syntactically malformed HTTPS URLs were accepted. The new mismatched selection-echo and malformed-success-JSON tests passed on RED because those behaviors were already implemented; both assert one request and no retry.
+
+Implemented the minimal explicit allowlists and strict `URL` parsing, then reran:
+
+```text
+npm test -- tests/video-production-api.test.ts
+PASS: 1 file, 25 tests
+```
+
+### Review Coverage
+
+- Adversarial runtime objects with `action`, `previewUrl`, `downloadUrl`, `statusUrl`, and nested unknown keys are passed to `recordDownload` and `complete`; the exact serialized payloads exclude every extra key.
+- Equivalent runtime-extra checks cover every object-taking client method: match, selection, start, record download, complete, and fail. Metadata actions retain their method-owned action values.
+- `complete` reconstructs each segment and output object field-by-field, preventing nested runtime keys from crossing the boundary.
+- Successful malformed JSON returns `invalid_response` after one attempt without retrying.
+- Selection responses with mismatched echoed `runId` or `providerResourceId` return `invalid_response` after one attempt.
+- Preview URL validation uses `new URL` and permits only `http:` or `https:` protocols; focused cases cover valid HTTP/HTTPS, FTP rejection, and a malformed bracketed host.
+
+### Verification
+
+```text
+npm run typecheck
+PASS
+
+npm test
+PASS: 31 files, 388 tests
+
+git diff --check
+PASS
+```

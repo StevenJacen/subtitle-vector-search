@@ -65,13 +65,18 @@ export class VideoProductionApi {
   }
 
   matchScene(input: { theme: string; candidateCount: number }): Promise<SceneMatchResponse> {
-    return this.request(this.matchUrl, input, isSceneMatchResponse, 'video asset match')
+    return this.request(
+      this.matchUrl,
+      { theme: input.theme, candidateCount: input.candidateCount },
+      isSceneMatchResponse,
+      'video asset match',
+    )
   }
 
   async selectCandidate(input: { runId: string; providerResourceId: number; note: string }): Promise<{ selectionId: number }> {
     const response = await this.request(
       this.selectionUrl,
-      input,
+      { runId: input.runId, providerResourceId: input.providerResourceId, note: input.note },
       (value): value is WireSelectionResponse => isSelectionResponse(value)
         && value.runId === input.runId
         && value.providerResourceId === input.providerResourceId,
@@ -83,7 +88,7 @@ export class VideoProductionApi {
   start(input: { requestDigest: string; theme: string }): Promise<RenderStatusResponse> {
     return this.request(
       this.metadataUrl,
-      { action: 'start', ...input },
+      { action: 'start', requestDigest: input.requestDigest, theme: input.theme },
       isPlannedStartResponse,
       'video production start',
     )
@@ -92,7 +97,25 @@ export class VideoProductionApi {
   async recordDownload(input: RecordDownloadRequest): Promise<{ renderId: string; downloadId: number }> {
     const response = await this.request(
       this.metadataUrl,
-      { action: 'recordDownload', ...input },
+      {
+        action: 'recordDownload',
+        renderId: input.renderId,
+        selectionId: input.selectionId,
+        artifactKey: input.artifactKey,
+        fileType: input.fileType,
+        sourceSizeBytes: input.sourceSizeBytes,
+        sourceSha256: input.sourceSha256,
+        width: input.width,
+        height: input.height,
+        durationMs: input.durationMs,
+        frameRate: input.frameRate,
+        videoCodec: input.videoCodec,
+        audioCodec: input.audioCodec,
+        requiresAttribution: input.requiresAttribution,
+        requiredAttributionUrl: input.requiredAttributionUrl,
+        quotaLimit: input.quotaLimit,
+        quotaRemaining: input.quotaRemaining,
+      },
       isRecordDownloadResponse,
       'video production download recording',
     )
@@ -112,7 +135,34 @@ export class VideoProductionApi {
   async complete(input: CompleteRenderRequest): Promise<RenderStatusResponse> {
     const response = await this.request(
       this.metadataUrl,
-      { action: 'complete', ...input },
+      {
+        action: 'complete',
+        renderId: input.renderId,
+        segments: input.segments.map(segment => ({
+          segmentIndex: segment.segmentIndex,
+          downloadId: segment.downloadId,
+          timelineStartMs: segment.timelineStartMs,
+          timelineEndMs: segment.timelineEndMs,
+          sourceInMs: segment.sourceInMs,
+          sourceOutMs: segment.sourceOutMs,
+          captionKind: segment.captionKind,
+          captionEn: segment.captionEn,
+          captionZh: segment.captionZh,
+          sourceTrackId: segment.sourceTrackId,
+          sourceCueIndex: segment.sourceCueIndex,
+        })),
+        output: {
+          artifactKey: input.output.artifactKey,
+          outputSha256: input.output.outputSha256,
+          outputSizeBytes: input.output.outputSizeBytes,
+          outputDurationMs: input.output.outputDurationMs,
+          videoCodec: input.output.videoCodec,
+          audioCodec: input.output.audioCodec,
+          pixelFormat: input.output.pixelFormat,
+          ffmpegVersion: input.output.ffmpegVersion,
+          manifestSha256: input.output.manifestSha256,
+        },
+      },
       value => isExpectedStatusResponse(value, 'completed'),
       'video production completion',
     )
@@ -122,7 +172,12 @@ export class VideoProductionApi {
   async fail(input: FailRenderRequest): Promise<RenderStatusResponse> {
     const response = await this.request(
       this.metadataUrl,
-      { action: 'fail', ...input },
+      {
+        action: 'fail',
+        renderId: input.renderId,
+        failureCode: input.failureCode,
+        failureMessage: input.failureMessage,
+      },
       value => isExpectedStatusResponse(value, 'failed'),
       'video production failure',
     )
@@ -237,7 +292,7 @@ function isCandidate(value: unknown): boolean {
     || !positiveInteger(value.bestRank)
     || !Array.isArray(value.matchedBy)
     || !value.matchedBy.every(item => typeof item === 'string' && queryKinds.has(item))
-    || !(value.previewUrl === null || httpsUrl(value.previewUrl))) {
+    || !(value.previewUrl === null || httpUrl(value.previewUrl))) {
     return false
   }
   return true
@@ -315,8 +370,14 @@ function boundedString(value: unknown, maximumLength: number): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= maximumLength
 }
 
-function httpsUrl(value: unknown): value is string {
-  return typeof value === 'string' && /^https:\/\/[^\s]+$/u.test(value)
+function httpUrl(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+  } catch {
+    return false
+  }
 }
 
 function finiteNumber(value: unknown): value is number {

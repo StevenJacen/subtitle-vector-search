@@ -107,8 +107,65 @@ function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }
 
+function malformedJsonResponse(status = 200): Response {
+  return new Response('{"incomplete":', { status, headers: { 'content-type': 'application/json' } })
+}
+
 function createApi(fetchFn: typeof fetch, delayFn = vi.fn().mockResolvedValue(undefined)): VideoProductionApi {
   return new VideoProductionApi({ ...config, fetchFn, delayFn })
+}
+
+function recordDownloadPayload() {
+  return {
+    action: 'recordDownload',
+    renderId: metadata.renderId,
+    selectionId: metadata.selectionId,
+    artifactKey: metadata.artifactKey,
+    fileType: metadata.fileType,
+    sourceSizeBytes: metadata.sourceSizeBytes,
+    sourceSha256: metadata.sourceSha256,
+    width: metadata.width,
+    height: metadata.height,
+    durationMs: metadata.durationMs,
+    frameRate: metadata.frameRate,
+    videoCodec: metadata.videoCodec,
+    audioCodec: metadata.audioCodec,
+    requiresAttribution: metadata.requiresAttribution,
+    requiredAttributionUrl: metadata.requiredAttributionUrl,
+    quotaLimit: metadata.quotaLimit,
+    quotaRemaining: metadata.quotaRemaining,
+  }
+}
+
+function completePayload() {
+  return {
+    action: 'complete',
+    renderId: complete.renderId,
+    segments: complete.segments.map(segment => ({
+      segmentIndex: segment.segmentIndex,
+      downloadId: segment.downloadId,
+      timelineStartMs: segment.timelineStartMs,
+      timelineEndMs: segment.timelineEndMs,
+      sourceInMs: segment.sourceInMs,
+      sourceOutMs: segment.sourceOutMs,
+      captionKind: segment.captionKind,
+      captionEn: segment.captionEn,
+      captionZh: segment.captionZh,
+      sourceTrackId: segment.sourceTrackId,
+      sourceCueIndex: segment.sourceCueIndex,
+    })),
+    output: {
+      artifactKey: complete.output.artifactKey,
+      outputSha256: complete.output.outputSha256,
+      outputSizeBytes: complete.output.outputSizeBytes,
+      outputDurationMs: complete.output.outputDurationMs,
+      videoCodec: complete.output.videoCodec,
+      audioCodec: complete.output.audioCodec,
+      pixelFormat: complete.output.pixelFormat,
+      ffmpegVersion: complete.output.ffmpegVersion,
+      manifestSha256: complete.output.manifestSha256,
+    },
+  }
 }
 
 describe('VideoProductionApi', () => {
@@ -181,6 +238,109 @@ describe('VideoProductionApi', () => {
     expect(body.requiredAttributionUrl).toBe('https://example.test/license')
   })
 
+  it('serializes runtime inputs with explicit allowlists for every object-taking method', async () => {
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(response(sceneMatch))
+      .mockResolvedValueOnce(response({ runId, providerResourceId: 42, selectionId: 9 }))
+      .mockResolvedValueOnce(response(publicStatusResponse('planned', false)))
+      .mockResolvedValueOnce(response({ downloadId: 11 }))
+      .mockResolvedValueOnce(response({ status: 'rendering' }))
+      .mockResolvedValueOnce(response({ status: 'completed' }))
+      .mockResolvedValueOnce(response({ status: 'failed' }))
+    const api = createApi(fetchFn)
+    const runtimeMatch = {
+      theme: 'Classic cinema',
+      candidateCount: 8,
+      action: 'fail',
+      previewUrl: 'https://provider.test/preview.mp4',
+      downloadUrl: 'https://provider.test/download.mp4',
+      statusUrl: 'https://provider.test/status',
+      unknownNested: { token: 'do-not-forward' },
+    } as { theme: string; candidateCount: number }
+    const runtimeSelection = {
+      runId,
+      providerResourceId: 42,
+      note: 'chosen',
+      action: 'fail',
+      previewUrl: 'https://provider.test/preview.mp4',
+      downloadUrl: 'https://provider.test/download.mp4',
+      statusUrl: 'https://provider.test/status',
+      unknownNested: { token: 'do-not-forward' },
+    } as { runId: string; providerResourceId: number; note: string }
+    const runtimeStart = {
+      requestDigest: sha256,
+      theme: 'Classic cinema',
+      action: 'fail',
+      previewUrl: 'https://provider.test/preview.mp4',
+      downloadUrl: 'https://provider.test/download.mp4',
+      statusUrl: 'https://provider.test/status',
+      unknownNested: { token: 'do-not-forward' },
+    } as { requestDigest: string; theme: string }
+    const runtimeDownload = {
+      ...metadata,
+      action: 'complete',
+      previewUrl: 'https://provider.test/preview.mp4',
+      downloadUrl: 'https://provider.test/download.mp4',
+      statusUrl: 'https://provider.test/status',
+      unknownNested: { token: 'do-not-forward' },
+    } as RecordDownloadRequest
+    const runtimeComplete = {
+      ...complete,
+      action: 'fail',
+      previewUrl: 'https://provider.test/preview.mp4',
+      downloadUrl: 'https://provider.test/download.mp4',
+      statusUrl: 'https://provider.test/status',
+      unknownNested: { token: 'do-not-forward' },
+      segments: complete.segments.map((segment, index) => index === 0
+        ? {
+            ...segment,
+            action: 'recordDownload',
+            previewUrl: 'https://provider.test/preview.mp4',
+            downloadUrl: 'https://provider.test/download.mp4',
+            statusUrl: 'https://provider.test/status',
+            unknownNested: { token: 'do-not-forward' },
+          }
+        : segment),
+      output: {
+        ...complete.output,
+        action: 'recordDownload',
+        previewUrl: 'https://provider.test/preview.mp4',
+        downloadUrl: 'https://provider.test/download.mp4',
+        statusUrl: 'https://provider.test/status',
+        unknownNested: { token: 'do-not-forward' },
+      },
+    } as CompleteRenderRequest
+    const runtimeFail = {
+      renderId,
+      failureCode: 'render_failure',
+      failureMessage: 'render failed',
+      action: 'retry',
+      previewUrl: 'https://provider.test/preview.mp4',
+      downloadUrl: 'https://provider.test/download.mp4',
+      statusUrl: 'https://provider.test/status',
+      unknownNested: { token: 'do-not-forward' },
+    } as { renderId: string; failureCode: string; failureMessage: string }
+
+    await api.matchScene(runtimeMatch)
+    await api.selectCandidate(runtimeSelection)
+    await api.start(runtimeStart)
+    await api.recordDownload(runtimeDownload)
+    await api.beginRender(renderId)
+    await api.complete(runtimeComplete)
+    await api.fail(runtimeFail)
+
+    const payloads = fetchFn.mock.calls.map(([, request]) => JSON.parse((request as RequestInit).body as string))
+    expect(payloads).toEqual([
+      { theme: 'Classic cinema', candidateCount: 8 },
+      { runId, providerResourceId: 42, note: 'chosen' },
+      { action: 'start', requestDigest: sha256, theme: 'Classic cinema' },
+      recordDownloadPayload(),
+      { action: 'beginRender', renderId },
+      completePayload(),
+      { action: 'fail', renderId, failureCode: 'render_failure', failureMessage: 'render failed' },
+    ])
+  })
+
   it('accepts downloading as the retained-download retry status', async () => {
     const fetchFn = vi.fn().mockResolvedValue(response({ status: 'downloading' }))
     const api = createApi(fetchFn)
@@ -201,6 +361,50 @@ describe('VideoProductionApi', () => {
       const error = await invoke(api).catch(error => error)
       expect(error).toMatchObject({ status: 502, code: 'invalid_response' })
       expect(fetchFn).toHaveBeenCalledTimes(1)
+    }
+  })
+
+  it.each([
+    ['run ID', { runId: renderId, providerResourceId: 42, selectionId: 9 }],
+    ['provider resource ID', { runId, providerResourceId: 43, selectionId: 9 }],
+  ])('rejects a selection response with a mismatched echoed %s', async (_field, body) => {
+    const fetchFn = vi.fn().mockResolvedValue(response(body))
+    const delayFn = vi.fn().mockResolvedValue(undefined)
+    const api = createApi(fetchFn, delayFn)
+
+    await expect(api.selectCandidate({ runId, providerResourceId: 42, note: 'chosen' }))
+      .rejects.toMatchObject({ status: 502, code: 'invalid_response' })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(delayFn).not.toHaveBeenCalled()
+  })
+
+  it('does not retry a successful response with malformed JSON syntax', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(malformedJsonResponse())
+    const delayFn = vi.fn().mockResolvedValue(undefined)
+    const api = createApi(fetchFn, delayFn)
+
+    await expect(api.retry(renderId)).rejects.toMatchObject({ status: 502, code: 'invalid_response' })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(delayFn).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['http://cdn.example.test/preview.mp4', true],
+    ['https://cdn.example.test/preview.mp4', true],
+    ['ftp://cdn.example.test/preview.mp4', false],
+    ['https://[not-a-valid-host]/preview.mp4', false],
+  ])('accepts only parseable HTTP(S) candidate preview URLs', async (previewUrl, valid) => {
+    const fetchFn = vi.fn().mockResolvedValue(response({
+      ...sceneMatch,
+      candidates: [{ ...candidate, previewUrl }],
+    }))
+    const api = createApi(fetchFn)
+
+    if (valid) {
+      await expect(api.matchScene({ theme: 'x', candidateCount: 1 })).resolves.toEqual(expect.any(Object))
+    } else {
+      await expect(api.matchScene({ theme: 'x', candidateCount: 1 }))
+        .rejects.toMatchObject({ status: 502, code: 'invalid_response' })
     }
   })
 
