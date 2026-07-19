@@ -112,6 +112,27 @@ describe('manual video asset selection handler', () => {
     expect(body).not.toContain(rawDetails)
   })
 
+  it('maps a P0007 locked selection to the exact controlled 409 contract', async () => {
+    const repository = createVideoAssetRepository({
+      from: vi.fn(),
+      rpc: vi.fn().mockResolvedValue({
+        data: null,
+        error: { code: 'P0007', message: 'selection_locked' },
+      }),
+    })
+
+    const response = await handleSelectVideoAssetRequest(request({
+      runId,
+      providerResourceId: 42,
+      note: 'replacement',
+    }, 'correct-token'), environment, () => repository)
+
+    expect(response.status).toBe(409)
+    await expect(response.json()).resolves.toEqual({
+      error: { code: 'selection_locked', message: 'selected asset is already downloaded' },
+    })
+  })
+
   it.each([
     new Error('repository details must not escape'),
     new VideoAssetError(409, 'unexpected_repository_error', 'repository details must not escape'),

@@ -306,6 +306,9 @@ async function selectionDatabase(
     if (databaseErrorCode(resolved.error) === 'P0002') {
       throw new VideoAssetError(404, 'candidate_not_found', 'candidate not found')
     }
+    if (databaseErrorCode(resolved.error) === 'P0007') {
+      throw new VideoAssetError(409, 'selection_locked', 'selected asset is already downloaded')
+    }
     throw databaseFailure()
   }
   return resolved.data

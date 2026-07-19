@@ -30,6 +30,11 @@ export async function handleSelectVideoAssetRequest(
         return errorResponse(404, 'candidate_not_found', 'candidate not found')
       }
       if (error instanceof VideoAssetError
+        && error.status === 409
+        && error.code === 'selection_locked') {
+        return errorResponse(409, 'selection_locked', 'selected asset is already downloaded')
+      }
+      if (error instanceof VideoAssetError
         && error.status === 400
         && error.code === 'invalid_request') {
         return errorResponse(400, 'invalid_request', 'invalid request')
