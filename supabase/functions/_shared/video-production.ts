@@ -63,6 +63,7 @@ export class VideoProductionError extends Error {
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const sha256Pattern = /^[0-9a-f]{64}$/
 const artifactKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/
+const sensitiveUrlVocabulary = /(?:signed|status|download|media|signature|x-amz-[a-z0-9-]*|x-goog-[a-z0-9-]*|api[_-]?key|access[_-]?key|token|secret|credential|policy|expires|key-pair-id|authorization|(?:^|[^a-z0-9])(?:sig|auth)(?:$|[^a-z0-9]))/i
 const failureCodes = new Set([
   'download_failure',
   'source_validation_failure',
@@ -144,7 +145,7 @@ function downloadMetadata(input: Record<string, unknown>, expectedRenderId: stri
   }
   let requiredAttributionUrl: string | null
   if (requiresAttribution) {
-    if (!httpsUrl(attribution)) throw invalidRequest()
+    if (!stableAttributionUrl(attribution)) throw invalidRequest()
     requiredAttributionUrl = attribution
   } else {
     if (attribution !== null) throw invalidRequest()
@@ -289,13 +290,35 @@ function sha256(value: unknown): value is string {
   return typeof value === 'string' && sha256Pattern.test(value)
 }
 
-function httpsUrl(value: unknown): value is string {
+function stableAttributionUrl(value: unknown): value is string {
   if (typeof value !== 'string') return false
   try {
-    return new URL(value).protocol === 'https:'
+    const url = new URL(value)
+    const components = decodeUrlComponents(`${url.hostname}\n${url.pathname}\n${url.search}\n${url.hash}`)
+    return url.protocol === 'https:'
+      && url.hostname !== ''
+      && url.username === ''
+      && url.password === ''
+      && url.search === ''
+      && url.hash === ''
+      && !sensitiveUrlVocabulary.test(components)
   } catch {
     return false
   }
+}
+
+function decodeUrlComponents(value: string): string {
+  let decoded = value
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const next = decodeURIComponent(decoded.replace(/\+/g, ' '))
+      if (next === decoded) return decoded
+      decoded = next
+    } catch {
+      return decoded
+    }
+  }
+  return decoded
 }
 
 function boundedText(value: unknown, maximumLength: number): value is string {

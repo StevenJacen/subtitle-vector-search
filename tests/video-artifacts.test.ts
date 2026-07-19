@@ -33,7 +33,26 @@ const manifest: VideoRunManifest = {
     text: 'Hope remains with us.',
     captionZh: '\u5e0c\u671b\u4ecd\u4e0e\u6211\u4eec\u540c\u5728\u3002',
   },
-  scenes: [],
+  scenes: [
+    { index: 0, captionKind: 'original', captionEn: 'Night.', captionZh: '\u9ed1\u591c\u3002', visualTheme: 'dark landscape' },
+    { index: 1, captionKind: 'original', captionEn: 'Walk.', captionZh: '\u524d\u884c\u3002', visualTheme: 'traveler walking' },
+    {
+      index: 2,
+      captionKind: 'quote',
+      captionEn: 'Hope remains with us.',
+      captionZh: '\u5e0c\u671b\u4ecd\u4e0e\u6211\u4eec\u540c\u5728\u3002',
+      visualTheme: 'first light',
+      sourceMovieId: 9,
+      sourceTrackId: 7,
+      sourceCueIndex: 31,
+      sourceStartMs: 5_000,
+      sourceEndMs: 8_000,
+      sourceTimestamp: '00:00:05.000 --> 00:00:08.000',
+      movieTitle: 'Example Film',
+      releaseYear: 1994,
+    },
+    { index: 3, captionKind: 'original', captionEn: 'Dawn.', captionZh: '\u9ece\u660e\u3002', visualTheme: 'open horizon' },
+  ],
   stage: 'review',
   createdAt: '2026-07-19T00:00:00.000Z',
   updatedAt: '2026-07-19T00:00:00.000Z',
@@ -359,6 +378,21 @@ describe('video run manifests', () => {
   })
 
   it.each([
+    ['fewer than four scenes', (value: VideoRunManifest) => ({ ...value, scenes: value.scenes.slice(0, 3) })],
+    ['out-of-order scene indices', (value: VideoRunManifest) => ({ ...value, scenes: value.scenes.map((scene, index) => index === 3 ? { ...scene, index: 2 } : scene) })],
+    ['more than one quote scene', (value: VideoRunManifest) => ({ ...value, scenes: value.scenes.map((scene, index) => index === 0 ? { ...scene, captionKind: 'quote' as const } : scene) })],
+    ['quote text that differs from the selected cue', (value: VideoRunManifest) => ({ ...value, scenes: value.scenes.map(scene => scene.captionKind === 'quote' ? { ...scene, captionEn: 'Changed quote.' } : scene) })],
+    ['quote cue provenance that differs from the selected cue', (value: VideoRunManifest) => ({ ...value, scenes: value.scenes.map(scene => scene.captionKind === 'quote' ? { ...scene, sourceCueIndex: 32 } : scene) })],
+    ['a timestamp that differs from the quote milliseconds', (value: VideoRunManifest) => ({ ...value, scenes: value.scenes.map(scene => scene.captionKind === 'quote' ? { ...scene, sourceTimestamp: '00:00:06.000 --> 00:00:08.000' } : scene) })],
+    ['cue provenance on an original scene', (value: VideoRunManifest) => ({ ...value, scenes: value.scenes.map((scene, index) => index === 0 ? { ...scene, sourceTrackId: 7 } : scene) })],
+  ])('rejects a manifest with %s', async (_label, mutate) => {
+    const root = await temporaryRoot()
+    const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
+
+    await expect(writeManifestAtomic(path, mutate(manifest))).rejects.toThrow('invalid manifest')
+  })
+
+  it.each([
     'https://provider.test/license',
     'See https://provider.test/license for attribution.',
     'Provider value: https://signed.test/X-Amz-Signature?value=abc',
@@ -369,14 +403,7 @@ describe('video run manifests', () => {
     const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
     const value: VideoRunManifest = {
       ...manifest,
-      scenes: [{
-        index: 0,
-        captionKind: 'original',
-        captionEn: 'Caption',
-        captionZh: '\u5b57\u5e55',
-        visualTheme: 'Dawn',
-        note,
-      }],
+      scenes: manifest.scenes.map((scene, index) => index === 0 ? { ...scene, note } : scene),
     }
 
     await expect(writeManifestAtomic(path, value)).rejects.toThrow('invalid manifest')

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { lstat, mkdir, open, readFile, realpath, rename, rm } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
+import { formatTimestamp } from './subtitles.js'
 
 export type VideoRunStage = 'review' | 'downloading' | 'rendering' | 'completed' | 'failed'
 
@@ -228,6 +229,7 @@ function parseManifest(value: unknown): VideoRunManifest {
     createdAt: manifest.createdAt,
     updatedAt: manifest.updatedAt,
   }
+  validateSceneSemantics(parsed.quote, parsed.scenes)
   const ownerId = parsed.renderId ?? parsed.planId
   if (manifest.sources !== undefined) parsed.sources = array(manifest.sources).map(value => parseSource(value, ownerId))
   if (manifest.output !== undefined) parsed.output = parseOutput(manifest.output, ownerId)
@@ -272,6 +274,42 @@ function parseScene(value: unknown): VideoRunScene {
   }
   const parsed = scene as unknown as VideoRunScene
   return parsed.runId === undefined ? parsed : { ...parsed, runId: parsed.runId.toLowerCase() }
+}
+
+function validateSceneSemantics(quote: VideoRunQuote, scenes: VideoRunScene[]): void {
+  if (scenes.length !== 4 || scenes.some((scene, index) => scene.index !== index)) throw invalidManifest()
+  const quoteScenes = scenes.filter(scene => scene.captionKind === 'quote')
+  if (quoteScenes.length !== 1) throw invalidManifest()
+
+  for (const scene of scenes) {
+    if (scene.captionKind === 'original') {
+      if (scene.sourceMovieId !== undefined
+        || scene.sourceTrackId !== undefined
+        || scene.sourceCueIndex !== undefined
+        || scene.sourceStartMs !== undefined
+        || scene.sourceEndMs !== undefined
+        || scene.sourceTimestamp !== undefined
+        || scene.movieTitle !== undefined
+        || scene.releaseYear !== undefined) {
+        throw invalidManifest()
+      }
+      continue
+    }
+
+    if (scene.captionEn !== quote.text
+      || scene.captionZh !== quote.captionZh
+      || scene.sourceTrackId !== quote.trackId
+      || scene.sourceCueIndex !== quote.cueIndex
+      || scene.sourceMovieId === undefined
+      || scene.sourceStartMs === undefined
+      || scene.sourceEndMs === undefined
+      || scene.sourceStartMs >= scene.sourceEndMs
+      || scene.sourceTimestamp !== `${formatTimestamp(scene.sourceStartMs)} --> ${formatTimestamp(scene.sourceEndMs)}`
+      || scene.movieTitle === undefined
+      || scene.releaseYear === undefined) {
+      throw invalidManifest()
+    }
+  }
 }
 
 function parseSource(value: unknown, ownerId: string): VideoRunSource {

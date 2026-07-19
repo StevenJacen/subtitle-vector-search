@@ -328,7 +328,7 @@ describe('Vecteezy signed transfers', () => {
 
     expect(fetcher).toHaveBeenCalledTimes(3)
     expect(disk.renames).toEqual([['assets/42.mp4.part', 'assets/42.mp4']])
-    expect(disk.readFile).toHaveBeenCalledWith('assets/42.mp4')
+    expect(disk.readFile).not.toHaveBeenCalled()
     expect(transferResult).toMatchObject({
       artifactKey: 'assets/42.mp4',
       sourceSizeBytes: 5,
@@ -340,6 +340,54 @@ describe('Vecteezy signed transfers', () => {
     expect(serialized).not.toContain('signed.test')
     expect(serialized).not.toMatch(/download_status_url|inline_url|\"url\"/)
     expect(logs.join('\n')).not.toContain('signed.test')
+  })
+
+  it('stops a signed transfer when actual bytes exceed the per-file hard limit', async () => {
+    const disk = storage()
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(downloadInfo(5))
+      .mockResolvedValueOnce(Response.json({ data: { url: 'https://signed.test/oversized-secret' } }))
+      .mockResolvedValueOnce(new Response('123456'))
+    const downloadClient = client(fetcher, {
+      fileOperations: disk.fileOperations,
+      maxFileSizeBytes: 5,
+    })
+    const requested = await downloadClient.requestDownload(42, new FormalDownloadBudget(4))
+    const ready = await downloadClient.waitForDownload(requested)
+
+    await expect(downloadClient.transferSignedUrl(ready, 'assets/oversized.mp4'))
+      .rejects.toMatchObject({ code: 'file_size_limit_exceeded' })
+
+    expect(disk.files.has('assets/oversized.mp4.part')).toBe(false)
+    expect(disk.renames).toEqual([])
+    expect(disk.readFile).not.toHaveBeenCalled()
+    expect(fetcher.mock.calls.filter(([url]) => String(url).includes('oversized-secret'))).toHaveLength(1)
+  })
+
+  it('counts actual streamed bytes against the aggregate hard limit', async () => {
+    const disk = storage()
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(downloadInfo(4))
+      .mockResolvedValueOnce(Response.json({ data: { url: 'https://signed.test/first-secret' } }))
+      .mockResolvedValueOnce(downloadInfo(4))
+      .mockResolvedValueOnce(Response.json({ data: { url: 'https://signed.test/second-secret' } }))
+      .mockResolvedValueOnce(new Response('123456'))
+    const downloadClient = client(fetcher, {
+      fileOperations: disk.fileOperations,
+      maxFileSizeBytes: 8,
+      maxAggregateSizeBytes: 8,
+    })
+    const budget = new FormalDownloadBudget(4)
+    const first = await downloadClient.requestDownload(41, budget)
+    await downloadClient.requestDownload(42, budget)
+    const ready = await downloadClient.waitForDownload(first)
+
+    await expect(downloadClient.transferSignedUrl(ready, 'assets/aggregate.mp4'))
+      .rejects.toMatchObject({ code: 'aggregate_size_limit_exceeded' })
+
+    expect(disk.files.has('assets/aggregate.mp4.part')).toBe(false)
+    expect(disk.renames).toEqual([])
+    expect(fetcher.mock.calls.filter(([url]) => String(url).includes('first-secret'))).toHaveLength(1)
   })
 
   it('polls status to 100% and retries transfer with the same in-memory signed URL', async () => {

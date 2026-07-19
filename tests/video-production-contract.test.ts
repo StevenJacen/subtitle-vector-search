@@ -110,6 +110,10 @@ describe('video production request contract', () => {
     ['a non-finite frame rate', { ...request('recordDownload'), frameRate: Infinity }],
     ['an unsafe frame rate', { ...request('recordDownload'), frameRate: Number.MAX_SAFE_INTEGER + 1 }],
     ['a non-https attribution URL', { ...request('recordDownload'), requiredAttributionUrl: 'http://example.test/license' }],
+    ['a signed attribution query', { ...request('recordDownload'), requiredAttributionUrl: 'https://example.test/license?X-Amz-Signature=private' }],
+    ['an encoded signed attribution path', { ...request('recordDownload'), requiredAttributionUrl: 'https://example.test/%73igned/license' }],
+    ['an attribution URL with user information', { ...request('recordDownload'), requiredAttributionUrl: 'https://user:secret@example.test/license' }],
+    ['an attribution URL fragment', { ...request('recordDownload'), requiredAttributionUrl: 'https://example.test/license#private' }],
     ['unpaired quota metadata', { ...request('recordDownload'), quotaLimit: 5, quotaRemaining: null }],
     ['failure text longer than 500 characters', { ...request('fail'), failureMessage: 'x'.repeat(501) }],
   ])('rejects %s', (_label, value) => invalid(value))

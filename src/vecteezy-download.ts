@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
 import { createWriteStream } from 'node:fs'
-import { readFile, rename, rm } from 'node:fs/promises'
+import { rename, rm } from 'node:fs/promises'
 import { isAbsolute, normalize } from 'node:path'
-import { Readable } from 'node:stream'
+import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 
 const API_BASE_URL = 'https://api.vecteezy.com'
@@ -49,7 +49,6 @@ export interface VecteezyDownloadFileOperations {
   createWriteStream(path: string): NodeJS.WritableStream
   rename(from: string, to: string): Promise<void>
   rm(path: string): Promise<void>
-  readFile(path: string): Promise<Buffer>
 }
 
 export interface VecteezyDownloadClientOptions {
@@ -60,6 +59,8 @@ export interface VecteezyDownloadClientOptions {
   fileOperations?: VecteezyDownloadFileOperations
   logger?: (message: string) => void
   maxStatusPolls?: number
+  maxFileSizeBytes?: number
+  maxAggregateSizeBytes?: number
 }
 
 interface PendingDownload {
@@ -102,7 +103,8 @@ export class FormalDownloadBudget {
 }
 
 export class VecteezyDownloadClient {
-  readonly #options: Required<Pick<VecteezyDownloadClientOptions, 'delay' | 'fileOperations' | 'maxStatusPolls'>>
+  readonly #options: Required<Pick<VecteezyDownloadClientOptions,
+    'delay' | 'fileOperations' | 'maxStatusPolls' | 'maxFileSizeBytes' | 'maxAggregateSizeBytes'>>
     & Pick<VecteezyDownloadClientOptions, 'accountId' | 'apiKey' | 'fetcher' | 'logger'>
   #aggregateSizeBytes = 0
   #nextRequestId = 1
@@ -115,11 +117,26 @@ export class VecteezyDownloadClient {
     if (!Number.isSafeInteger(maxStatusPolls) || maxStatusPolls < 1) {
       throw new Error('maxStatusPolls must be a positive integer')
     }
+    const maxFileSizeBytes = boundedTransferLimit(
+      options.maxFileSizeBytes,
+      MAX_FILE_SIZE_BYTES,
+      'maxFileSizeBytes',
+    )
+    const maxAggregateSizeBytes = boundedTransferLimit(
+      options.maxAggregateSizeBytes,
+      MAX_AGGREGATE_SIZE_BYTES,
+      'maxAggregateSizeBytes',
+    )
+    if (maxFileSizeBytes > maxAggregateSizeBytes) {
+      throw new Error('maxFileSizeBytes cannot exceed maxAggregateSizeBytes')
+    }
     this.#options = {
       ...options,
       delay: options.delay ?? (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))),
       fileOperations: options.fileOperations ?? defaultFileOperations,
       maxStatusPolls,
+      maxFileSizeBytes,
+      maxAggregateSizeBytes,
     }
   }
 
@@ -147,10 +164,10 @@ export class VecteezyDownloadClient {
     fileType = FILE_TYPE,
   ): Promise<FormalDownloadRequest> {
     const info = await this.getDownloadInfo(resourceId, fileType)
-    if (info.sourceSizeBytes > MAX_FILE_SIZE_BYTES) {
+    if (info.sourceSizeBytes > this.#options.maxFileSizeBytes) {
       throw new VecteezyDownloadError('file_size_limit_exceeded', 'Vecteezy file exceeds the 512 MiB limit')
     }
-    if (this.#aggregateSizeBytes + info.sourceSizeBytes > MAX_AGGREGATE_SIZE_BYTES) {
+    if (this.#aggregateSizeBytes + info.sourceSizeBytes > this.#options.maxAggregateSizeBytes) {
       throw new VecteezyDownloadError('aggregate_size_limit_exceeded', 'Vecteezy downloads exceed the 2 GiB aggregate limit')
     }
 
@@ -208,6 +225,7 @@ export class VecteezyDownloadClient {
     }
 
     const partDestination = `${destination}.part`
+    let accountedSizeBytes = pending.info.sourceSizeBytes
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         const response = await this.#options.fetcher(pending.signedUrl)
@@ -217,16 +235,43 @@ export class VecteezyDownloadClient {
           }
           throw new VecteezyDownloadError('transfer_failed', 'Vecteezy signed transfer failed')
         }
+        let transferredSizeBytes = 0
+        const hash = createHash('sha256')
+        const meter = new Transform({
+          transform: (chunk, _encoding, callback) => {
+            const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+            const nextTransferredSize = transferredSizeBytes + bytes.byteLength
+            if (nextTransferredSize > this.#options.maxFileSizeBytes) {
+              callback(new TerminalTransferLimitError('file_size_limit_exceeded'))
+              return
+            }
+            const nextAccountedSize = Math.max(pending.info.sourceSizeBytes, nextTransferredSize)
+            const aggregateIncrease = nextAccountedSize - accountedSizeBytes
+            if (this.#aggregateSizeBytes + aggregateIncrease > this.#options.maxAggregateSizeBytes) {
+              callback(new TerminalTransferLimitError('aggregate_size_limit_exceeded'))
+              return
+            }
+            this.#aggregateSizeBytes += aggregateIncrease
+            accountedSizeBytes = nextAccountedSize
+            transferredSizeBytes = nextTransferredSize
+            hash.update(bytes)
+            callback(null, bytes)
+          },
+        })
         await pipeline(
           Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]),
+          meter,
           this.#options.fileOperations.createWriteStream(partDestination),
         )
         await this.#options.fileOperations.rename(partDestination, destination)
-        const bytes = await this.#options.fileOperations.readFile(destination)
+        if (transferredSizeBytes < accountedSizeBytes) {
+          this.#aggregateSizeBytes -= accountedSizeBytes - transferredSizeBytes
+          accountedSizeBytes = transferredSizeBytes
+        }
         const completed: CompletedVecteezyDownload = {
           artifactKey: destination,
-          sourceSizeBytes: bytes.byteLength,
-          sourceSha256: createHash('sha256').update(bytes).digest('hex'),
+          sourceSizeBytes: transferredSizeBytes,
+          sourceSha256: hash.digest('hex'),
           requiresAttribution: pending.info.requiresAttribution,
           requiredAttributionUrl: pending.info.requiredAttributionUrl,
           quota: pending.info.quota,
@@ -235,6 +280,14 @@ export class VecteezyDownloadClient {
         return completed
       } catch (error) {
         await this.#options.fileOperations.rm(partDestination).catch(() => undefined)
+        if (accountedSizeBytes > pending.info.sourceSizeBytes) {
+          this.#aggregateSizeBytes -= accountedSizeBytes - pending.info.sourceSizeBytes
+          accountedSizeBytes = pending.info.sourceSizeBytes
+        }
+        if (error instanceof TerminalTransferLimitError) {
+          this.#pending.delete(readyDownload.requestId)
+          throw transferLimitError(error.code)
+        }
         if (error instanceof TerminalSignedTransferError) {
           this.#pending.delete(readyDownload.requestId)
           throw new VecteezyDownloadError('transfer_failed', 'Vecteezy signed transfer failed')
@@ -287,11 +340,30 @@ export class VecteezyDownloadClient {
 
 class TerminalSignedTransferError extends Error {}
 
+class TerminalTransferLimitError extends Error {
+  constructor(readonly code: 'file_size_limit_exceeded' | 'aggregate_size_limit_exceeded') {
+    super(code)
+  }
+}
+
 const defaultFileOperations: VecteezyDownloadFileOperations = {
   createWriteStream,
   rename,
   rm: path => rm(path, { force: true }),
-  readFile,
+}
+
+function boundedTransferLimit(value: number | undefined, hardLimit: number, name: string): number {
+  const limit = value ?? hardLimit
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > hardLimit) {
+    throw new Error(`${name} must be a positive integer no greater than the production hard limit`)
+  }
+  return limit
+}
+
+function transferLimitError(code: TerminalTransferLimitError['code']): VecteezyDownloadError {
+  return code === 'file_size_limit_exceeded'
+    ? new VecteezyDownloadError(code, 'Vecteezy file exceeds the 512 MiB limit')
+    : new VecteezyDownloadError(code, 'Vecteezy downloads exceed the 2 GiB aggregate limit')
 }
 
 async function providerJson(response: Response): Promise<Record<string, unknown>> {

@@ -1,7 +1,7 @@
 begin;
 create extension if not exists pgtap with schema extensions;
 set local search_path = public, extensions;
-select plan(36);
+select plan(39);
 
 -- 1-3: private production tables exist
 select has_table('public', 'video_render_jobs', 'render jobs table exists');
@@ -327,7 +327,7 @@ insert into task1_ids(label, download_id)
 select 'download-render-3', download_id
 from public.record_video_asset_download((select render_id from task1_ids where label = 'render-complete'), (select selection_id from task1_ids where label = 'selection-render-3'), 'video-runs/complete/assets/3.mp4', 'mp4', 1003, pg_catalog.repeat('7', 64), 1920, 1080, 7500, 30, 'h264', 'aac', false, null, null, null);
 
--- 25-26: caller text is discarded and a failed downloaded render resumes without new downloads
+-- 25-27: caller text is discarded and a failed downloaded render resumes idempotently without new downloads
 do $$
 begin
   perform public.fail_video_render(
@@ -353,15 +353,20 @@ select is(
   'downloading',
   'retry resumes a render that already owns verified downloads'
 );
+select is(
+  (select status from public.retry_video_render((select render_id from task1_ids where label = 'render-complete'))),
+  'downloading',
+  'retry replay returns downloading after a committed response is lost'
+);
 
--- 27: four verified downloads move the render to rendering
+-- 28: four verified downloads move the render to rendering
 select is(
   (select status from public.begin_video_render((select render_id from task1_ids where label = 'render-complete'))),
   'rendering',
   'begin render accepts exactly four verified downloads'
 );
 
--- 28-29: changed quote text fails before any partial completion data persists
+-- 29-30: changed quote text fails before any partial completion data persists
 select throws_ok(
   $$select * from public.complete_video_render(
     (select render_id from task1_ids where label = 'render-complete'),
@@ -414,7 +419,7 @@ select throws_ok(
   'P0003', 'render cannot fail from its current state', 'completed renders are terminal'
 );
 
--- 34-35: failed renders with no downloads retry to planned
+-- 35-37: failed renders with no downloads retry to planned idempotently
 insert into task1_ids(label, render_id)
 select 'render-failed', render_id
 from public.start_video_render(pg_catalog.repeat('c', 64), 'Synthetic failed render');
@@ -428,8 +433,22 @@ select is(
   'planned',
   'retry clears failure data and returns to planned'
 );
+select is(
+  (select status from public.retry_video_render((select render_id from task1_ids where label = 'render-failed'))),
+  'planned',
+  'retry replay returns planned after a committed response is lost'
+);
 
--- 36: source provenance constraints remain enforced
+-- 38: temporary attribution URLs remain forbidden at the database boundary
+select throws_ok(
+  $$update public.video_asset_downloads
+    set requires_attribution = true,
+        required_attribution_url = 'https://example.test/license?X-Amz-Signature=private'
+    where id = (select download_id from task1_ids where label = 'download-render-0')$$,
+  '23514', null, 'signed attribution URLs cannot be persisted'
+);
+
+-- 39: source provenance constraints remain enforced
 select throws_ok(
   $$insert into public.video_render_segments(render_id, segment_index, download_id, timeline_start_ms, timeline_end_ms, source_in_ms, source_out_ms, caption_kind, caption_en, caption_zh, source_track_id, source_cue_index)
     values ((select render_id from task1_ids where label = 'render-incomplete'), 0, (select download_id from task1_ids where label = 'download-incomplete'), 0, 10, 0, 10, 'original', 'Original.', 'Original.', (select track_id from task1_ids where label = 'quote-source'), (select cue_index from task1_ids where label = 'quote-source'))$$,

@@ -9,6 +9,10 @@ const failRenderLintMigrations = readdirSync(migrationDirectory)
   .filter(fileName => fileName.endsWith('_silence_fail_video_render_lint.sql'))
 const foreignKeyIndexMigrations = readdirSync(migrationDirectory)
   .filter(fileName => fileName.endsWith('_cover_video_production_foreign_keys.sql'))
+const retryRecoveryMigrations = readdirSync(migrationDirectory)
+  .filter(fileName => fileName.endsWith('_idempotent_retry_video_render.sql'))
+const stableAttributionMigrations = readdirSync(migrationDirectory)
+  .filter(fileName => fileName.endsWith('_protect_attribution_urls.sql'))
 const databaseTestPath = resolve(process.cwd(), 'supabase/tests/database/video_production.sql')
 
 function migrationSource(): string {
@@ -131,6 +135,32 @@ describe('video production migration', () => {
     expect(body).toContain('where download.render_id = p_render_id')
     expect(body).toContain('set status = v_retry_status')
     expect(body).toContain('return query select v_retry_status')
+  })
+
+  it('makes retry replay-safe after a committed response is lost', () => {
+    expect(retryRecoveryMigrations).toHaveLength(1)
+    const source = readFileSync(resolve(migrationDirectory, retryRecoveryMigrations[0]), 'utf8')
+
+    expect(source).toContain('create or replace function public.retry_video_render')
+    expect(source).toContain("if v_persisted_status in ('planned', 'downloading')")
+    expect(source).toContain('and v_persisted_status = v_retry_status')
+    expect(source).toContain('return query select v_persisted_status')
+    expect(source).toContain("if v_persisted_status <> 'failed'")
+    expect(source).toContain('security invoker')
+    expect(source).toContain("set search_path = ''")
+    expect(source).toContain('revoke all on function public.retry_video_render(uuid) from public, anon, authenticated')
+  })
+
+  it('prevents temporary or signed attribution URLs at the database boundary', () => {
+    expect(stableAttributionMigrations).toHaveLength(1)
+    const source = readFileSync(resolve(migrationDirectory, stableAttributionMigrations[0]), 'utf8')
+
+    expect(source).toContain('drop constraint video_asset_downloads_attribution_check')
+    expect(source).toContain('add constraint video_asset_downloads_attribution_check check')
+    expect(source).toContain("required_attribution_url !~ '[?#]'")
+    expect(source).toContain("required_attribution_url !~ '^https://[^/]*@'")
+    expect(source).toContain('required_attribution_url !~*')
+    expect(source).toMatch(/signature\|x-amz-/)
   })
 
   it('grants service role only the table operations required by invoker RPCs', () => {
