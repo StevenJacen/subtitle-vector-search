@@ -96,6 +96,8 @@ it('documents hosted planner transports and the explicit internal test exception
   expect(configuration).toMatch(/`ollama-http`[^.]+`AI_INFERENCE_API_HOST`[^.]+`OLLAMA_AUTH_TOKEN`[^.]+`OLLAMA_MODEL`/)
   expect(configuration).toMatch(/internal test[^.]+explicit[^.]+unauthenticated/i)
   expect(configuration).toMatch(/never enable[^.]+production/i)
+  expect(configuration).toMatch(/local[^.]+`GET \/api\/tags`[^.]+not sufficient/i)
+  expect(configuration).toContain('`text/html`')
   expect(configuration).not.toContain('supabase-ai` transport uses the configured authenticated gateway')
 })
 
@@ -116,6 +118,9 @@ it('scopes migration and authenticated requests to the video candidate workflow'
     const example = requestExample(workflow, endpoint)
     expect(example).toContain("'x-subtitle-token' = $env:SUBTITLE_PERSONAL_TOKEN")
   }
+  const seedExample = requestExample(workflow, 'seed-visual-concepts')
+  expect(workflow).toContain('0..23 | ForEach-Object')
+  expect(seedExample).toContain('seed-visual-concepts?index=$_')
 })
 
 it('documents private candidate records and synthetic examples in its own section', () => {

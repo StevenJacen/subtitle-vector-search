@@ -57,6 +57,8 @@ describe('Vecteezy search', () => {
 
     const [url, init] = fetcher.mock.calls[0]
     expect(String(url)).toContain('https://api.vecteezy.com/v2/123/resources?')
+    expect(String(url)).toContain('term=person+walking+sunrise')
+    expect(String(url)).not.toContain('query=')
     expect(String(url)).toContain('content_type=video')
     expect(String(url)).toContain('license_type=commercial')
     expect(String(url)).toContain('duration=3_15')

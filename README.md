@@ -73,6 +73,11 @@ Ollama service. It only controls whether the direct transport sends a Bearer
 header; all normal request authentication and response sanitization remain in
 place.
 
+A local `GET /api/tags` check is not sufficient for hosted compatibility:
+verify the gateway from a deployed Edge Function as well. A tunnel or proxy
+that returns a `text/html` interstitial to Supabase instead of Ollama JSON will
+cause the planner to use the deterministic visual-concept fallback.
+
 ## Local Testing
 
 Local Supabase uses Docker. The seed adds one synthetic ready track with three synthetic cues and two normalized 384-dimensional vectors; it never adds real subtitle dialogue.
@@ -152,12 +157,18 @@ npx supabase functions deploy seed-visual-concepts --no-verify-jwt
 npx supabase functions deploy match-video-assets --no-verify-jwt
 npx supabase functions deploy select-video-asset --no-verify-jwt
 
-Invoke-RestMethod -Method Post `
-  -Uri https://kwoppqigrtvgmmbnzbpx.supabase.co/functions/v1/seed-visual-concepts `
-  -Headers @{ 'x-subtitle-token' = $env:SUBTITLE_PERSONAL_TOKEN } `
-  -ContentType 'application/json' `
-  -Body '{}'
+0..23 | ForEach-Object {
+  Invoke-RestMethod -Method Post `
+    -Uri "https://kwoppqigrtvgmmbnzbpx.supabase.co/functions/v1/seed-visual-concepts?index=$_" `
+    -Headers @{ 'x-subtitle-token' = $env:SUBTITLE_PERSONAL_TOKEN } `
+    -ContentType 'application/json' `
+    -Body '{}'
+}
 ```
+
+The loop intentionally generates one native `gte-small` embedding per Edge
+invocation to stay within the hosted compute budget. Every indexed upsert is
+idempotent, so rerunning the complete loop is safe.
 
 Use a generic synthetic visual theme or non-sensitive context in requests. Do
 not send real movie dialogue as ad hoc text. This request returns an idempotent

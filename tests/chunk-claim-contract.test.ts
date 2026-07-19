@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-const migration = ['20260713093000_subtitle_chunk_claims.sql', '20260713100000_finalize_subtitle_ingestion.sql']
+const migration = ['20260713025519_subtitle_chunk_claims.sql', '20260713025522_finalize_subtitle_ingestion.sql']
   .map(file => readFileSync(resolve(process.cwd(), 'supabase/migrations', file), 'utf8'))
   .join('\n')
 const handler = readFileSync(

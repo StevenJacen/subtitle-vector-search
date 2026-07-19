@@ -187,38 +187,46 @@ interface RpcClient {
   rpc(name: string, arguments_: Record<string, unknown>): PromiseLike<{ data: unknown; error: unknown }>
 }
 
+export class VisualConceptSeedIndexError extends Error {}
+
 export async function seedVisualConcepts(
   dependencies: { session: EmbeddingSession; client: RpcClient },
-): Promise<{ seeded: 24; model: 'gte-small' }> {
-  const rows = new Array<Record<string, unknown>>(VISUAL_CONCEPT_SEEDS.length)
-  let nextIndex = 0
-
-  async function worker(): Promise<void> {
-    while (nextIndex < VISUAL_CONCEPT_SEEDS.length) {
-      const index = nextIndex
-      nextIndex += 1
-      const seed = VISUAL_CONCEPT_SEEDS[index]
-      const embedding = assertEmbedding(await dependencies.session.run(
-        seed.description,
-        { mean_pool: true, normalize: true },
-      ))
-      rows[index] = {
-        concept_key: seed.conceptKey,
-        description: seed.description,
-        literal_query: seed.literalQuery,
-        action_query: seed.actionQuery,
-        metaphor_query: seed.metaphorQuery,
-        embedding,
-        enabled: true,
-      }
-    }
+  indexInput: unknown,
+): Promise<{ seeded: 1; model: 'gte-small'; conceptKey: string; index: number; nextIndex: number | null }> {
+  const index = typeof indexInput === 'number'
+    ? indexInput
+    : typeof indexInput === 'string' && /^(?:0|[1-9]\d*)$/.test(indexInput)
+    ? Number(indexInput)
+    : Number.NaN
+  if (!Number.isInteger(index) || index < 0 || index >= VISUAL_CONCEPT_SEEDS.length) {
+    throw new VisualConceptSeedIndexError('invalid visual concept seed index')
   }
 
-  await Promise.all(Array.from({ length: 4 }, async () => await worker()))
-  const result = await dependencies.client.rpc('upsert_visual_concepts', { p_concepts: rows })
-  if (result.error !== null || result.data !== VISUAL_CONCEPT_SEEDS.length) {
+  const seed = VISUAL_CONCEPT_SEEDS[index]
+  const embedding = assertEmbedding(await dependencies.session.run(
+    seed.description,
+    { mean_pool: true, normalize: true },
+  ))
+  const row = {
+    concept_key: seed.conceptKey,
+    description: seed.description,
+    literal_query: seed.literalQuery,
+    action_query: seed.actionQuery,
+    metaphor_query: seed.metaphorQuery,
+    embedding,
+    enabled: true,
+  }
+
+  const result = await dependencies.client.rpc('upsert_visual_concepts', { p_concepts: [row] })
+  if (result.error !== null || result.data !== 1) {
     throw new Error('visual concept seed failed')
   }
 
-  return { seeded: 24, model: 'gte-small' }
+  return {
+    seeded: 1,
+    model: 'gte-small',
+    conceptKey: seed.conceptKey,
+    index,
+    nextIndex: index + 1 < VISUAL_CONCEPT_SEEDS.length ? index + 1 : null,
+  }
 }

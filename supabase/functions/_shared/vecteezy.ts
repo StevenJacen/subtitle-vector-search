@@ -37,7 +37,7 @@ export async function searchVecteezy(
   options: VecteezyClientOptions,
 ): Promise<VecteezyPage> {
   const url = resourceUrl(options.accountId, {
-    query: term,
+    term,
     content_type: 'video',
     license_type: 'commercial',
     duration: '3_15',

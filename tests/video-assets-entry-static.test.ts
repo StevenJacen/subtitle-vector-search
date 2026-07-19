@@ -18,12 +18,13 @@ const selectionSource = readFileSync(
 )
 
 describe('visual concept seed Edge entry', () => {
-  it('uses pinned Edge dependencies and authenticates before model or database work', () => {
+  it('loads the native model before serving and authenticates before database work', () => {
     expect(seedSource).toContain("import 'jsr:@supabase/functions-js/edge-runtime.d.ts'")
     expect(seedSource).toContain("from 'npm:@supabase/supabase-js@2.110.2'")
+    expect(seedSource).toContain("const embeddingSession = new Supabase.ai.Session('gte-small')")
     expect(seedSource).toContain('handleAuthenticatedRequest(request, Deno.env')
-    expect(seedSource.indexOf('handleAuthenticatedRequest(request, Deno.env'))
-      .toBeLessThan(seedSource.indexOf("new Supabase.ai.Session('gte-small')"))
+    expect(seedSource.indexOf("const embeddingSession = new Supabase.ai.Session('gte-small')"))
+      .toBeLessThan(seedSource.indexOf('Deno.serve'))
     expect(seedSource.indexOf('handleAuthenticatedRequest(request, Deno.env'))
       .toBeLessThan(seedSource.indexOf('createClient('))
     expect(seedSource).not.toContain('request.json()')
@@ -31,14 +32,20 @@ describe('visual concept seed Edge entry', () => {
 
   it('injects built-in inference and the Task 3 RPC into the bounded seed helper', () => {
     expect(seedSource).toContain("new Supabase.ai.Session('gte-small')")
+    expect(seedSource).toContain("const index = new URL(request.url).searchParams.get('index')")
     expect(seedSource).toContain('seedVisualConcepts({')
-    expect(seedSource).toContain('session,')
+    expect(seedSource).toContain('session: embeddingSession,')
     expect(seedSource).toContain('client,')
+    expect(seedSource).toContain('}, index)')
     expect(seedSource).toContain('jsonResponse(result)')
   })
 
   it('returns controlled method and seed errors without logging secrets or payloads', () => {
     expect(seedSource).toContain("errorResponse(405, 'method_not_allowed', 'only POST is supported')")
+    expect(seedSource).toContain('error instanceof VisualConceptSeedIndexError')
+    expect(seedSource).toContain(
+      "errorResponse(400, 'invalid_seed_index', 'index must be an integer from 0 to 23')",
+    )
     expect(seedSource).toContain("errorResponse(500, 'visual_concept_seed_failed', 'visual concept seed failed')")
     expect(seedSource).not.toContain('console.log')
     expect(seedSource).not.toContain('console.error')

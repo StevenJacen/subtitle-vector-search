@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest'
 const migrationDirectory = resolve(process.cwd(), 'supabase/migrations')
 const matchingMigrations = readdirSync(migrationDirectory)
   .filter(fileName => fileName.endsWith('_video_asset_matching.sql'))
+const coalesceRepairMigrations = readdirSync(migrationDirectory)
+  .filter(fileName => fileName.endsWith('_fix_video_asset_coalesce.sql'))
 
 function migrationSource(): string {
   if (matchingMigrations.length !== 1) {
@@ -12,6 +14,14 @@ function migrationSource(): string {
   }
 
   return readFileSync(resolve(migrationDirectory, matchingMigrations[0]), 'utf8')
+}
+
+function coalesceRepairSource(): string {
+  if (coalesceRepairMigrations.length !== 1) {
+    throw new Error(`expected exactly one coalesce repair migration, found ${coalesceRepairMigrations.length}`)
+  }
+
+  return readFileSync(resolve(migrationDirectory, coalesceRepairMigrations[0]), 'utf8')
 }
 
 describe('video asset matching migration', () => {
@@ -84,5 +94,16 @@ describe('video asset matching migration', () => {
     expect(source).toContain('foreign key (run_id, candidate_id)')
     expect(source).toContain('references public.video_search_candidates(run_id, id)')
     expect(source).toContain('on delete cascade')
+  })
+
+  it('repairs SQL-special COALESCE calls without weakening the RPCs', () => {
+    const source = coalesceRepairSource()
+
+    expect(coalesceRepairMigrations).toHaveLength(1)
+    expect(source).toContain('create or replace function public.finish_video_search_run')
+    expect(source).toContain('create or replace function public.upsert_visual_concepts')
+    expect(source).not.toContain('pg_catalog.coalesce')
+    expect(source.match(/security invoker/g)).toHaveLength(2)
+    expect(source.match(/set search_path = ''/g)).toHaveLength(2)
   })
 })

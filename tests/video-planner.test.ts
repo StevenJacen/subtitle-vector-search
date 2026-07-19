@@ -49,6 +49,7 @@ describe('visual planner prompt and repair', () => {
     for (const kind of ['literal', 'action', 'metaphor']) {
       expect(prompt).toContain(kind)
     }
+    expect(prompt).toContain('{"kind":"literal","term":"..."}')
     expect(prompt).toMatch(/JSON only/i)
     expect(prompt).toMatch(/English-only search terms/i)
     expect(prompt).toMatch(/no dialogue, movie, or brand references/i)
@@ -295,6 +296,7 @@ describe('planner transports', () => {
       model: 'gemma4:12b',
       messages: [{ role: 'user', content: 'planner prompt' }],
       stream: false,
+      think: false,
       format: 'json',
       options: { temperature: 0.2, num_predict: 600 },
     })
@@ -451,7 +453,7 @@ describe('visual concept fallback and seeding', () => {
     expect(client.rpc).not.toHaveBeenCalled()
   })
 
-  it('embeds seed descriptions with at most four workers and upserts Task 3 rows', async () => {
+  it('embeds one indexed seed within the hosted Edge compute budget', async () => {
     let active = 0
     let maximumActive = 0
     const session = {
@@ -463,30 +465,46 @@ describe('visual concept fallback and seeding', () => {
         return Array(384).fill(0.25)
       }),
     }
-    const client = { rpc: vi.fn().mockResolvedValue({ data: 24, error: null }) }
+    const client = { rpc: vi.fn().mockResolvedValue({ data: 1, error: null }) }
 
-    await expect(seedVisualConcepts({ session, client })).resolves.toEqual({
-      seeded: 24,
+    await expect(seedVisualConcepts({ session, client }, 7)).resolves.toEqual({
+      seeded: 1,
       model: 'gte-small',
+      conceptKey: VISUAL_CONCEPT_SEEDS[7].conceptKey,
+      index: 7,
+      nextIndex: 8,
     })
-    expect(maximumActive).toBeLessThanOrEqual(4)
-    expect(session.run).toHaveBeenCalledTimes(24)
+    expect(maximumActive).toBe(1)
+    expect(session.run).toHaveBeenCalledOnce()
     expect(session.run).toHaveBeenCalledWith(
-      VISUAL_CONCEPT_SEEDS[0].description,
+      VISUAL_CONCEPT_SEEDS[7].description,
       { mean_pool: true, normalize: true },
     )
     expect(client.rpc).toHaveBeenCalledOnce()
     const [rpcName, rpcArguments] = client.rpc.mock.calls[0]
     expect(rpcName).toBe('upsert_visual_concepts')
-    expect(rpcArguments.p_concepts).toHaveLength(24)
+    expect(rpcArguments.p_concepts).toHaveLength(1)
     expect(rpcArguments.p_concepts[0]).toEqual({
-      concept_key: VISUAL_CONCEPT_SEEDS[0].conceptKey,
-      description: VISUAL_CONCEPT_SEEDS[0].description,
-      literal_query: VISUAL_CONCEPT_SEEDS[0].literalQuery,
-      action_query: VISUAL_CONCEPT_SEEDS[0].actionQuery,
-      metaphor_query: VISUAL_CONCEPT_SEEDS[0].metaphorQuery,
+      concept_key: VISUAL_CONCEPT_SEEDS[7].conceptKey,
+      description: VISUAL_CONCEPT_SEEDS[7].description,
+      literal_query: VISUAL_CONCEPT_SEEDS[7].literalQuery,
+      action_query: VISUAL_CONCEPT_SEEDS[7].actionQuery,
+      metaphor_query: VISUAL_CONCEPT_SEEDS[7].metaphorQuery,
       embedding: Array(384).fill(0.25),
       enabled: true,
     })
+  })
+
+  it('rejects invalid hosted seed indexes before inference', async () => {
+    const session = { run: vi.fn() }
+    const client = { rpc: vi.fn() }
+
+    for (const value of [null, '', '-1', '24', '1.5', 'one']) {
+      await expect(seedVisualConcepts({ session, client }, value)).rejects.toThrow(
+        'invalid visual concept seed index',
+      )
+    }
+    expect(session.run).not.toHaveBeenCalled()
+    expect(client.rpc).not.toHaveBeenCalled()
   })
 })
