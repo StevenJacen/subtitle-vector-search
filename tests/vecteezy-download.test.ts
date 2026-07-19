@@ -15,6 +15,7 @@ beforeEach(async () => {
 
 const credentials = { accountId: '161976', apiKey: 'secret' }
 const MiB = 1024 * 1024
+const SAFE_STATUS_URL = 'https://api.vecteezy.com/v2/161976/downloads/status/private-ticket'
 
 function downloadInfo(size: number | string, headers: HeadersInit = {}): Response {
   return Response.json({
@@ -26,8 +27,8 @@ function downloadInfo(size: number | string, headers: HeadersInit = {}): Respons
   }, { headers })
 }
 
-function formalDownload(): Response {
-  return Response.json({ data: { download_status_url: 'https://status.test/private-status' } })
+function formalDownload(statusUrl = SAFE_STATUS_URL): Response {
+  return Response.json({ data: { download_status_url: statusUrl } })
 }
 
 function client(
@@ -95,6 +96,26 @@ describe('Vecteezy formal downloads', () => {
     expect(String(fetcher.mock.calls[1][0])).not.toContain('file_size=')
     expect(requested).toMatchObject({ resourceId: 42, sourceSizeBytes: 123 })
     expect(JSON.stringify(requested)).not.toContain('status.test')
+  })
+
+  it.each([
+    'https://attacker.test/private-status',
+    'http://api.vecteezy.com/v2/161976/downloads/status/private-ticket',
+    'not a URL',
+    'https://api-user:secret@api.vecteezy.com/v2/161976/downloads/status/private-ticket',
+  ])('rejects an unsafe formal status URL before it can receive credentials: %s', async statusUrl => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(downloadInfo(5))
+      .mockResolvedValueOnce(formalDownload(statusUrl))
+
+    const error = await client(fetcher).requestDownload(42, new FormalDownloadBudget(4)).catch(error => error)
+
+    expect(error).toMatchObject({ code: 'invalid_download_status_url' })
+    expect(String(error)).not.toContain(statusUrl)
+    expect(String(error)).not.toContain(credentials.apiKey)
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(fetcher.mock.calls.some(([url]) => String(url) === statusUrl)).toBe(false)
+    expect(fetcher.mock.calls.every(([, init]) => init.headers.authorization === `Bearer ${credentials.apiKey}`)).toBe(true)
   })
 
   it('normalizes integer sizes and download quota headers', async () => {
@@ -394,13 +415,13 @@ describe('Vecteezy signed transfers', () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(downloadInfo(5))
       .mockResolvedValueOnce(formalDownload())
-      .mockRejectedValueOnce(new Error('network failed for https://status.test/private-status'))
+      .mockRejectedValueOnce(new Error(`network failed for ${SAFE_STATUS_URL}`))
     const downloadClient = client(fetcher)
     const requested = await downloadClient.requestDownload(42, new FormalDownloadBudget(4))
 
     const error = await downloadClient.waitForDownload(requested).catch(error => error)
 
     expect(error).toMatchObject({ code: 'provider_request_failed' })
-    expect(String(error)).not.toContain('status.test')
+    expect(String(error)).not.toContain(SAFE_STATUS_URL)
   })
 })

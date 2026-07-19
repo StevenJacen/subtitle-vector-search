@@ -10,6 +10,7 @@ const FILE_TYPE = 'mp4'
 const MAX_FILE_SIZE_BYTES = 512 * 1024 * 1024
 const MAX_AGGREGATE_SIZE_BYTES = 2 * 1024 * 1024 * 1024
 const MAX_FORMAL_DOWNLOADS = 4
+const API_ORIGIN = new URL(API_BASE_URL).origin
 
 let formalDownloadsUsed = 0
 
@@ -160,6 +161,9 @@ export class VecteezyDownloadClient {
     const payload = providerData(await response.json())
     const signedUrl = signedUrlFrom(payload)
     const statusUrl = stringOrNull(payload.download_status_url)
+    if (statusUrl !== null && approvedProviderUrl(statusUrl) === null) {
+      throw new VecteezyDownloadError('invalid_download_status_url', 'Vecteezy download status URL is invalid')
+    }
     if (signedUrl === null && statusUrl === null) {
       throw new VecteezyDownloadError('invalid_provider_payload', 'Vecteezy formal download payload is invalid')
     }
@@ -252,9 +256,13 @@ export class VecteezyDownloadClient {
   }
 
   async #providerRequest(url: string): Promise<Response> {
+    const providerUrl = approvedProviderUrl(url)
+    if (providerUrl === null) {
+      throw new VecteezyDownloadError('invalid_provider_url', 'Vecteezy provider URL is invalid')
+    }
     let response: Response
     try {
-      response = await this.#options.fetcher(url, {
+      response = await this.#options.fetcher(providerUrl.toString(), {
         headers: { authorization: `Bearer ${this.#options.apiKey}`, accept: 'application/json' },
         signal: AbortSignal.timeout(10_000),
       })
@@ -343,6 +351,17 @@ function record(value: unknown): Record<string, unknown> {
 
 function stringOrNull(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function approvedProviderUrl(value: string): URL | null {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && url.origin === API_ORIGIN && url.username === '' && url.password === ''
+      ? url
+      : null
+  } catch {
+    return null
+  }
 }
 
 function normalizePositiveInteger(value: unknown): number | null {
