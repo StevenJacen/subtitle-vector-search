@@ -55,7 +55,7 @@ export function createVideoProgram(
         command.args,
         environment,
         ['npm_config_theme', 'npm_config_candidate_count'],
-        options.theme !== undefined || options.candidateCount !== undefined,
+        options.theme !== undefined || options.candidateCount !== undefined || options.json === true,
       )
       const jsonMode = options.json === true || environment.npm_config_json === 'true'
       const theme = requiredCliOption(forwarded?.[0] ?? options.theme, '--theme')

@@ -237,12 +237,18 @@ describe('video pipeline', () => {
     'raw provider payload: {"private":true}',
     'model prompt: reveal the private request',
     'SUBTITLE_PERSONAL_TOKEN=localvalue123',
+    'subtitle_personal_token=localvalue123',
+    'SuBtItLe_PeRsOnAl_ToKeN=localvalue123',
     'SUPABASE_PUBLISHABLE_KEY=localvalue123',
+    'supabase_publishable_key=localvalue123',
     'OPENSUBTITLES_TOKEN=localvalue123',
+    'OpenSubtitles_Token=localvalue123',
     'VECTEEZY_API_KEY=localvalue123',
     'token=localvalue123',
     'password: localvalue123',
     'credential = localvalue123',
+    'db_password = localvalue123',
+    'serviceCredential=localvalue123',
     'authorization=localvalue123',
     'api-key=localvalue123',
     'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwcml2YXRlIn0.signaturevalue123',
@@ -292,7 +298,7 @@ describe('video pipeline', () => {
     expect(fresh.productionApi.matchScene).not.toHaveBeenCalled()
   })
 
-  it('returns an oversized candidate to review before selection, start, or formal reservation', async () => {
+  it('fails a new job safely when oversized preflight rejects before formal reservation', async () => {
     const harness = await createPlannedHarness()
     harness.downloads.getDownloadInfo.mockImplementation(async resourceId => ({
       ...downloadInfo(resourceId),
@@ -306,10 +312,17 @@ describe('video pipeline', () => {
       maxDownloads: 4,
     }, harness.dependencies)).rejects.toThrow('candidate exceeds local download limit')
 
-    expect(harness.productionApi.selectCandidate).not.toHaveBeenCalled()
-    expect(harness.productionApi.start).not.toHaveBeenCalled()
+    expect(harness.productionApi.selectCandidate).toHaveBeenCalledTimes(4)
+    expect(harness.productionApi.start).toHaveBeenCalledTimes(1)
     expect(harness.downloads.requestDownload).not.toHaveBeenCalled()
-    expect((await readManifest(harness.plan.manifestPath)).stage).toBe('review')
+    expect(harness.productionApi.fail).toHaveBeenCalledWith({
+      renderId,
+      failureCode: 'source_validation_failure',
+      failureMessage: 'video source preflight failed',
+    })
+    const active = await latestPlan(harness.artifactRoot)
+    expect((await readManifest(active.manifestPath)).stage).toBe('failed')
+    await expect(fs.access(join(dirname(active.manifestPath), 'production-state.json'))).rejects.toThrow()
   })
 
   it('fails metadata after transfer failure, preserves completed source state, and never renders', async () => {
@@ -396,6 +409,36 @@ describe('video pipeline', () => {
     expect((await readManifest(active.manifestPath)).stage).toBe('completed')
   })
 
+  it('resumes a render-owned rendering manifest without another beginRender transition', async () => {
+    const harness = await createPlannedHarness()
+    harness.renderVideo.mockRejectedValueOnce(new Error('synthetic render interruption'))
+    await expect(produceVideo({
+      artifactRoot: harness.artifactRoot,
+      manifestPath: harness.plan.manifestPath,
+      reviewPath: harness.plan.reviewPath,
+      maxDownloads: 4,
+    }, harness.dependencies)).rejects.toThrow('video production failed')
+    const active = await latestPlan(harness.artifactRoot)
+    const failed = await readManifest(active.manifestPath)
+    await writeManifestAtomic(active.manifestPath as Parameters<typeof writeManifestAtomic>[0], {
+      ...failed,
+      stage: 'rendering',
+    })
+    harness.productionApi.beginRender.mockClear()
+    harness.productionApi.fail.mockClear()
+    harness.renderVideo.mockClear()
+
+    const result = await resumeVideo({
+      artifactRoot: harness.artifactRoot,
+      manifestPath: active.manifestPath,
+    }, harness.dependencies)
+
+    expect(result.stage).toBe('completed')
+    expect(harness.productionApi.beginRender).not.toHaveBeenCalled()
+    expect(harness.productionApi.fail).not.toHaveBeenCalled()
+    expect(harness.renderVideo).toHaveBeenCalledTimes(1)
+  })
+
   it('reuses an existing matching source hash without provider or duplicate metadata work', async () => {
     const harness = await createPlannedHarness()
     harness.renderVideo.mockRejectedValueOnce(new Error('render failed'))
@@ -458,7 +501,10 @@ describe('video pipeline', () => {
     await expect(fs.access(journalPath)).rejects.toThrow()
   })
 
-  it('prefers a compatible attached completed manifest over an active existing status', async () => {
+  it.each([
+    ['completed', 0],
+    ['downloading', 1],
+  ] as const)('prefers a compatible attached completed manifest over existing %s status', async (status, expectedCompleteCalls) => {
     const harness = await createPlannedHarness()
     const completed = await produceVideo({
       artifactRoot: harness.artifactRoot,
@@ -481,27 +527,20 @@ describe('video pipeline', () => {
       renderId: null,
       stage: 'review',
     })
-    await fs.mkdir(dirname(transitionPath(harness.artifactRoot, harness.plan.planId)), { recursive: true })
-    await fs.writeFile(transitionPath(harness.artifactRoot, harness.plan.planId), `${JSON.stringify({
-      version: 1,
-      planId: harness.plan.planId,
-      requestDigest: completedManifest.requestDigest,
-      renderId: null,
-      status: null,
-      isExisting: null,
-      phase: 'prepared',
-    }, null, 2)}\n`)
     harness.productionApi.start.mockClear()
     harness.productionApi.start.mockResolvedValueOnce({
       renderId,
-      status: 'downloading',
+      status,
       isExisting: true,
     })
     harness.productionApi.complete.mockClear()
     harness.productionApi.beginRender.mockClear()
     harness.productionApi.fail.mockClear()
     harness.renderVideo.mockClear()
+    harness.downloads.getDownloadInfo.mockClear()
     harness.downloads.requestDownload.mockClear()
+    harness.downloads.waitForDownload.mockClear()
+    harness.downloads.transferSignedUrl.mockClear()
 
     await produceVideo({
       artifactRoot: harness.artifactRoot,
@@ -510,11 +549,14 @@ describe('video pipeline', () => {
       maxDownloads: 4,
     }, harness.dependencies)
 
-    expect(harness.productionApi.complete).toHaveBeenCalledTimes(1)
+    expect(harness.productionApi.complete).toHaveBeenCalledTimes(expectedCompleteCalls)
     expect(harness.productionApi.beginRender).not.toHaveBeenCalled()
     expect(harness.productionApi.fail).not.toHaveBeenCalled()
     expect(harness.renderVideo).not.toHaveBeenCalled()
+    expect(harness.downloads.getDownloadInfo).not.toHaveBeenCalled()
     expect(harness.downloads.requestDownload).not.toHaveBeenCalled()
+    expect(harness.downloads.waitForDownload).not.toHaveBeenCalled()
+    expect(harness.downloads.transferSignedUrl).not.toHaveBeenCalled()
     expect(await fs.readFile(completed.manifestPath)).toEqual(completedBytes)
   })
 
@@ -737,29 +779,96 @@ describe('video pipeline', () => {
     'https://attribution.example.test/status/42',
     'https://attribution.example.test/signed/42',
     'https://attribution.example.test/licenses/free-video?X-Amz-Signature=private',
-  ])('rejects unstable attribution URL %j before selection, start, or production state', async requiredAttributionUrl => {
+  ])('rejects unstable attribution URL %j after start but before formal reservation or production state', async requiredAttributionUrl => {
     const harness = await createPlannedHarness()
     harness.downloads.getDownloadInfo.mockImplementation(async (resourceId: number) => ({
       ...downloadInfo(resourceId),
       requiresAttribution: true,
       requiredAttributionUrl,
     }))
-    const writeManifest = vi.fn(harness.dependencies.writeManifest)
-
     await expect(produceVideo({
       artifactRoot: harness.artifactRoot,
       manifestPath: harness.plan.manifestPath,
       reviewPath: harness.plan.reviewPath,
       maxDownloads: 4,
-    }, { ...harness.dependencies, writeManifest })).rejects.toThrow('invalid required attribution URL')
+    }, harness.dependencies)).rejects.toThrow('invalid required attribution URL')
 
-    expect(writeManifest).not.toHaveBeenCalled()
-    expect(harness.productionApi.selectCandidate).not.toHaveBeenCalled()
-    expect(harness.productionApi.start).not.toHaveBeenCalled()
+    expect(harness.productionApi.selectCandidate).toHaveBeenCalledTimes(4)
+    expect(harness.productionApi.start).toHaveBeenCalledTimes(1)
+    expect(harness.downloads.requestDownload).not.toHaveBeenCalled()
     expect(harness.productionApi.recordDownload).not.toHaveBeenCalled()
+    expect(harness.productionApi.fail).toHaveBeenCalledWith({
+      renderId,
+      failureCode: 'source_validation_failure',
+      failureMessage: 'video source preflight failed',
+    })
     await expect(fs.access(join(dirname(harness.plan.manifestPath), 'production-state.json'))).rejects.toThrow()
     await expect(fs.access(join(harness.artifactRoot, 'video-runs', renderId, 'production-state.json'))).rejects.toThrow()
   })
+
+  it.each([
+    [true, null],
+    [false, 'https://attribution.example.test/licenses/free-video'],
+  ] as const)(
+    'rejects malformed preflight attribution pair requiresAttribution=%s URL=%s before formal reservation',
+    async (requiresAttribution, requiredAttributionUrl) => {
+      const harness = await createPlannedHarness()
+      harness.downloads.getDownloadInfo.mockImplementation(async (resourceId: number) => ({
+        ...downloadInfo(resourceId),
+        requiresAttribution,
+        requiredAttributionUrl,
+      }))
+
+      await expect(produceVideo({
+        artifactRoot: harness.artifactRoot,
+        manifestPath: harness.plan.manifestPath,
+        reviewPath: harness.plan.reviewPath,
+        maxDownloads: 4,
+      }, harness.dependencies)).rejects.toThrow('invalid download attribution metadata')
+
+      expect(harness.downloads.requestDownload).not.toHaveBeenCalled()
+      expect(harness.productionApi.recordDownload).not.toHaveBeenCalled()
+      const active = await latestPlan(harness.artifactRoot)
+      await expect(fs.access(join(dirname(active.manifestPath), 'production-state.json'))).rejects.toThrow()
+    },
+  )
+
+  it.each([
+    [true, 'https://attribution.example.test/licenses/free-video', false, 'https://attribution.example.test/licenses/free-video'],
+    [true, 'https://attribution.example.test/licenses/free-video', true, 'https://attribution.example.test/licenses/other-video'],
+    [false, null, true, 'https://attribution.example.test/licenses/free-video'],
+    [false, null, false, 'https://attribution.example.test/licenses/free-video'],
+  ] as const)(
+    'rejects transfer attribution mismatch preflight=(%s,%s) transfer=(%s,%s) before download metadata state',
+    async (preflightFlag, preflightUrl, transferFlag, transferUrl) => {
+      const harness = await createPlannedHarness()
+      harness.downloads.getDownloadInfo.mockImplementation(async (resourceId: number) => ({
+        ...downloadInfo(resourceId),
+        requiresAttribution: preflightFlag,
+        requiredAttributionUrl: preflightUrl,
+      }))
+      harness.downloads.transferSignedUrl.mockImplementation(async (_ready, destination) => ({
+        ...await transfer(destination),
+        requiresAttribution: transferFlag,
+        requiredAttributionUrl: transferUrl,
+      }))
+
+      await expect(produceVideo({
+        artifactRoot: harness.artifactRoot,
+        manifestPath: harness.plan.manifestPath,
+        reviewPath: harness.plan.reviewPath,
+        maxDownloads: 4,
+      }, harness.dependencies)).rejects.toThrow('video production failed')
+
+      expect(harness.downloads.requestDownload).toHaveBeenCalledTimes(1)
+      expect(harness.productionApi.recordDownload).not.toHaveBeenCalled()
+      const active = await latestPlan(harness.artifactRoot)
+      const state = JSON.parse(await fs.readFile(join(dirname(active.manifestPath), 'production-state.json'), 'utf8'))
+      expect(state.formalReservations).toHaveLength(1)
+      expect(state.downloads).toEqual([])
+      expect((await readManifest(active.manifestPath)).sources ?? []).toEqual([])
+    },
+  )
 })
 
 it('accepts npm 11 forwarded plan options and keeps JSON stdout path-only', async () => {
@@ -914,6 +1023,11 @@ it.each([
   [
     'plan',
     ['plan', '--theme', 'Direct theme', '--candidate-count', '8', 'Forwarded theme', '8'],
+    { npm_config_theme: 'true', npm_config_candidate_count: 'true' },
+  ],
+  [
+    'plan --json',
+    ['plan', '--json', 'Forwarded theme', '8'],
     { npm_config_theme: 'true', npm_config_candidate_count: 'true' },
   ],
   [

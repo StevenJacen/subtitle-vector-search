@@ -242,7 +242,6 @@ export async function produceVideo(
   const review = parseReviewedInput(await readJson(input.reviewPath))
   const packet = parseCandidatePacket(await readJson(join(dirname(input.reviewPath), CANDIDATE_FILE)))
   assertReviewMatchesPlan(review, packet, manifest)
-  const downloadInfo = await preflightDownloads(review, dependencies)
 
   const selections = await Promise.all(review.scenes.map(scene => dependencies.productionApi.selectCandidate({
     runId: scene.runId,
@@ -309,7 +308,6 @@ export async function produceVideo(
     reviewedManifest,
     startedTransition,
     dependencies,
-    downloadInfo,
   )
 }
 
@@ -347,7 +345,14 @@ export async function resumeVideo(
   }
   if (manifest.stage === 'review') throw new Error('review must be completed before resume')
   if (manifest.stage === 'failed') await dependencies.productionApi.retry(manifest.renderId)
-  return continueProduction(input.artifactRoot, manifest, paths, dependencies)
+  return continueProduction(
+    input.artifactRoot,
+    manifest,
+    paths,
+    dependencies,
+    undefined,
+    manifest.stage === 'rendering',
+  )
 }
 
 async function continueRunTransition(
@@ -477,8 +482,17 @@ async function continueProduction(
         'formal download reservation already spent',
       )
     }
-    const infoByResource = new Map((preflight ?? await preflightManifestDownloads(manifest, dependencies))
-      .map(info => [info.resourceId, info]))
+    let validatedPreflight: VecteezyDownloadInfo[]
+    try {
+      validatedPreflight = preflight ?? await preflightManifestDownloads(manifest, dependencies)
+    } catch (error) {
+      return failProduction(
+        'source_validation_failure',
+        'video source preflight failed',
+        preflightOperatorMessage(error),
+      )
+    }
+    const infoByResource = new Map(validatedPreflight.map(info => [info.resourceId, info]))
     const budget = new FormalDownloadBudget(4)
     for (const scene of missingScenes) {
       try {
@@ -509,13 +523,15 @@ async function continueProduction(
           throw new Error('artifact root must be beneath the working directory')
         }
         const completed = await dependencies.downloads.transferSignedUrl(ready, relativeDestination)
-        const probe = await dependencies.probeMedia(destination)
         const info = infoByResource.get(providerResourceId)
         if (info === undefined) throw new Error('download preflight state is unavailable')
         assertAttributionUrl(completed.requiredAttributionUrl)
-        if (completed.requiredAttributionUrl !== info.requiredAttributionUrl) {
+        assertAttributionPair(completed.requiresAttribution, completed.requiredAttributionUrl)
+        if (completed.requiresAttribution !== info.requiresAttribution
+          || completed.requiredAttributionUrl !== info.requiredAttributionUrl) {
           throw new Error('download attribution metadata mismatch')
         }
+        const probe = await dependencies.probeMedia(destination)
         const recorded = await dependencies.productionApi.recordDownload({
           renderId,
           selectionId,
@@ -741,15 +757,6 @@ function buildCompletionRequest(
   }
 }
 
-async function preflightDownloads(
-  review: ReviewedVideoRunInput,
-  dependencies: VideoPipelineDependencies,
-): Promise<VecteezyDownloadInfo[]> {
-  const info = await Promise.all(review.scenes.map(scene => dependencies.downloads.getDownloadInfo(scene.providerResourceId)))
-  assertDownloadSizes(info)
-  return info
-}
-
 async function preflightManifestDownloads(
   manifest: VideoRunManifest,
   dependencies: VideoPipelineDependencies,
@@ -761,11 +768,31 @@ async function preflightManifestDownloads(
   return info
 }
 
+function preflightOperatorMessage(error: unknown): string {
+  if (error instanceof Error
+    && (error.message === 'candidate exceeds local download limit'
+      || error.message === 'invalid required attribution URL'
+      || error.message === 'invalid download attribution metadata')) {
+    return error.message
+  }
+  return 'video source validation failed'
+}
+
 function assertDownloadSizes(info: VecteezyDownloadInfo[]): void {
-  info.forEach(item => assertAttributionUrl(item.requiredAttributionUrl))
+  info.forEach(item => {
+    assertAttributionUrl(item.requiredAttributionUrl)
+    assertAttributionPair(item.requiresAttribution, item.requiredAttributionUrl)
+  })
   if (info.some(item => item.sourceSizeBytes > MAX_FILE_SIZE_BYTES)
     || info.reduce((sum, item) => sum + item.sourceSizeBytes, 0) > MAX_AGGREGATE_SIZE_BYTES) {
     throw new Error('candidate exceeds local download limit')
+  }
+}
+
+function assertAttributionPair(requiresAttribution: boolean, requiredAttributionUrl: string | null): void {
+  if ((requiresAttribution && requiredAttributionUrl === null)
+    || (!requiresAttribution && requiredAttributionUrl !== null)) {
+    throw new Error('invalid download attribution metadata')
   }
 }
 
@@ -1277,8 +1304,8 @@ function boundedText(value: unknown, maximum: number): value is string {
 
 function safeDurableText(value: unknown, maximum: number): value is string {
   if (!boundedText(value, maximum)) return false
-  const sensitiveAssignment = /(?:subtitle_personal_token|\b(?:token|password|credential|api[_ -]?key|authorization)\b)\s*[:=]\s*\S+/i
-  const repositoryCredentialName = /\b[A-Z][A-Z0-9_]*_(?:TOKEN|PASSWORD|CREDENTIALS?|KEY)\b/
+  const sensitiveAssignment = /(?:\b[a-z][a-z0-9_-]*(?:token|password|credential|api[_-]?key|authorization)|\b(?:token|password|credential|api[_ -]?key|authorization)\b)\s*[:=]\s*\S+/i
+  const repositoryCredentialName = /\b[A-Z][A-Z0-9_]*_(?:TOKEN|PASSWORD|CREDENTIALS?|KEY)\b/i
   const jwtLikeSecret = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/
   return !sensitiveAssignment.test(value)
     && !repositoryCredentialName.test(value)
