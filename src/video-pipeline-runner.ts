@@ -11,6 +11,7 @@ import { SubtitleApi } from './supabase-api.js'
 import {
   artifactKey,
   canonicalRequestDigest,
+  isStableAttributionUrl,
   readManifest,
   resolveArtifactPath,
   sha256File,
@@ -342,16 +343,7 @@ export async function resumeVideo(
   const state = await readProductionState(dirname(expectedPath), manifest)
 
   if (manifest.stage === 'completed') {
-    const currentHash = await sha256File(expectedPath)
-    const completion = state.completion ?? buildCompletionRequest(manifest, state.downloads, currentHash)
-    if (completion.output.manifestSha256 !== currentHash) throw new Error('completion manifest hash mismatch')
-    try {
-      await dependencies.productionApi.complete(completion)
-    } catch {
-      throw new Error('video metadata completion failed')
-    }
-    dependencies.output(`render ${manifest.renderId}: completion metadata confirmed for final.mp4`)
-    return { ...paths, renderId: manifest.renderId, stage: 'completed' }
+    return completeLocalManifest(input.artifactRoot, manifest, paths, state, dependencies)
   }
   if (manifest.stage === 'review') throw new Error('review must be completed before resume')
   if (manifest.stage === 'failed') await dependencies.productionApi.retry(manifest.renderId)
@@ -372,6 +364,12 @@ async function continueRunTransition(
     dependencies,
   )
   assertTransitionManifest(transition, manifest)
+  if (manifest.stage === 'completed') {
+    if (manifest.renderId === null) throw new Error('completed manifest is invalid')
+    const paths = renderOwnedPaths(artifactRoot, manifest)
+    const state = await readProductionState(dirname(paths.manifestPath), manifest)
+    return completeLocalManifest(artifactRoot, manifest, paths, state, dependencies)
+  }
   let current = transition
   if (current.phase === 'prepared') {
     const started = await dependencies.productionApi.start({
@@ -414,6 +412,17 @@ async function finishRunTransition(
   if (transition.renderId === null || transition.status === null || transition.isExisting === null) {
     throw new Error('invalid run transition')
   }
+  if (transition.isExisting) {
+    const destinationPath = manifestPathFor(artifactRoot, transition.renderId)
+    if (!await exists(destinationPath, dependencies)) {
+      throw new Error('existing render local manifest is unavailable')
+    }
+    const destination = await dependencies.readManifest(destinationPath)
+    assertCompatibleRun(destination, manifest, transition.renderId)
+    if (transition.status === 'completed') {
+      await assertCompletedLocalArtifacts(artifactRoot, destination)
+    }
+  }
   const attached = await attachAuthoritativeRun(
     artifactRoot,
     sourceManifestPath,
@@ -425,6 +434,7 @@ async function finishRunTransition(
   await writeLatestPlan(artifactRoot, attached.paths, dependencies)
 
   if (transition.isExisting && transition.status === 'completed') {
+    await retireRunTransition(artifactRoot, transition.planId, dependencies)
     dependencies.output(`render ${transition.renderId}: completed job already exists; no provider download`)
     return { ...attached.paths, renderId: transition.renderId, stage: 'completed' }
   }
@@ -437,6 +447,7 @@ async function finishRunTransition(
     attached.paths,
     dependencies,
     preflight,
+    transition.status === 'rendering',
   )
 }
 
@@ -446,11 +457,15 @@ async function continueProduction(
   paths: VideoPlanPaths,
   dependencies: VideoPipelineDependencies,
   preflight?: VecteezyDownloadInfo[],
+  remoteRendering = false,
 ): Promise<VideoProductionResult> {
   if (initialManifest.renderId === null) throw new Error('manifest has no render ownership')
   const renderId = initialManifest.renderId
   let manifest = initialManifest
   let state = await readProductionState(dirname(paths.manifestPath), manifest)
+  if (manifest.stage === 'completed') {
+    return completeLocalManifest(artifactRoot, manifest, paths, state, dependencies)
+  }
   const validDownloads = await matchingDownloads(artifactRoot, manifest, state.downloads)
   const missingScenes = manifest.scenes.filter(scene => !validDownloads.has(scene.index))
 
@@ -497,6 +512,10 @@ async function continueProduction(
         const probe = await dependencies.probeMedia(destination)
         const info = infoByResource.get(providerResourceId)
         if (info === undefined) throw new Error('download preflight state is unavailable')
+        assertAttributionUrl(completed.requiredAttributionUrl)
+        if (completed.requiredAttributionUrl !== info.requiredAttributionUrl) {
+          throw new Error('download attribution metadata mismatch')
+        }
         const recorded = await dependencies.productionApi.recordDownload({
           renderId,
           selectionId,
@@ -557,9 +576,11 @@ async function continueProduction(
   if (state.downloads.length !== 4) return failProduction('source_validation_failure', 'video source validation failed')
 
   try {
-    await dependencies.productionApi.beginRender(renderId)
-    manifest = { ...manifest, stage: 'rendering', updatedAt: dependencies.now() }
-    await dependencies.writeManifest(manifestPathFor(artifactRoot, renderId), manifest)
+    if (!remoteRendering) await dependencies.productionApi.beginRender(renderId)
+    if (manifest.stage !== 'rendering') {
+      manifest = { ...manifest, stage: 'rendering', updatedAt: dependencies.now() }
+      await dependencies.writeManifest(manifestPathFor(artifactRoot, renderId), manifest)
+    }
     const sourcePaths = tuple4(state.downloads.map(item => resolveArtifactPath(artifactRoot, item.source.artifactKey)))
     const normalizedPaths = tuple4([0, 1, 2, 3].map(index => resolveArtifactPath(
       artifactRoot,
@@ -604,6 +625,7 @@ async function continueProduction(
       state = { ...state, completion }
       await writeProductionState(dirname(paths.manifestPath), state)
       await dependencies.productionApi.complete(completion)
+      await retireRunTransition(artifactRoot, manifest.planId, dependencies)
     } catch {
       throw new MetadataCompletionError()
     }
@@ -624,6 +646,57 @@ async function continueProduction(
     await dependencies.productionApi.fail({ renderId, failureCode, failureMessage }).catch(() => undefined)
     dependencies.output(`render ${renderId}: failed; ${state.downloads.length} sources retained`)
     throw new Error(operatorMessage)
+  }
+}
+
+async function completeLocalManifest(
+  artifactRoot: string,
+  manifest: VideoRunManifest,
+  paths: VideoPlanPaths,
+  state: ProductionState,
+  dependencies: VideoPipelineDependencies,
+): Promise<VideoProductionResult> {
+  if (manifest.renderId === null) throw new Error('completed manifest is invalid')
+  await assertCompletedLocalArtifacts(artifactRoot, manifest)
+  const currentHash = await sha256File(paths.manifestPath)
+  const completion = state.completion ?? buildCompletionRequest(manifest, state.downloads, currentHash)
+  if (completion.output.manifestSha256 !== currentHash) throw new Error('completion manifest hash mismatch')
+  try {
+    await dependencies.productionApi.complete(completion)
+  } catch {
+    throw new Error('video metadata completion failed')
+  }
+  await retireRunTransition(artifactRoot, manifest.planId, dependencies)
+  dependencies.output(`render ${manifest.renderId}: completion metadata confirmed for final.mp4`)
+  return { ...paths, renderId: manifest.renderId, stage: 'completed' }
+}
+
+async function assertCompletedLocalArtifacts(
+  artifactRoot: string,
+  manifest: VideoRunManifest,
+): Promise<void> {
+  if (manifest.stage !== 'completed'
+    || manifest.renderId === null
+    || manifest.output === undefined
+    || manifest.sources?.length !== 4) {
+    throw new Error('existing completed render is invalid')
+  }
+  const artifacts = [...manifest.sources, manifest.output]
+  for (const artifact of artifacts) {
+    const path = resolveArtifactPath(artifactRoot, artifact.artifactKey)
+    if (!await exists(path) || await sha256File(path) !== artifact.sha256) {
+      throw new Error('existing completed render artifact hash mismatch')
+    }
+  }
+}
+
+function renderOwnedPaths(artifactRoot: string, manifest: VideoRunManifest): VideoPlanPaths {
+  if (manifest.renderId === null) throw new Error('manifest has no render ownership')
+  const manifestPath = manifestPathFor(artifactRoot, manifest.renderId)
+  return {
+    planId: manifest.planId,
+    manifestPath,
+    reviewPath: join(dirname(manifestPath), REVIEW_FILE),
   }
 }
 
@@ -689,9 +762,16 @@ async function preflightManifestDownloads(
 }
 
 function assertDownloadSizes(info: VecteezyDownloadInfo[]): void {
+  info.forEach(item => assertAttributionUrl(item.requiredAttributionUrl))
   if (info.some(item => item.sourceSizeBytes > MAX_FILE_SIZE_BYTES)
     || info.reduce((sum, item) => sum + item.sourceSizeBytes, 0) > MAX_AGGREGATE_SIZE_BYTES) {
     throw new Error('candidate exceeds local download limit')
+  }
+}
+
+function assertAttributionUrl(value: string | null): void {
+  if (value !== null && !isStableAttributionUrl(value)) {
+    throw new Error('invalid required attribution URL')
   }
 }
 
@@ -1059,6 +1139,14 @@ async function writeRunTransition(
   )
 }
 
+async function retireRunTransition(
+  artifactRoot: string,
+  planId: string,
+  dependencies: VideoPipelineDependencies,
+): Promise<void> {
+  await fileOperations(dependencies).rm(transitionPathFor(artifactRoot, planId), { force: true })
+}
+
 function transitionPathFor(artifactRoot: string, planId: string): string {
   if (!uuidPattern.test(planId)) throw new Error('invalid run transition')
   return join(resolve(artifactRoot), TRANSITION_DIRECTORY, `${planId}.json`)
@@ -1189,7 +1277,13 @@ function boundedText(value: unknown, maximum: number): value is string {
 
 function safeDurableText(value: unknown, maximum: number): value is string {
   if (!boundedText(value, maximum)) return false
-  return !/(?:[a-z][a-z0-9+.-]*:\/\/|www\.|authorization\s*:|bearer\s+|api[_ -]?key|secret|access[_ -]?token|refresh[_ -]?token|preview[_ -]?url|status[_ -]?url|signed[_ -]?(?:url|media)|raw\s+provider\s+payload|provider\s+payload|model\s+prompt)/i.test(value)
+  const sensitiveAssignment = /(?:subtitle_personal_token|\b(?:token|password|credential|api[_ -]?key|authorization)\b)\s*[:=]\s*\S+/i
+  const repositoryCredentialName = /\b[A-Z][A-Z0-9_]*_(?:TOKEN|PASSWORD|CREDENTIALS?|KEY)\b/
+  const jwtLikeSecret = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/
+  return !sensitiveAssignment.test(value)
+    && !repositoryCredentialName.test(value)
+    && !jwtLikeSecret.test(value)
+    && !/(?:[a-z][a-z0-9+.-]*:\/\/|www\.|authorization\s*:|bearer\s+|api[_ -]?key|secret|access[_ -]?token|refresh[_ -]?token|preview[_ -]?url|status[_ -]?url|signed[_ -]?(?:url|media)|raw\s+provider\s+payload|provider\s+payload|model\s+prompt)/i.test(value)
 }
 
 function requiredPositiveInteger(value: unknown, name: string): number {

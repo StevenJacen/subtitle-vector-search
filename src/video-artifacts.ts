@@ -93,7 +93,7 @@ const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}
 const sha256Pattern = /^[0-9a-f]{64}$/
 const stageValues = new Set<VideoRunStage>(['review', 'downloading', 'rendering', 'completed', 'failed'])
 const forbiddenArtifactTerm = /url|token|secret|authorization/i
-const sensitiveUrlVocabulary = /(?:signed|status|download|signature|x-amz-[a-z0-9-]*|x-goog-[a-z0-9-]*|api[_-]?key|access[_-]?key|token|secret|credential|policy|expires|key-pair-id|authorization|(?:^|[^a-z0-9])(?:sig|auth)(?:$|[^a-z0-9]))/i
+const sensitiveUrlVocabulary = /(?:signed|status|download|media|signature|x-amz-[a-z0-9-]*|x-goog-[a-z0-9-]*|api[_-]?key|access[_-]?key|token|secret|credential|policy|expires|key-pair-id|authorization|(?:^|[^a-z0-9])(?:sig|auth)(?:$|[^a-z0-9]))/i
 const embeddedUrl = /(?:[a-z][a-z0-9+.-]*:\/\/|(?:https?|ftp|file|data|mailto):|\/\/[a-z0-9.-]+)[^\s<>"']*/gi
 const windowsDeviceName = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i
 const artifactPathRegistrations = new Map<string, ArtifactPathRegistration>()
@@ -291,7 +291,7 @@ function parseSource(value: unknown, ownerId: string): VideoRunSource {
     || !optionalText(source.videoCodec, 200)
     || !(source.audioCodec === undefined || source.audioCodec === null || text(source.audioCodec, 200))
     || !(source.requiresAttribution === undefined || typeof source.requiresAttribution === 'boolean')
-    || !(source.requiredAttributionUrl === undefined || source.requiredAttributionUrl === null || stableAttributionUrl(source.requiredAttributionUrl))
+    || !(source.requiredAttributionUrl === undefined || source.requiredAttributionUrl === null || isStableAttributionUrl(source.requiredAttributionUrl))
     || !optionalNullableNonnegativeInteger(source.quotaLimit)
     || !optionalNullableNonnegativeInteger(source.quotaRemaining)) {
     throw invalidManifest()
@@ -404,7 +404,7 @@ function rejectPrivateContent(value: unknown): void {
   for (const [key, nested] of Object.entries(value)) {
     if (isForbiddenManifestKey(key)) throw invalidManifest()
     if (key === 'requiredAttributionUrl') {
-      if (nested !== undefined && nested !== null && !stableAttributionUrl(nested)) throw invalidManifest()
+      if (nested !== undefined && nested !== null && !isStableAttributionUrl(nested)) throw invalidManifest()
       continue
     }
     rejectPrivateContent(nested)
@@ -430,16 +430,17 @@ function isForbiddenManifestKey(key: string): boolean {
     || normalized === 'auth'
 }
 
-function stableAttributionUrl(value: unknown): boolean {
+export function isStableAttributionUrl(value: unknown): value is string {
   if (typeof value !== 'string') return false
   try {
     const url = new URL(value)
     const components = decodeUrlComponents(`${url.hostname}\n${url.pathname}\n${url.search}\n${url.hash}`)
-    return (url.protocol === 'http:' || url.protocol === 'https:')
+    return url.protocol === 'https:'
       && url.hostname !== ''
       && url.username === ''
       && url.password === ''
-      && !Array.from(url.searchParams.keys()).some(isForbiddenManifestKey)
+      && url.search === ''
+      && url.hash === ''
       && !sensitiveUrlVocabulary.test(components)
   } catch {
     return false

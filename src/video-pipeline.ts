@@ -55,6 +55,7 @@ export function createVideoProgram(
         command.args,
         environment,
         ['npm_config_theme', 'npm_config_candidate_count'],
+        options.theme !== undefined || options.candidateCount !== undefined,
       )
       const jsonMode = options.json === true || environment.npm_config_json === 'true'
       const theme = requiredCliOption(forwarded?.[0] ?? options.theme, '--theme')
@@ -82,6 +83,7 @@ export function createVideoProgram(
         command.args,
         environment,
         ['npm_config_manifest', 'npm_config_review', 'npm_config_max_downloads'],
+        options.manifest !== undefined || options.review !== undefined || options.maxDownloads !== undefined,
       )
       const manifestPath = requiredCliOption(forwarded?.[0] ?? options.manifest, '--manifest')
       const reviewPath = requiredCliOption(forwarded?.[1] ?? options.review, '--review')
@@ -107,6 +109,7 @@ export function createVideoProgram(
         command.args,
         environment,
         ['npm_config_manifest'],
+        options.manifest !== undefined,
       )
       const manifestPath = requiredCliOption(forwarded?.[0] ?? options.manifest, '--manifest')
       const configuration = baseConfiguration(environment)
@@ -202,10 +205,12 @@ function exactForwardedArguments(
   arguments_: string[],
   environment: NodeJS.ProcessEnv,
   placeholders: string[],
+  hasDirectOptions: boolean,
 ): string[] | undefined {
   const hasPlaceholder = placeholders.some(name => environment[name] !== undefined)
   if (arguments_.length === 0 && !hasPlaceholder) return undefined
   if (arguments_.length !== placeholders.length
+    || hasDirectOptions
     || placeholders.some(name => environment[name] !== 'true')
     || arguments_.some(value => value.trim() === '' || value === 'true' || value.startsWith('--'))) {
     throw new Error('invalid command arguments')

@@ -260,9 +260,11 @@ npm run video -- produce --manifest $plan.manifestPath --review $plan.reviewPath
 The production contract has a hard exactly-four-download budget. The runner
 preflights sizes, records four manual selections, starts one idempotent render
 job, then permits at most four formal provider calls. Matching local hashes are
-reused. A failed transfer or render preserves verified source files for resume,
-and a completed local manifest is immutable even when remote completion needs
-another attempt.
+reused. An uncertain transfer reservation fails closed and requires a new
+reviewed plan, not resume, so the run can never silently spend the reservation
+again. A render failure preserves verified source files for resume, and a
+completed local manifest is immutable even when remote completion needs another
+attempt.
 
 In a later PowerShell session, resume from the current render-owned path rather
 than guessing a UUID:

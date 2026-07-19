@@ -169,6 +169,7 @@ it('documents the complete resumable local video production workflow', () => {
   expect(workflow).toMatch(/remote-only migration and database testing/i)
   expect(workflow).toMatch(/hard[^.]+four-download budget/i)
   expect(workflow).toMatch(/plan[^.]+does not consume[^.]+Vecteezy download quota/i)
+  expect(workflow).toMatch(/uncertain transfer reservation fails closed and requires a new\s+reviewed plan, not resume/i)
   expect(workflow).toMatch(/review[^.]+before[^.]+produce/i)
   expect(workflow).toMatch(/no Storage upload/i)
   expect(workflow).toMatch(/ignored `artifacts\/`/i)

@@ -401,7 +401,7 @@ describe('video run manifests', () => {
     expect(await readManifest(path)).toEqual(withAttribution)
   })
 
-  it('accepts a credential-free HTTP attribution URL', async () => {
+  it('rejects a credential-free HTTP attribution URL because attribution must use HTTPS', async () => {
     const root = await temporaryRoot()
     const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
     const withAttribution: VideoRunManifest = {
@@ -414,9 +414,7 @@ describe('video run manifests', () => {
       }],
     }
 
-    await writeManifestAtomic(path, withAttribution)
-
-    expect(await readManifest(path)).toEqual(withAttribution)
+    await expect(writeManifestAtomic(path, withAttribution)).rejects.toThrow('invalid manifest')
   })
 
   it.each([
@@ -446,6 +444,9 @@ describe('video run manifests', () => {
     'https://provider.test/license?X-Amz-Date=20260719T000000Z',
     'https://provider.test/license?X-Goog-Signature=abc',
     'https://provider.test/license#authorization',
+    'https://provider.test/license?lang=en',
+    'https://provider.test/license#details',
+    'https://provider.test/media/42',
   ])('rejects unsafe required attribution URL %j', async requiredAttributionUrl => {
     const root = await temporaryRoot()
     const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
