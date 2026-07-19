@@ -158,6 +158,26 @@ describe('video pipeline', () => {
     await expect(fs.access(transitionPath(harness.artifactRoot, harness.plan.planId))).rejects.toThrow()
   })
 
+  it('creates each source directory before transferring its signed download', async () => {
+    const harness = await createPlannedHarness()
+    const directoryChecks: string[] = []
+    harness.downloads.transferSignedUrl.mockImplementation(async (_ready, destination) => {
+      const directory = dirname(resolve(destination))
+      await fs.access(directory)
+      directoryChecks.push(directory)
+      return transfer(destination)
+    })
+
+    await produceVideo({
+      artifactRoot: harness.artifactRoot,
+      manifestPath: harness.plan.manifestPath,
+      reviewPath: harness.plan.reviewPath,
+      maxDownloads: 4,
+    }, harness.dependencies)
+
+    expect(directoryChecks).toHaveLength(4)
+  })
+
   it.each([
     'planned',
     'downloading',

@@ -545,6 +545,7 @@ async function continueProduction(
         if (relativeDestination === '' || relativeDestination === '..' || relativeDestination.startsWith(`..${sep}`)) {
           throw new Error('artifact root must be beneath the working directory')
         }
+        await mkdir(dirname(destination), { recursive: true })
         const completed = await dependencies.downloads.transferSignedUrl(ready, relativeDestination)
         const info = infoByResource.get(providerResourceId)
         if (info === undefined) throw new Error('download preflight state is unavailable')
