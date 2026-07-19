@@ -417,6 +417,29 @@ async function finishRunTransition(
   if (transition.renderId === null || transition.status === null || transition.isExisting === null) {
     throw new Error('invalid run transition')
   }
+  let validatedPreflight = preflight
+  if (!transition.isExisting
+    && !await transitionHasProductionState(artifactRoot, sourceManifestPath, transition, dependencies)) {
+    try {
+      validatedPreflight ??= await preflightManifestDownloads(manifest, dependencies)
+    } catch (error) {
+      await dependencies.productionApi.fail({
+        renderId: transition.renderId,
+        failureCode: 'source_validation_failure',
+        failureMessage: 'video source preflight failed',
+      }).catch(() => undefined)
+      await restoreFreshRunReview(
+        artifactRoot,
+        sourceManifestPath,
+        sourceReviewPath,
+        manifest,
+        transition,
+        dependencies,
+      )
+      dependencies.output(`render ${transition.renderId}: preflight rejected; review restored`)
+      throw new Error(preflightOperatorMessage(error))
+    }
+  }
   if (transition.isExisting) {
     const destinationPath = manifestPathFor(artifactRoot, transition.renderId)
     if (!await exists(destinationPath, dependencies)) {
@@ -451,7 +474,7 @@ async function finishRunTransition(
     attached.manifest,
     attached.paths,
     dependencies,
-    preflight,
+    validatedPreflight,
     transition.status === 'rendering',
   )
 }
@@ -800,6 +823,78 @@ function assertAttributionUrl(value: string | null): void {
   if (value !== null && !isStableAttributionUrl(value)) {
     throw new Error('invalid required attribution URL')
   }
+}
+
+async function transitionHasProductionState(
+  artifactRoot: string,
+  sourceManifestPath: string,
+  transition: RunTransitionState,
+  dependencies: VideoPipelineDependencies,
+): Promise<boolean> {
+  if (await exists(join(dirname(sourceManifestPath), STATE_FILE), dependencies)) return true
+  if (transition.renderId === null) return false
+  return exists(join(dirname(manifestPathFor(artifactRoot, transition.renderId)), STATE_FILE), dependencies)
+}
+
+async function restoreFreshRunReview(
+  artifactRoot: string,
+  sourceManifestPath: string,
+  sourceReviewPath: string,
+  manifest: VideoRunManifest,
+  transition: RunTransitionState,
+  dependencies: VideoPipelineDependencies,
+): Promise<void> {
+  if (transition.renderId === null || transition.isExisting !== false) {
+    throw new Error('invalid fresh render rollback')
+  }
+  assertTransitionManifest(transition, manifest)
+  const operations = fileOperations(dependencies)
+  const restoredManifestPath = manifestPathFor(artifactRoot, manifest.planId)
+  const sourceDirectory = dirname(restoredManifestPath)
+  const restoredReviewPath = join(sourceDirectory, REVIEW_FILE)
+  if (resolve(sourceManifestPath) !== resolve(restoredManifestPath)
+    || resolve(sourceReviewPath) !== resolve(restoredReviewPath)) {
+    throw new Error('fresh render rollback ownership mismatch')
+  }
+  const sourceBackupPath = join(sourceDirectory, 'plan-manifest.json')
+  const destinationManifestPath = manifestPathFor(artifactRoot, transition.renderId)
+  const destinationDirectory = dirname(destinationManifestPath)
+
+  if (resolve(sourceDirectory) !== resolve(destinationDirectory)
+    && await exists(destinationDirectory, dependencies)) {
+    if (await exists(sourceDirectory, dependencies)) throw new Error('fresh render rollback path collision')
+    const destinationBackupPath = join(destinationDirectory, 'plan-manifest.json')
+    const ownershipPath = await exists(destinationManifestPath, dependencies)
+      ? destinationManifestPath
+      : destinationBackupPath
+    if (!await exists(ownershipPath, dependencies)) throw new Error('fresh render rollback manifest is unavailable')
+    assertTransitionManifest(transition, await dependencies.readManifest(ownershipPath))
+    await operations.rename(destinationDirectory, sourceDirectory)
+  }
+
+  if (!await exists(sourceDirectory, dependencies)) throw new Error('fresh render rollback source is unavailable')
+  if (!await exists(restoredManifestPath, dependencies)) {
+    if (!await exists(sourceBackupPath, dependencies)) throw new Error('fresh render rollback manifest is unavailable')
+    assertTransitionManifest(transition, await dependencies.readManifest(sourceBackupPath))
+    await operations.rename(sourceBackupPath, restoredManifestPath)
+  } else {
+    assertTransitionManifest(transition, await dependencies.readManifest(restoredManifestPath))
+    await operations.rm(sourceBackupPath, { force: true })
+  }
+
+  const reviewManifest: VideoRunManifest = {
+    ...manifest,
+    renderId: null,
+    stage: 'review',
+    updatedAt: dependencies.now(),
+  }
+  await dependencies.writeManifest(restoredManifestPath, reviewManifest)
+  await writeLatestPlan(artifactRoot, {
+    planId: manifest.planId,
+    manifestPath: restoredManifestPath,
+    reviewPath: restoredReviewPath,
+  }, dependencies)
+  await retireRunTransition(artifactRoot, manifest.planId, dependencies)
 }
 
 async function attachAuthoritativeRun(

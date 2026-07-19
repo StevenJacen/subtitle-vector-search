@@ -23,6 +23,7 @@ import {
 
 const planIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const renderId = 'd62a53a1-08fb-4bee-a1ed-d8ba13de85f2'
+const replacementRenderId = 'e73b64b2-19ac-4cff-b2fe-e9cb24ef96a3'
 const runIds = [
   '11111111-1111-4111-8111-111111111111',
   '22222222-2222-4222-8222-222222222222',
@@ -298,7 +299,7 @@ describe('video pipeline', () => {
     expect(fresh.productionApi.matchScene).not.toHaveBeenCalled()
   })
 
-  it('fails a new job safely when oversized preflight rejects before formal reservation', async () => {
+  it('returns an oversized new job to editable review and reproduces after candidate replacement', async () => {
     const harness = await createPlannedHarness()
     harness.downloads.getDownloadInfo.mockImplementation(async resourceId => ({
       ...downloadInfo(resourceId),
@@ -314,15 +315,52 @@ describe('video pipeline', () => {
 
     expect(harness.productionApi.selectCandidate).toHaveBeenCalledTimes(4)
     expect(harness.productionApi.start).toHaveBeenCalledTimes(1)
+    expect(harness.downloads.getDownloadInfo).toHaveBeenCalledTimes(4)
     expect(harness.downloads.requestDownload).not.toHaveBeenCalled()
+    expect(harness.downloads.waitForDownload).not.toHaveBeenCalled()
+    expect(harness.downloads.transferSignedUrl).not.toHaveBeenCalled()
+    expect(harness.productionApi.recordDownload).not.toHaveBeenCalled()
     expect(harness.productionApi.fail).toHaveBeenCalledWith({
       renderId,
       failureCode: 'source_validation_failure',
       failureMessage: 'video source preflight failed',
     })
-    const active = await latestPlan(harness.artifactRoot)
-    expect((await readManifest(active.manifestPath)).stage).toBe('failed')
-    await expect(fs.access(join(dirname(active.manifestPath), 'production-state.json'))).rejects.toThrow()
+    expect(await readManifest(harness.plan.manifestPath)).toMatchObject({
+      planId: harness.plan.planId,
+      renderId: null,
+      stage: 'review',
+    })
+    await expect(fs.readFile(harness.plan.reviewPath, 'utf8')).resolves.toContain('selected after local review')
+    expect(await latestPlan(harness.artifactRoot)).toEqual(harness.plan)
+    await expect(fs.access(transitionPath(harness.artifactRoot, harness.plan.planId))).rejects.toThrow()
+    await expect(fs.access(join(harness.artifactRoot, 'video-runs', renderId))).rejects.toThrow()
+    await expect(fs.access(join(dirname(harness.plan.manifestPath), 'production-state.json'))).rejects.toThrow()
+
+    const replacement = JSON.parse(await fs.readFile(harness.plan.reviewPath, 'utf8')) as ReviewedVideoRunInput
+    replacement.scenes[0].providerResourceId = 101
+    await fs.writeFile(harness.plan.reviewPath, `${JSON.stringify(replacement, null, 2)}\n`)
+    harness.downloads.getDownloadInfo.mockImplementation(async resourceId => downloadInfo(resourceId))
+    harness.productionApi.start.mockResolvedValueOnce({
+      renderId: replacementRenderId,
+      status: 'planned',
+      isExisting: false,
+    })
+
+    const reproduced = await produceVideo({
+      artifactRoot: harness.artifactRoot,
+      manifestPath: harness.plan.manifestPath,
+      reviewPath: harness.plan.reviewPath,
+      maxDownloads: 4,
+    }, harness.dependencies)
+
+    expect(reproduced).toMatchObject({ renderId: replacementRenderId, stage: 'completed' })
+    expect(harness.productionApi.start).toHaveBeenCalledTimes(2)
+    expect(harness.downloads.requestDownload).toHaveBeenCalledTimes(4)
+    expect(await latestPlan(harness.artifactRoot)).toEqual({
+      planId: harness.plan.planId,
+      manifestPath: reproduced.manifestPath,
+      reviewPath: reproduced.reviewPath,
+    })
   })
 
   it('fails metadata after transfer failure, preserves completed source state, and never renders', async () => {
@@ -810,7 +848,7 @@ describe('video pipeline', () => {
     [true, null],
     [false, 'https://attribution.example.test/licenses/free-video'],
   ] as const)(
-    'rejects malformed preflight attribution pair requiresAttribution=%s URL=%s before formal reservation',
+    'returns malformed preflight attribution pair requiresAttribution=%s URL=%s to editable review',
     async (requiresAttribution, requiredAttributionUrl) => {
       const harness = await createPlannedHarness()
       harness.downloads.getDownloadInfo.mockImplementation(async (resourceId: number) => ({
@@ -828,10 +866,83 @@ describe('video pipeline', () => {
 
       expect(harness.downloads.requestDownload).not.toHaveBeenCalled()
       expect(harness.productionApi.recordDownload).not.toHaveBeenCalled()
-      const active = await latestPlan(harness.artifactRoot)
-      await expect(fs.access(join(dirname(active.manifestPath), 'production-state.json'))).rejects.toThrow()
+      expect(harness.productionApi.fail).toHaveBeenCalledWith({
+        renderId,
+        failureCode: 'source_validation_failure',
+        failureMessage: 'video source preflight failed',
+      })
+      expect(await readManifest(harness.plan.manifestPath)).toMatchObject({
+        planId: harness.plan.planId,
+        renderId: null,
+        stage: 'review',
+      })
+      await expect(fs.readFile(harness.plan.reviewPath, 'utf8')).resolves.toContain('selected after local review')
+      expect(await latestPlan(harness.artifactRoot)).toEqual(harness.plan)
+      await expect(fs.access(transitionPath(harness.artifactRoot, harness.plan.planId))).rejects.toThrow()
+      await expect(fs.access(join(harness.artifactRoot, 'video-runs', renderId))).rejects.toThrow()
+      await expect(fs.access(join(dirname(harness.plan.manifestPath), 'production-state.json'))).rejects.toThrow()
+
+      const replacement = JSON.parse(await fs.readFile(harness.plan.reviewPath, 'utf8')) as ReviewedVideoRunInput
+      replacement.scenes[0].providerResourceId = 101
+      await fs.writeFile(harness.plan.reviewPath, `${JSON.stringify(replacement, null, 2)}\n`)
+      harness.downloads.getDownloadInfo.mockImplementation(async resourceId => downloadInfo(resourceId))
+      harness.productionApi.start.mockResolvedValueOnce({
+        renderId: replacementRenderId,
+        status: 'planned',
+        isExisting: false,
+      })
+
+      const reproduced = await produceVideo({
+        artifactRoot: harness.artifactRoot,
+        manifestPath: harness.plan.manifestPath,
+        reviewPath: harness.plan.reviewPath,
+        maxDownloads: 4,
+      }, harness.dependencies)
+
+      expect(reproduced).toMatchObject({ renderId: replacementRenderId, stage: 'completed' })
+      expect(harness.downloads.requestDownload).toHaveBeenCalledTimes(4)
     },
   )
+
+  it('keeps an existing active attached job render-owned when preflight rejects', async () => {
+    const harness = await createPlannedHarness()
+    const interrupted = interruptTransition('before-latest', harness, harness.plan)
+    await expect(produceVideo({
+      artifactRoot: harness.artifactRoot,
+      manifestPath: harness.plan.manifestPath,
+      reviewPath: harness.plan.reviewPath,
+      maxDownloads: 4,
+    }, interrupted)).rejects.toThrow('synthetic transition interruption')
+    const journalPath = transitionPath(harness.artifactRoot, harness.plan.planId)
+    const journal = JSON.parse(await fs.readFile(journalPath, 'utf8'))
+    await fs.writeFile(journalPath, `${JSON.stringify({
+      ...journal,
+      status: 'downloading',
+      isExisting: true,
+    }, null, 2)}\n`)
+    harness.downloads.getDownloadInfo.mockImplementation(async resourceId => ({
+      ...downloadInfo(resourceId),
+      sourceSizeBytes: resourceId === 100 ? 512 * 1024 * 1024 + 1 : 10_000,
+    }))
+
+    await expect(produceVideo({
+      artifactRoot: harness.artifactRoot,
+      manifestPath: harness.plan.manifestPath,
+      reviewPath: harness.plan.reviewPath,
+      maxDownloads: 4,
+    }, harness.dependencies)).rejects.toThrow('candidate exceeds local download limit')
+
+    const destination = join(harness.artifactRoot, 'video-runs', renderId, 'manifest.json')
+    expect(await readManifest(destination)).toMatchObject({ renderId, stage: 'failed' })
+    expect(await latestPlan(harness.artifactRoot)).toEqual({
+      planId: harness.plan.planId,
+      manifestPath: destination,
+      reviewPath: join(dirname(destination), 'review-input.json'),
+    })
+    await expect(fs.access(harness.plan.manifestPath)).rejects.toThrow()
+    await expect(fs.access(journalPath)).resolves.toBeUndefined()
+    expect(harness.downloads.requestDownload).not.toHaveBeenCalled()
+  })
 
   it.each([
     [true, 'https://attribution.example.test/licenses/free-video', false, 'https://attribution.example.test/licenses/free-video'],

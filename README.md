@@ -258,13 +258,19 @@ npm run video -- produce --manifest $plan.manifestPath --review $plan.reviewPath
 ```
 
 The production contract has a hard exactly-four-download budget. The runner
-preflights sizes, records four manual selections, starts one idempotent render
-job, then permits at most four formal provider calls. Matching local hashes are
-reused. An uncertain transfer reservation fails closed and requires a new
-reviewed plan, not resume, so the run can never silently spend the reservation
-again. A render failure preserves verified source files for resume, and a
-completed local manifest is immutable even when remote completion needs another
-attempt.
+records four manual selections and starts one idempotent render job to learn the
+existing status before any download-info preflight. An existing completed job
+short-circuits with zero Vecteezy provider calls. For a fresh job, download-info
+preflight validates sizes and attribution before local render ownership or any
+formal provider call. A fresh preflight rejection restores the local plan to
+editable review so the operator can replace the candidate and rerun `produce`;
+the already-created remote job may remain failed as an audit record. Only after
+preflight succeeds does the runner permit at most four formal provider calls.
+Matching local hashes are reused.
+An uncertain transfer reservation fails closed and requires a new reviewed plan, not resume,
+so the run can never silently spend the reservation again. A render failure preserves verified
+source files for resume, and a completed local manifest is immutable even when
+remote completion needs another attempt.
 
 In a later PowerShell session, resume from the current render-owned path rather
 than guessing a UUID:
