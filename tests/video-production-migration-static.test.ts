@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest'
 const migrationDirectory = resolve(process.cwd(), 'supabase/migrations')
 const matchingMigrations = readdirSync(migrationDirectory)
   .filter(fileName => fileName.endsWith('_video_production.sql'))
+const failRenderLintMigrations = readdirSync(migrationDirectory)
+  .filter(fileName => fileName.endsWith('_silence_fail_video_render_lint.sql'))
 const databaseTestPath = resolve(process.cwd(), 'supabase/tests/database/video_production.sql')
 
 function migrationSource(): string {
@@ -100,6 +102,14 @@ describe('video production migration', () => {
     expect(body).toContain("when 'render_failure' then 'video render failed'")
     expect(body).not.toContain('failure_message = p_failure_message')
     expect(source).toContain("failure_code in ('download_failure', 'source_validation_failure', 'render_failure', 'metadata_failure')")
+  })
+
+  it('consumes the compatibility failure message without persisting it', () => {
+    expect(failRenderLintMigrations).toHaveLength(1)
+    const source = readFileSync(resolve(migrationDirectory, failRenderLintMigrations[0]), 'utf8')
+
+    expect(source).toContain('perform pg_catalog.length(p_failure_message)')
+    expect(source).not.toContain('failure_message = p_failure_message')
   })
 
   it('retries to downloading when verified downloads already exist', () => {
