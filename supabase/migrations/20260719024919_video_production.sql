@@ -19,8 +19,12 @@ create table public.video_render_jobs (
   pixel_format text,
   ffmpeg_version text,
   manifest_sha256 text constraint video_render_jobs_manifest_sha256_check check (manifest_sha256 is null or manifest_sha256 ~ '^[0-9a-f]{64}$'),
-  failure_code text constraint video_render_jobs_failure_code_check check (failure_code is null or failure_code ~ '^[a-z][a-z0-9_]{0,63}$'),
-  failure_message text constraint video_render_jobs_failure_message_check check (failure_message is null or pg_catalog.char_length(failure_message) between 1 and 500),
+  failure_code text constraint video_render_jobs_failure_code_check check (
+    failure_code is null or failure_code in ('download_failure', 'source_validation_failure', 'render_failure', 'metadata_failure')
+  ),
+  failure_message text constraint video_render_jobs_failure_message_check check (
+    failure_message is null or failure_message in ('video asset download failed', 'source validation failed', 'video render failed', 'production metadata failed')
+  ),
   created_at timestamptz not null default pg_catalog.now(),
   completed_at timestamptz,
   constraint video_render_jobs_output_artifact_key_check check (
@@ -58,7 +62,12 @@ create table public.video_render_jobs (
       and completed_at is null)
   ),
   constraint video_render_jobs_failed_fields_check check (
-    (status = 'failed' and failure_code is not null and failure_message is not null)
+    (status = 'failed' and failure_code is not null and failure_message is not null and (
+      (failure_code = 'download_failure' and failure_message = 'video asset download failed')
+      or (failure_code = 'source_validation_failure' and failure_message = 'source validation failed')
+      or (failure_code = 'render_failure' and failure_message = 'video render failed')
+      or (failure_code = 'metadata_failure' and failure_message = 'production metadata failed')
+    ))
     or (status <> 'failed' and failure_code is null and failure_message is null)
   )
 );
@@ -152,28 +161,29 @@ language plpgsql
 security invoker
 set search_path = ''
 as $$
+#variable_conflict error
 declare
-  persisted_job public.video_render_jobs%rowtype;
+  v_persisted_job public.video_render_jobs%rowtype;
 begin
   insert into public.video_render_jobs(request_digest, theme, status)
   values (p_request_digest, p_theme, 'planned')
   on conflict (request_digest) do nothing
-  returning * into persisted_job;
+  returning * into v_persisted_job;
 
   if found then
-    return query select persisted_job.id, persisted_job.status, false;
+    return query select v_persisted_job.id, v_persisted_job.status, false;
     return;
   end if;
 
-  select * into persisted_job
-  from public.video_render_jobs
-  where request_digest = p_request_digest;
+  select job.* into v_persisted_job
+  from public.video_render_jobs as job
+  where job.request_digest = p_request_digest;
 
   if not found then
     raise exception using errcode = 'P0004', message = 'render idempotency conflict';
   end if;
 
-  return query select persisted_job.id, persisted_job.status, true;
+  return query select v_persisted_job.id, v_persisted_job.status, true;
 end;
 $$;
 
@@ -200,22 +210,23 @@ language plpgsql
 security invoker
 set search_path = ''
 as $$
+#variable_conflict error
 declare
-  persisted_job public.video_render_jobs%rowtype;
-  selected_candidate public.video_search_candidates%rowtype;
-  existing_download public.video_asset_downloads%rowtype;
-  persisted_download_id bigint;
+  v_persisted_job public.video_render_jobs%rowtype;
+  v_selected_candidate public.video_search_candidates%rowtype;
+  v_existing_download public.video_asset_downloads%rowtype;
+  v_persisted_download_id bigint;
 begin
-  select * into persisted_job
-  from public.video_render_jobs
-  where id = p_render_id
+  select job.* into v_persisted_job
+  from public.video_render_jobs as job
+  where job.id = p_render_id
   for update;
 
   if not found then
     raise exception using errcode = 'P0002', message = 'render not found';
   end if;
 
-  select candidate.* into selected_candidate
+  select candidate.* into v_selected_candidate
   from public.video_asset_selections as selection
   join public.video_search_candidates as candidate on candidate.id = selection.candidate_id
   where selection.id = p_selection_id
@@ -225,37 +236,37 @@ begin
     raise exception using errcode = 'P0002', message = 'selection not found';
   end if;
 
-  select * into existing_download
-  from public.video_asset_downloads
-  where selection_id = p_selection_id;
+  select download.* into v_existing_download
+  from public.video_asset_downloads as download
+  where download.selection_id = p_selection_id;
 
   if found then
-    if existing_download.render_id = p_render_id
-      and existing_download.candidate_id = selected_candidate.id
-      and existing_download.provider = selected_candidate.provider
-      and existing_download.provider_resource_id = selected_candidate.provider_resource_id
-      and existing_download.artifact_key = p_artifact_key
-      and existing_download.file_type = p_file_type
-      and existing_download.source_size_bytes = p_source_size_bytes
-      and existing_download.source_sha256 = p_source_sha256
-      and existing_download.width = p_width
-      and existing_download.height = p_height
-      and existing_download.duration_ms = p_duration_ms
-      and existing_download.frame_rate = p_frame_rate
-      and existing_download.video_codec = p_video_codec
-      and existing_download.audio_codec is not distinct from p_audio_codec
-      and existing_download.requires_attribution = p_requires_attribution
-      and existing_download.required_attribution_url is not distinct from p_required_attribution_url
-      and existing_download.quota_limit is not distinct from p_quota_limit
-      and existing_download.quota_remaining is not distinct from p_quota_remaining then
-      return query select existing_download.render_id, existing_download.id;
+    if v_existing_download.render_id = p_render_id
+      and v_existing_download.candidate_id = v_selected_candidate.id
+      and v_existing_download.provider = v_selected_candidate.provider
+      and v_existing_download.provider_resource_id = v_selected_candidate.provider_resource_id
+      and v_existing_download.artifact_key = p_artifact_key
+      and v_existing_download.file_type = p_file_type
+      and v_existing_download.source_size_bytes = p_source_size_bytes
+      and v_existing_download.source_sha256 = p_source_sha256
+      and v_existing_download.width = p_width
+      and v_existing_download.height = p_height
+      and v_existing_download.duration_ms = p_duration_ms
+      and v_existing_download.frame_rate = p_frame_rate
+      and v_existing_download.video_codec = p_video_codec
+      and v_existing_download.audio_codec is not distinct from p_audio_codec
+      and v_existing_download.requires_attribution = p_requires_attribution
+      and v_existing_download.required_attribution_url is not distinct from p_required_attribution_url
+      and v_existing_download.quota_limit is not distinct from p_quota_limit
+      and v_existing_download.quota_remaining is not distinct from p_quota_remaining then
+      return query select v_existing_download.render_id, v_existing_download.id;
       return;
     end if;
 
     raise exception using errcode = 'P0004', message = 'download metadata conflicts with existing selection';
   end if;
 
-  if persisted_job.status not in ('planned', 'downloading') then
+  if v_persisted_job.status not in ('planned', 'downloading') then
     raise exception using errcode = 'P0003', message = 'render is not accepting downloads';
   end if;
 
@@ -266,49 +277,49 @@ begin
     required_attribution_url, quota_limit, quota_remaining
   )
   values (
-    p_render_id, p_selection_id, selected_candidate.id, selected_candidate.provider, selected_candidate.provider_resource_id,
+    p_render_id, p_selection_id, v_selected_candidate.id, v_selected_candidate.provider, v_selected_candidate.provider_resource_id,
     p_artifact_key, p_file_type, p_source_size_bytes, p_source_sha256, p_width, p_height,
     p_duration_ms, p_frame_rate, p_video_codec, p_audio_codec, p_requires_attribution,
     p_required_attribution_url, p_quota_limit, p_quota_remaining
   )
   on conflict (selection_id) do nothing
-  returning id into persisted_download_id;
+  returning video_asset_downloads.id into v_persisted_download_id;
 
-  if persisted_download_id is null then
-    select * into existing_download
-    from public.video_asset_downloads
-    where selection_id = p_selection_id;
+  if v_persisted_download_id is null then
+    select download.* into v_existing_download
+    from public.video_asset_downloads as download
+    where download.selection_id = p_selection_id;
 
-    if existing_download.render_id = p_render_id
-      and existing_download.candidate_id = selected_candidate.id
-      and existing_download.provider = selected_candidate.provider
-      and existing_download.provider_resource_id = selected_candidate.provider_resource_id
-      and existing_download.artifact_key = p_artifact_key
-      and existing_download.file_type = p_file_type
-      and existing_download.source_size_bytes = p_source_size_bytes
-      and existing_download.source_sha256 = p_source_sha256
-      and existing_download.width = p_width
-      and existing_download.height = p_height
-      and existing_download.duration_ms = p_duration_ms
-      and existing_download.frame_rate = p_frame_rate
-      and existing_download.video_codec = p_video_codec
-      and existing_download.audio_codec is not distinct from p_audio_codec
-      and existing_download.requires_attribution = p_requires_attribution
-      and existing_download.required_attribution_url is not distinct from p_required_attribution_url
-      and existing_download.quota_limit is not distinct from p_quota_limit
-      and existing_download.quota_remaining is not distinct from p_quota_remaining then
-      return query select existing_download.render_id, existing_download.id;
+    if v_existing_download.render_id = p_render_id
+      and v_existing_download.candidate_id = v_selected_candidate.id
+      and v_existing_download.provider = v_selected_candidate.provider
+      and v_existing_download.provider_resource_id = v_selected_candidate.provider_resource_id
+      and v_existing_download.artifact_key = p_artifact_key
+      and v_existing_download.file_type = p_file_type
+      and v_existing_download.source_size_bytes = p_source_size_bytes
+      and v_existing_download.source_sha256 = p_source_sha256
+      and v_existing_download.width = p_width
+      and v_existing_download.height = p_height
+      and v_existing_download.duration_ms = p_duration_ms
+      and v_existing_download.frame_rate = p_frame_rate
+      and v_existing_download.video_codec = p_video_codec
+      and v_existing_download.audio_codec is not distinct from p_audio_codec
+      and v_existing_download.requires_attribution = p_requires_attribution
+      and v_existing_download.required_attribution_url is not distinct from p_required_attribution_url
+      and v_existing_download.quota_limit is not distinct from p_quota_limit
+      and v_existing_download.quota_remaining is not distinct from p_quota_remaining then
+      return query select v_existing_download.render_id, v_existing_download.id;
       return;
     end if;
 
     raise exception using errcode = 'P0004', message = 'download metadata conflicts with existing selection';
   end if;
 
-  update public.video_render_jobs
+  update public.video_render_jobs as job
   set status = 'downloading'
-  where id = p_render_id and status = 'planned';
+  where job.id = p_render_id and job.status = 'planned';
 
-  return query select p_render_id, persisted_download_id;
+  return query select p_render_id, v_persisted_download_id;
 end;
 $$;
 
@@ -318,29 +329,30 @@ language plpgsql
 security invoker
 set search_path = ''
 as $$
+#variable_conflict error
 declare
-  persisted_status text;
+  v_persisted_status text;
 begin
-  select status into persisted_status
-  from public.video_render_jobs
-  where id = p_render_id
+  select job.status into v_persisted_status
+  from public.video_render_jobs as job
+  where job.id = p_render_id
   for update;
 
   if not found then
     raise exception using errcode = 'P0002', message = 'render not found';
   end if;
 
-  if persisted_status <> 'downloading' then
+  if v_persisted_status <> 'downloading' then
     raise exception using errcode = 'P0003', message = 'render is not ready to begin';
   end if;
 
-  if (select count(*) from public.video_asset_downloads where render_id = p_render_id) <> 4 then
+  if (select pg_catalog.count(*) from public.video_asset_downloads as download where download.render_id = p_render_id) <> 4 then
     raise exception using errcode = 'P0005', message = 'render requires four verified downloads';
   end if;
 
-  update public.video_render_jobs
+  update public.video_render_jobs as job
   set status = 'rendering'
-  where id = p_render_id;
+  where job.id = p_render_id;
 
   return query select 'rendering'::text;
 end;
@@ -356,23 +368,24 @@ language plpgsql
 security invoker
 set search_path = ''
 as $$
+#variable_conflict error
 declare
-  persisted_job public.video_render_jobs%rowtype;
-  output_artifact_key text;
-  output_sha256 text;
-  output_size_bytes bigint;
-  output_duration_ms integer;
-  output_video_codec text;
-  output_audio_codec text;
-  output_pixel_format text;
-  output_ffmpeg_version text;
-  output_manifest_sha256 text;
-  supplied_segments jsonb;
-  stored_segments jsonb;
+  v_persisted_job public.video_render_jobs%rowtype;
+  v_output_artifact_key text;
+  v_output_sha256 text;
+  v_output_size_bytes bigint;
+  v_output_duration_ms integer;
+  v_output_video_codec text;
+  v_output_audio_codec text;
+  v_output_pixel_format text;
+  v_output_ffmpeg_version text;
+  v_output_manifest_sha256 text;
+  v_supplied_segments jsonb;
+  v_stored_segments jsonb;
 begin
-  select * into persisted_job
-  from public.video_render_jobs
-  where id = p_render_id
+  select job.* into v_persisted_job
+  from public.video_render_jobs as job
+  where job.id = p_render_id
   for update;
 
   if not found then
@@ -398,15 +411,15 @@ begin
     output.ffmpeg_version,
     output.manifest_sha256
   into
-    output_artifact_key,
-    output_sha256,
-    output_size_bytes,
-    output_duration_ms,
-    output_video_codec,
-    output_audio_codec,
-    output_pixel_format,
-    output_ffmpeg_version,
-    output_manifest_sha256
+    v_output_artifact_key,
+    v_output_sha256,
+    v_output_size_bytes,
+    v_output_duration_ms,
+    v_output_video_codec,
+    v_output_audio_codec,
+    v_output_pixel_format,
+    v_output_ffmpeg_version,
+    v_output_manifest_sha256
   from pg_catalog.jsonb_to_record(p_output) as output(
     artifact_key text,
     output_sha256 text,
@@ -419,20 +432,20 @@ begin
     manifest_sha256 text
   );
 
-  if output_artifact_key is null
-    or output_artifact_key !~ '^[A-Za-z0-9][A-Za-z0-9._/-]*$'
-    or output_artifact_key ~ '^[A-Za-z][A-Za-z0-9+.-]*:'
-    or output_artifact_key ~ '(^|/)\\.\\.(/|$)'
-    or output_sha256 is null
-    or output_sha256 !~ '^[0-9a-f]{64}$'
-    or output_size_bytes is null or output_size_bytes <= 0
-    or output_duration_ms is null or output_duration_ms <= 0
-    or output_video_codec is null or pg_catalog.btrim(output_video_codec) = ''
-    or output_audio_codec is null or pg_catalog.btrim(output_audio_codec) = ''
-    or output_pixel_format is null or pg_catalog.btrim(output_pixel_format) = ''
-    or output_ffmpeg_version is null or pg_catalog.btrim(output_ffmpeg_version) = ''
-    or output_manifest_sha256 is null
-    or output_manifest_sha256 !~ '^[0-9a-f]{64}$' then
+  if v_output_artifact_key is null
+    or v_output_artifact_key !~ '^[A-Za-z0-9][A-Za-z0-9._/-]*$'
+    or v_output_artifact_key ~ '^[A-Za-z][A-Za-z0-9+.-]*:'
+    or v_output_artifact_key ~ '(^|/)\\.\\.(/|$)'
+    or v_output_sha256 is null
+    or v_output_sha256 !~ '^[0-9a-f]{64}$'
+    or v_output_size_bytes is null or v_output_size_bytes <= 0
+    or v_output_duration_ms is null or v_output_duration_ms <= 0
+    or v_output_video_codec is null or pg_catalog.btrim(v_output_video_codec) = ''
+    or v_output_audio_codec is null or pg_catalog.btrim(v_output_audio_codec) = ''
+    or v_output_pixel_format is null or pg_catalog.btrim(v_output_pixel_format) = ''
+    or v_output_ffmpeg_version is null or pg_catalog.btrim(v_output_ffmpeg_version) = ''
+    or v_output_manifest_sha256 is null
+    or v_output_manifest_sha256 !~ '^[0-9a-f]{64}$' then
     raise exception using errcode = 'P0005', message = 'render output is incomplete';
   end if;
 
@@ -538,7 +551,7 @@ begin
       'source_track_id', segment.source_track_id,
       'source_cue_index', segment.source_cue_index
     ) order by segment.segment_index
-  ) into supplied_segments
+  ) into v_supplied_segments
   from pg_catalog.jsonb_to_recordset(p_segments) as segment(
     segment_index integer,
     download_id bigint,
@@ -553,7 +566,7 @@ begin
     source_cue_index integer
   );
 
-  if persisted_job.status = 'completed' then
+  if v_persisted_job.status = 'completed' then
     select pg_catalog.jsonb_agg(
       pg_catalog.jsonb_build_object(
         'segment_index', segment.segment_index,
@@ -568,20 +581,20 @@ begin
         'source_track_id', segment.source_track_id,
         'source_cue_index', segment.source_cue_index
       ) order by segment.segment_index
-    ) into stored_segments
+    ) into v_stored_segments
     from public.video_render_segments as segment
     where segment.render_id = p_render_id;
 
-    if persisted_job.output_artifact_key = output_artifact_key
-      and persisted_job.output_sha256 = output_sha256
-      and persisted_job.output_size_bytes = output_size_bytes
-      and persisted_job.output_duration_ms = output_duration_ms
-      and persisted_job.video_codec = output_video_codec
-      and persisted_job.audio_codec = output_audio_codec
-      and persisted_job.pixel_format = output_pixel_format
-      and persisted_job.ffmpeg_version = output_ffmpeg_version
-      and persisted_job.manifest_sha256 = output_manifest_sha256
-      and stored_segments = supplied_segments then
+    if v_persisted_job.output_artifact_key = v_output_artifact_key
+      and v_persisted_job.output_sha256 = v_output_sha256
+      and v_persisted_job.output_size_bytes = v_output_size_bytes
+      and v_persisted_job.output_duration_ms = v_output_duration_ms
+      and v_persisted_job.video_codec = v_output_video_codec
+      and v_persisted_job.audio_codec = v_output_audio_codec
+      and v_persisted_job.pixel_format = v_output_pixel_format
+      and v_persisted_job.ffmpeg_version = v_output_ffmpeg_version
+      and v_persisted_job.manifest_sha256 = v_output_manifest_sha256
+      and v_stored_segments = v_supplied_segments then
       return query select 'completed'::text;
       return;
     end if;
@@ -589,7 +602,7 @@ begin
     raise exception using errcode = 'P0004', message = 'completed render data conflicts';
   end if;
 
-  if persisted_job.status <> 'rendering' then
+  if v_persisted_job.status <> 'rendering' then
     raise exception using errcode = 'P0003', message = 'render is not ready to complete';
   end if;
 
@@ -625,19 +638,19 @@ begin
     source_cue_index integer
   );
 
-  update public.video_render_jobs
+  update public.video_render_jobs as job
   set status = 'completed',
-      output_artifact_key = output_artifact_key,
-      output_sha256 = output_sha256,
-      output_size_bytes = output_size_bytes,
-      output_duration_ms = output_duration_ms,
-      video_codec = output_video_codec,
-      audio_codec = output_audio_codec,
-      pixel_format = output_pixel_format,
-      ffmpeg_version = output_ffmpeg_version,
-      manifest_sha256 = output_manifest_sha256,
+      output_artifact_key = v_output_artifact_key,
+      output_sha256 = v_output_sha256,
+      output_size_bytes = v_output_size_bytes,
+      output_duration_ms = v_output_duration_ms,
+      video_codec = v_output_video_codec,
+      audio_codec = v_output_audio_codec,
+      pixel_format = v_output_pixel_format,
+      ffmpeg_version = v_output_ffmpeg_version,
+      manifest_sha256 = v_output_manifest_sha256,
       completed_at = pg_catalog.clock_timestamp()
-  where id = p_render_id;
+  where job.id = p_render_id;
 
   return query select 'completed'::text;
 end;
@@ -653,34 +666,41 @@ language plpgsql
 security invoker
 set search_path = ''
 as $$
+#variable_conflict error
 declare
-  persisted_status text;
+  v_persisted_status text;
+  v_failure_message text;
 begin
-  select status into persisted_status
-  from public.video_render_jobs
-  where id = p_render_id
+  select job.status into v_persisted_status
+  from public.video_render_jobs as job
+  where job.id = p_render_id
   for update;
 
   if not found then
     raise exception using errcode = 'P0002', message = 'render not found';
   end if;
 
-  if persisted_status not in ('planned', 'downloading', 'rendering') then
+  if v_persisted_status not in ('planned', 'downloading', 'rendering') then
     raise exception using errcode = 'P0003', message = 'render cannot fail from its current state';
   end if;
 
-  if p_failure_code is null
-    or p_failure_code !~ '^[a-z][a-z0-9_]{0,63}$'
-    or p_failure_message is null
-    or pg_catalog.char_length(p_failure_message) not between 1 and 500 then
+  v_failure_message := case p_failure_code
+    when 'download_failure' then 'video asset download failed'
+    when 'source_validation_failure' then 'source validation failed'
+    when 'render_failure' then 'video render failed'
+    when 'metadata_failure' then 'production metadata failed'
+    else null
+  end;
+
+  if v_failure_message is null then
     raise exception using errcode = 'P0005', message = 'failure data is incomplete';
   end if;
 
-  update public.video_render_jobs
+  update public.video_render_jobs as job
   set status = 'failed',
       failure_code = p_failure_code,
-      failure_message = p_failure_message
-  where id = p_render_id;
+      failure_message = v_failure_message
+  where job.id = p_render_id;
 
   return query select 'failed'::text;
 end;
@@ -692,29 +712,40 @@ language plpgsql
 security invoker
 set search_path = ''
 as $$
+#variable_conflict error
 declare
-  persisted_status text;
+  v_persisted_status text;
+  v_retry_status text;
 begin
-  select status into persisted_status
-  from public.video_render_jobs
-  where id = p_render_id
+  select job.status into v_persisted_status
+  from public.video_render_jobs as job
+  where job.id = p_render_id
   for update;
 
   if not found then
     raise exception using errcode = 'P0002', message = 'render not found';
   end if;
 
-  if persisted_status <> 'failed' then
+  if v_persisted_status <> 'failed' then
     raise exception using errcode = 'P0003', message = 'only failed renders can retry';
   end if;
 
-  update public.video_render_jobs
-  set status = 'planned',
+  v_retry_status := case
+    when exists (
+      select 1
+      from public.video_asset_downloads as download
+      where download.render_id = p_render_id
+    ) then 'downloading'
+    else 'planned'
+  end;
+
+  update public.video_render_jobs as job
+  set status = v_retry_status,
       failure_code = null,
       failure_message = null
-  where id = p_render_id;
+  where job.id = p_render_id;
 
-  return query select 'planned'::text;
+  return query select v_retry_status;
 end;
 $$;
 
@@ -728,12 +759,13 @@ language plpgsql
 security invoker
 set search_path = ''
 as $$
+#variable_conflict error
 declare
-  owned_candidate_id bigint;
-  persisted_selection public.video_asset_selections%rowtype;
+  v_owned_candidate_id bigint;
+  v_persisted_selection public.video_asset_selections%rowtype;
 begin
   select candidate.id
-  into owned_candidate_id
+  into v_owned_candidate_id
   from public.video_search_candidates as candidate
   where candidate.run_id = p_run_id
     and candidate.provider = 'vecteezy'
@@ -743,49 +775,51 @@ begin
     raise exception using errcode = 'P0002', message = 'candidate does not belong to run';
   end if;
 
-  select * into persisted_selection
-  from public.video_asset_selections
-  where run_id = p_run_id
+  select selection.* into v_persisted_selection
+  from public.video_asset_selections as selection
+  where selection.run_id = p_run_id
   for update;
 
   if found and exists (
-    select 1 from public.video_asset_downloads where selection_id = persisted_selection.id
+    select 1
+    from public.video_asset_downloads as download
+    where download.selection_id = v_persisted_selection.id
   ) then
-    if persisted_selection.candidate_id <> owned_candidate_id
-      or persisted_selection.note is distinct from p_note then
+    if v_persisted_selection.candidate_id <> v_owned_candidate_id
+      or v_persisted_selection.note is distinct from p_note then
       raise exception using errcode = 'P0007', message = 'selection_locked';
     end if;
 
-    return query select persisted_selection.id;
+    return query select v_persisted_selection.id;
     return;
   end if;
 
   insert into public.video_asset_selections(run_id, candidate_id, note)
-  values (p_run_id, owned_candidate_id, p_note)
+  values (p_run_id, v_owned_candidate_id, p_note)
   on conflict (run_id) do update
   set candidate_id = excluded.candidate_id,
       note = excluded.note,
       selected_at = pg_catalog.clock_timestamp()
-  returning * into persisted_selection;
+  returning * into v_persisted_selection;
 
-  return query select persisted_selection.id;
+  return query select v_persisted_selection.id;
 end;
 $$;
 
 alter table public.video_render_jobs enable row level security;
 alter table public.video_render_jobs force row level security;
 revoke all on table public.video_render_jobs from public, anon, authenticated;
-grant select, insert, update, delete on table public.video_render_jobs to service_role;
+grant select, insert, update on table public.video_render_jobs to service_role;
 
 alter table public.video_asset_downloads enable row level security;
 alter table public.video_asset_downloads force row level security;
 revoke all on table public.video_asset_downloads from public, anon, authenticated;
-grant select, insert, update, delete on table public.video_asset_downloads to service_role;
+grant select, insert on table public.video_asset_downloads to service_role;
 
 alter table public.video_render_segments enable row level security;
 alter table public.video_render_segments force row level security;
 revoke all on table public.video_render_segments from public, anon, authenticated;
-grant select, insert, update, delete on table public.video_render_segments to service_role;
+grant select, insert on table public.video_render_segments to service_role;
 
 revoke all on sequence public.video_asset_downloads_id_seq from public, anon, authenticated;
 grant usage on sequence public.video_asset_downloads_id_seq to service_role;

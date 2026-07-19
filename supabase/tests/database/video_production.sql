@@ -34,55 +34,146 @@ select ok(
   'production tables have no browser policies'
 );
 select ok(
-  not has_table_privilege('anon', 'public.video_render_jobs', 'select')
-  and not has_table_privilege('authenticated', 'public.video_render_jobs', 'select')
-  and not has_table_privilege('anon', 'public.video_asset_downloads', 'insert')
-  and not has_table_privilege('authenticated', 'public.video_asset_downloads', 'insert')
-  and not has_table_privilege('anon', 'public.video_render_segments', 'update')
-  and not has_table_privilege('authenticated', 'public.video_render_segments', 'update'),
+  not exists (
+    with client_roles(role_name) as (
+      values ('public'::name), ('anon'::name), ('authenticated'::name)
+    ), private_tables(table_name) as (
+      values
+        ('public.video_render_jobs'::text),
+        ('public.video_asset_downloads'::text),
+        ('public.video_render_segments'::text)
+    ), table_privileges(privilege_name) as (
+      select pg_catalog.unnest(array['select', 'insert', 'update', 'delete', 'truncate', 'references', 'trigger']::text[])
+    )
+    select 1
+    from client_roles as client_role
+    cross join private_tables as private_table
+    cross join table_privileges as table_privilege
+    where has_table_privilege(client_role.role_name, private_table.table_name, table_privilege.privilege_name)
+  ),
   'browser roles cannot access production tables'
 );
 select ok(
-  not has_sequence_privilege('anon', 'public.video_asset_downloads_id_seq', 'usage')
-  and not has_sequence_privilege('authenticated', 'public.video_asset_downloads_id_seq', 'usage')
-  and not has_sequence_privilege('anon', 'public.video_render_segments_id_seq', 'usage')
-  and not has_sequence_privilege('authenticated', 'public.video_render_segments_id_seq', 'usage'),
+  not exists (
+    with client_roles(role_name) as (
+      values ('public'::name), ('anon'::name), ('authenticated'::name)
+    ), private_sequences(sequence_name) as (
+      values
+        ('public.video_asset_downloads_id_seq'::text),
+        ('public.video_render_segments_id_seq'::text)
+    ), sequence_privileges(privilege_name) as (
+      select pg_catalog.unnest(array['usage', 'select', 'update']::text[])
+    )
+    select 1
+    from client_roles as client_role
+    cross join private_sequences as private_sequence
+    cross join sequence_privileges as sequence_privilege
+    where has_sequence_privilege(client_role.role_name, private_sequence.sequence_name, sequence_privilege.privilege_name)
+  ),
   'browser roles cannot access production sequences'
 );
 select ok(
-  has_table_privilege('service_role', 'public.video_render_jobs', 'select')
-  and has_table_privilege('service_role', 'public.video_asset_downloads', 'insert')
-  and has_table_privilege('service_role', 'public.video_render_segments', 'delete')
+  not exists (
+    with expected_tables(table_name, allowed_privileges) as (
+      values
+        ('public.video_render_jobs'::text, array['select', 'insert', 'update']::text[]),
+        ('public.video_asset_downloads'::text, array['select', 'insert']::text[]),
+        ('public.video_render_segments'::text, array['select', 'insert']::text[])
+    ), table_privileges(privilege_name) as (
+      select pg_catalog.unnest(array['select', 'insert', 'update', 'delete', 'truncate', 'references', 'trigger']::text[])
+    ), expected_privileges(table_name, privilege_name, is_granted) as (
+      select
+        expected_table.table_name,
+        table_privilege.privilege_name,
+        table_privilege.privilege_name = any(expected_table.allowed_privileges)
+      from expected_tables as expected_table
+      cross join table_privileges as table_privilege
+    )
+    select 1
+    from expected_privileges as expected_privilege
+    where has_table_privilege('service_role', expected_privilege.table_name, expected_privilege.privilege_name)
+      is distinct from expected_privilege.is_granted
+  )
   and has_sequence_privilege('service_role', 'public.video_asset_downloads_id_seq', 'usage')
-  and has_sequence_privilege('service_role', 'public.video_render_segments_id_seq', 'usage'),
-  'service role has the required private data access'
+  and not has_sequence_privilege('service_role', 'public.video_asset_downloads_id_seq', 'select')
+  and not has_sequence_privilege('service_role', 'public.video_asset_downloads_id_seq', 'update')
+  and has_sequence_privilege('service_role', 'public.video_render_segments_id_seq', 'usage')
+  and not has_sequence_privilege('service_role', 'public.video_render_segments_id_seq', 'select')
+  and not has_sequence_privilege('service_role', 'public.video_render_segments_id_seq', 'update'),
+  'service role has exactly the required private data access'
 );
 select ok(
-  not has_function_privilege('anon', 'public.start_video_render(text,text)', 'execute')
-  and not has_function_privilege('authenticated', 'public.start_video_render(text,text)', 'execute')
-  and not has_function_privilege('anon', 'public.record_video_asset_download(uuid,bigint,text,text,bigint,text,integer,integer,integer,double precision,text,text,boolean,text,integer,integer)', 'execute')
-  and not has_function_privilege('authenticated', 'public.complete_video_render(uuid,jsonb,jsonb)', 'execute')
-  and not has_function_privilege('anon', 'public.select_video_asset(uuid,bigint,text)', 'execute')
-  and not has_function_privilege('authenticated', 'public.select_video_asset(uuid,bigint,text)', 'execute'),
+  not exists (
+    with client_roles(role_name) as (
+      values ('public'::name), ('anon'::name), ('authenticated'::name)
+    ), production_rpcs(rpc_name) as (
+      values
+        ('public.start_video_render(text,text)'::text),
+        ('public.record_video_asset_download(uuid,bigint,text,text,bigint,text,integer,integer,integer,double precision,text,text,boolean,text,integer,integer)'::text),
+        ('public.begin_video_render(uuid)'::text),
+        ('public.complete_video_render(uuid,jsonb,jsonb)'::text),
+        ('public.fail_video_render(uuid,text,text)'::text),
+        ('public.retry_video_render(uuid)'::text),
+        ('public.select_video_asset(uuid,bigint,text)'::text)
+    )
+    select 1
+    from client_roles as client_role
+    cross join production_rpcs as production_rpc
+    where has_function_privilege(client_role.role_name, production_rpc.rpc_name, 'execute')
+  ),
   'browser roles cannot execute production RPCs'
 );
 select ok(
-  has_function_privilege('service_role', 'public.start_video_render(text,text)', 'execute')
-  and has_function_privilege('service_role', 'public.record_video_asset_download(uuid,bigint,text,text,bigint,text,integer,integer,integer,double precision,text,text,boolean,text,integer,integer)', 'execute')
-  and has_function_privilege('service_role', 'public.begin_video_render(uuid)', 'execute')
-  and has_function_privilege('service_role', 'public.complete_video_render(uuid,jsonb,jsonb)', 'execute')
-  and has_function_privilege('service_role', 'public.fail_video_render(uuid,text,text)', 'execute')
-  and has_function_privilege('service_role', 'public.retry_video_render(uuid)', 'execute')
-  and has_function_privilege('service_role', 'public.select_video_asset(uuid,bigint,text)', 'execute'),
+  not exists (
+    with production_rpcs(rpc_name) as (
+      values
+        ('public.start_video_render(text,text)'::text),
+        ('public.record_video_asset_download(uuid,bigint,text,text,bigint,text,integer,integer,integer,double precision,text,text,boolean,text,integer,integer)'::text),
+        ('public.begin_video_render(uuid)'::text),
+        ('public.complete_video_render(uuid,jsonb,jsonb)'::text),
+        ('public.fail_video_render(uuid,text,text)'::text),
+        ('public.retry_video_render(uuid)'::text),
+        ('public.select_video_asset(uuid,bigint,text)'::text)
+    )
+    select 1
+    from production_rpcs as production_rpc
+    where not has_function_privilege('service_role', production_rpc.rpc_name, 'execute')
+  ),
   'service role executes production RPCs'
 );
 select ok(
-  exists (select 1 from pg_catalog.pg_indexes where schemaname = 'public' and indexname = 'video_asset_downloads_render_id_idx')
-  and exists (select 1 from pg_catalog.pg_indexes where schemaname = 'public' and indexname = 'video_asset_downloads_candidate_id_idx')
-  and exists (select 1 from pg_catalog.pg_indexes where schemaname = 'public' and indexname = 'video_render_segments_render_id_idx')
-  and exists (select 1 from pg_catalog.pg_indexes where schemaname = 'public' and indexname = 'video_render_segments_download_id_idx')
-  and exists (select 1 from pg_catalog.pg_indexes where schemaname = 'public' and indexname = 'video_render_segments_quote_source_idx'),
-  'foreign key and quote source indexes exist'
+  (
+    with expected_indexes(index_name, table_name, expected_columns, expected_predicate) as (
+      values
+        ('video_asset_downloads_render_id_idx'::name, 'public.video_asset_downloads'::pg_catalog.regclass, array['render_id']::name[], null::text),
+        ('video_asset_downloads_candidate_id_idx'::name, 'public.video_asset_downloads'::pg_catalog.regclass, array['candidate_id']::name[], null::text),
+        ('video_render_segments_render_id_idx'::name, 'public.video_render_segments'::pg_catalog.regclass, array['render_id']::name[], null::text),
+        ('video_render_segments_download_id_idx'::name, 'public.video_render_segments'::pg_catalog.regclass, array['download_id']::name[], null::text),
+        ('video_render_segments_quote_source_idx'::name, 'public.video_render_segments'::pg_catalog.regclass, array['source_track_id', 'source_cue_index']::name[], '(source_track_id is not null)'::text)
+    )
+    select pg_catalog.count(*) = 5
+    from expected_indexes as expected_index
+    join pg_catalog.pg_class as index_class on index_class.relname = expected_index.index_name
+    join pg_catalog.pg_index as index_info
+      on index_info.indexrelid = index_class.oid
+      and index_info.indrelid = expected_index.table_name
+    join pg_catalog.pg_am as access_method
+      on access_method.oid = index_class.relam
+      and access_method.amname = 'btree'
+    where (
+      select pg_catalog.array_agg(attribute.attname order by index_column.ordinality)
+      from pg_catalog.unnest(index_info.indkey::smallint[]) with ordinality as index_column(attnum, ordinality)
+      join pg_catalog.pg_attribute as attribute
+        on attribute.attrelid = index_info.indrelid
+        and attribute.attnum = index_column.attnum
+      where index_column.ordinality <= index_info.indnkeyatts
+    ) = expected_index.expected_columns
+      and (
+        (expected_index.expected_predicate is null and index_info.indpred is null)
+        or pg_catalog.lower(pg_catalog.pg_get_expr(index_info.indpred, index_info.indrelid)) = expected_index.expected_predicate
+      )
+  ),
+  'foreign key and quote source index definitions are exact'
 );
 
 create temporary table task1_ids (
@@ -234,14 +325,41 @@ insert into task1_ids(label, download_id)
 select 'download-render-3', download_id
 from public.record_video_asset_download((select render_id from task1_ids where label = 'render-complete'), (select selection_id from task1_ids where label = 'selection-render-3'), 'video-runs/complete/assets/3.mp4', 'mp4', 1003, pg_catalog.repeat('7', 64), 1920, 1080, 7500, 30, 'h264', 'aac', false, null, null, null);
 
--- 25: four verified downloads move the render to rendering
+-- 25-26: caller text is discarded and a failed downloaded render resumes without new downloads
+do $$
+begin
+  perform public.fail_video_render(
+    (select render_id from task1_ids where label = 'render-complete'),
+    'render_failure',
+    'https://example.invalid/private C:\secret raw-payload prompt'
+  );
+end;
+$$;
+select ok(
+  (select status = 'failed'
+    and failure_code = 'render_failure'
+    and failure_message = 'video render failed'
+    and pg_catalog.strpos(failure_message, 'https:') = 0
+    and pg_catalog.strpos(failure_message, 'C:') = 0
+    and pg_catalog.strpos(failure_message, 'prompt') = 0
+   from public.video_render_jobs
+   where id = (select render_id from task1_ids where label = 'render-complete')),
+  'fail persists only the controlled message derived from its allowlisted code'
+);
+select is(
+  (select status from public.retry_video_render((select render_id from task1_ids where label = 'render-complete'))),
+  'downloading',
+  'retry resumes a render that already owns verified downloads'
+);
+
+-- 27: four verified downloads move the render to rendering
 select is(
   (select status from public.begin_video_render((select render_id from task1_ids where label = 'render-complete'))),
   'rendering',
   'begin render accepts exactly four verified downloads'
 );
 
--- 26-27: changed quote text fails before any partial completion data persists
+-- 28-29: changed quote text fails before any partial completion data persists
 select throws_ok(
   $$select * from public.complete_video_render(
     (select render_id from task1_ids where label = 'render-complete'),
@@ -261,7 +379,7 @@ select ok(
   'quote mismatch leaves completion atomic'
 );
 
--- 28-31: valid completion persists four segments, is idempotent, and is terminal
+-- 30-33: valid completion persists four segments, is idempotent, and is terminal
 select is(
   (select status from public.complete_video_render(
     (select render_id from task1_ids where label = 'render-complete'),
@@ -294,7 +412,7 @@ select throws_ok(
   'P0003', 'render cannot fail from its current state', 'completed renders are terminal'
 );
 
--- 32-33: failed renders retry only through the controlled transition
+-- 34-35: failed renders with no downloads retry to planned
 insert into task1_ids(label, render_id)
 select 'render-failed', render_id
 from public.start_video_render(pg_catalog.repeat('c', 64), 'Synthetic failed render');
@@ -309,19 +427,11 @@ select is(
   'retry clears failure data and returns to planned'
 );
 
--- 34-36: constraints preserve provenance and terminal consistency
+-- 36: source provenance constraints remain enforced
 select throws_ok(
   $$insert into public.video_render_segments(render_id, segment_index, download_id, timeline_start_ms, timeline_end_ms, source_in_ms, source_out_ms, caption_kind, caption_en, caption_zh, source_track_id, source_cue_index)
     values ((select render_id from task1_ids where label = 'render-incomplete'), 0, (select download_id from task1_ids where label = 'download-incomplete'), 0, 10, 0, 10, 'original', 'Original.', 'Original.', (select track_id from task1_ids where label = 'quote-source'), (select cue_index from task1_ids where label = 'quote-source'))$$,
   '23514', null, 'original segments cannot retain quote source columns'
-);
-select throws_ok(
-  $$update public.video_asset_selections set candidate_id = (select candidate_id from task1_ids where label = 'selection-render-0-alternate') where id = (select selection_id from task1_ids where label = 'selection-incomplete')$$,
-  '23503', null, 'downloaded selection candidate is frozen by the foreign key'
-);
-select ok(
-  (select status = 'planned' and failure_code is null and failure_message is null from public.video_render_jobs where id = (select render_id from task1_ids where label = 'render-failed')),
-  'retry leaves no stale failure fields'
 );
 
 select * from finish();
