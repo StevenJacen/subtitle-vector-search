@@ -121,6 +121,46 @@ describe('video production migration', () => {
     expect(source).not.toMatch(/grant [^;]*\bdelete\b[^;]* to service_role/i)
   })
 
+  it('clears inherited service role privileges before applying minimum grants', () => {
+    const source = migrationSource()
+    const aclChanges = [
+      {
+        revoke: 'revoke all on table public.video_render_jobs from service_role;',
+        grant: 'grant select, insert, update on table public.video_render_jobs to service_role;',
+      },
+      {
+        revoke: 'revoke all on table public.video_asset_downloads from service_role;',
+        grant: 'grant select, insert on table public.video_asset_downloads to service_role;',
+      },
+      {
+        revoke: 'revoke all on table public.video_render_segments from service_role;',
+        grant: 'grant select, insert on table public.video_render_segments to service_role;',
+      },
+      {
+        revoke: 'revoke all on sequence public.video_asset_downloads_id_seq from service_role;',
+        grant: 'grant usage on sequence public.video_asset_downloads_id_seq to service_role;',
+      },
+      {
+        revoke: 'revoke all on sequence public.video_render_segments_id_seq from service_role;',
+        grant: 'grant usage on sequence public.video_render_segments_id_seq to service_role;',
+      },
+    ]
+
+    for (const aclChange of aclChanges) {
+      expect(source).toContain(aclChange.revoke)
+      expect(source.indexOf(aclChange.revoke)).toBeLessThan(source.indexOf(aclChange.grant))
+    }
+  })
+
+  it('uses the standard-conforming traversal regex in every artifact-key check', () => {
+    const source = migrationSource()
+    const traversalPattern = "'(^|/)\\.\\.(/|$)'"
+    const overEscapedTraversalPattern = "'(^|/)\\\\.\\\\.(/|$)'"
+
+    expect(source.split(traversalPattern)).toHaveLength(4)
+    expect(source).not.toContain(overEscapedTraversalPattern)
+  })
+
   it('uses aggregate pgTAP assertions for exact browser and service privileges', () => {
     const databaseTest = readFileSync(databaseTestPath, 'utf8')
 

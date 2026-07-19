@@ -31,7 +31,7 @@ create table public.video_render_jobs (
     output_artifact_key is null or (
       output_artifact_key ~ '^[A-Za-z0-9][A-Za-z0-9._/-]*$'
       and output_artifact_key !~ '^[A-Za-z][A-Za-z0-9+.-]*:'
-      and output_artifact_key !~ '(^|/)\\.\\.(/|$)'
+      and output_artifact_key !~ '(^|/)\.\.(/|$)'
     )
   ),
   constraint video_render_jobs_completed_fields_check check (
@@ -103,7 +103,7 @@ create table public.video_asset_downloads (
   constraint video_asset_downloads_artifact_key_check check (
     artifact_key ~ '^[A-Za-z0-9][A-Za-z0-9._/-]*$'
     and artifact_key !~ '^[A-Za-z][A-Za-z0-9+.-]*:'
-    and artifact_key !~ '(^|/)\\.\\.(/|$)'
+    and artifact_key !~ '(^|/)\.\.(/|$)'
   ),
   constraint video_asset_downloads_audio_codec_check check (audio_codec is null or pg_catalog.btrim(audio_codec) <> ''),
   constraint video_asset_downloads_attribution_check check (
@@ -435,7 +435,7 @@ begin
   if v_output_artifact_key is null
     or v_output_artifact_key !~ '^[A-Za-z0-9][A-Za-z0-9._/-]*$'
     or v_output_artifact_key ~ '^[A-Za-z][A-Za-z0-9+.-]*:'
-    or v_output_artifact_key ~ '(^|/)\\.\\.(/|$)'
+    or v_output_artifact_key ~ '(^|/)\.\.(/|$)'
     or v_output_sha256 is null
     or v_output_sha256 !~ '^[0-9a-f]{64}$'
     or v_output_size_bytes is null or v_output_size_bytes <= 0
@@ -809,21 +809,26 @@ $$;
 alter table public.video_render_jobs enable row level security;
 alter table public.video_render_jobs force row level security;
 revoke all on table public.video_render_jobs from public, anon, authenticated;
+revoke all on table public.video_render_jobs from service_role;
 grant select, insert, update on table public.video_render_jobs to service_role;
 
 alter table public.video_asset_downloads enable row level security;
 alter table public.video_asset_downloads force row level security;
 revoke all on table public.video_asset_downloads from public, anon, authenticated;
+revoke all on table public.video_asset_downloads from service_role;
 grant select, insert on table public.video_asset_downloads to service_role;
 
 alter table public.video_render_segments enable row level security;
 alter table public.video_render_segments force row level security;
 revoke all on table public.video_render_segments from public, anon, authenticated;
+revoke all on table public.video_render_segments from service_role;
 grant select, insert on table public.video_render_segments to service_role;
 
 revoke all on sequence public.video_asset_downloads_id_seq from public, anon, authenticated;
+revoke all on sequence public.video_asset_downloads_id_seq from service_role;
 grant usage on sequence public.video_asset_downloads_id_seq to service_role;
 revoke all on sequence public.video_render_segments_id_seq from public, anon, authenticated;
+revoke all on sequence public.video_render_segments_id_seq from service_role;
 grant usage on sequence public.video_render_segments_id_seq to service_role;
 
 revoke all on function public.start_video_render(text, text) from public, anon, authenticated;
