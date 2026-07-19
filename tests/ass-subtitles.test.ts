@@ -44,7 +44,7 @@ describe('buildAssSubtitles', () => {
 
     expect(escapeAssText(exactQuote)).toBe(String.raw`Hope \{still\} follows C:\\paths.`)
     expect(quoteEvent).toContain(`${escapeAssText(exactQuote)}\\N希望仍与我们同在。`)
-    expect(quoteEvent).toContain('Movie Title (1994) 路 00:02:00.000')
+    expect(quoteEvent).toContain('Movie Title (1994) · 00:02:00.000')
   })
 
   it('creates four ordered non-overlapping caption windows within 30 seconds', () => {

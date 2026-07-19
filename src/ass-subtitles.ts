@@ -52,7 +52,7 @@ export function buildAssSubtitles(
   const windows = buildCaptionWindows(timing)
   const events = scenes.map((scene, index) => {
     const source = scene.captionKind === 'quote'
-      ? `\\N${escapeAssText(`${scene.movieTitle} (${scene.releaseYear}) 路 ${sourceStart(scene.sourceTimestamp)}`)}`
+      ? `\\N${escapeAssText(`${scene.movieTitle} (${scene.releaseYear}) · ${sourceStart(scene.sourceTimestamp)}`)}`
       : ''
     const text = `${escapeAssText(scene.captionEn)}\\N${escapeAssText(scene.captionZh)}${source}`
     return `Dialogue: 0,${assTime(windows[index].startSeconds)},${assTime(windows[index].endSeconds)},Default,,0,0,0,,${text}`
