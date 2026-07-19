@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import * as fs from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   artifactKey,
@@ -18,6 +18,7 @@ import {
 vi.mock('node:fs/promises', { spy: true })
 
 const renderId = 'd62a53a1-08fb-4bee-a1ed-d8ba13de85f2'
+const otherRunId = '11111111-2222-4333-8444-555555555555'
 const roots: string[] = []
 
 const manifest: VideoRunManifest = {
@@ -75,6 +76,18 @@ describe('artifact keys', () => {
     '.',
     'nested//final.mp4',
     'nested/./final.mp4',
+    'CON',
+    'con.mp4',
+    'nested/PRN.txt',
+    'AUX.mp4',
+    'NUL',
+    'COM1.mp4',
+    'com9',
+    'LPT1.mov',
+    'lpt9',
+    'final.',
+    'nested/trailing. ',
+    'nested/trailing ',
   ])('rejects unsafe relative artifact path %j', relative => {
     expect(() => artifactKey(renderId, relative)).toThrow('invalid artifact key')
   })
@@ -101,6 +114,14 @@ describe('artifact keys', () => {
     `video-runs/${renderId}/authorization.mp4`,
     `video-runs/${renderId}//final.mp4`,
     `video-runs/${renderId}/./final.mp4`,
+    `video-runs/${renderId}/CON/final.mp4`,
+    `video-runs/${renderId}/final.mp4.`,
+    'video-runs/d62a53a1-08fb-4bee-a1ed-d8ba13de85f/final.mp4',
+    'video-runs/d62a53a1-08fb-4bee-a1ed-d8ba13de85fz/final.mp4',
+    'video-runs/d62a53a108fb4beea1edd8ba13de85f2/final.mp4',
+    'video-runs/{d62a53a1-08fb-4bee-a1ed-d8ba13de85f2}/final.mp4',
+    'video-runs/d62a53a1-08fb-0bee-a1ed-d8ba13de85f2/final.mp4',
+    'video-runs/d62a53a1-08fb-4bee-71ed-d8ba13de85f2/final.mp4',
   ])('rejects unsafe complete key %j', key => {
     expect(() => resolveArtifactPath('artifacts', key)).toThrow('invalid artifact key')
   })
@@ -109,7 +130,7 @@ describe('artifact keys', () => {
 describe('video run manifests', () => {
   it('atomically writes and strictly reads a stable manifest', async () => {
     const root = await temporaryRoot()
-    const path = join(root, 'manifest.json')
+    const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
     const writeFile = vi.mocked(fs.writeFile)
     const rename = vi.mocked(fs.rename)
 
@@ -123,7 +144,28 @@ describe('video run manifests', () => {
     expect(writeFile.mock.invocationCallOrder[0]).toBeLessThan(rename.mock.invocationCallOrder[0])
     expect(rename.mock.calls[0][0]).not.toBe(path)
     expect(rename.mock.calls[0][1]).toBe(path)
-    expect(await fs.readdir(root)).toEqual(['manifest.json'])
+    expect(await fs.readdir(dirname(path))).toEqual(['manifest.json'])
+  })
+
+  it.each(['absolute', 'relative'])('rejects an unregistered %s manifest path before writing', async kind => {
+    const root = await temporaryRoot()
+    const absolutePath = join(root, `${kind}-manifest.json`)
+    const directPath = kind === 'absolute' ? absolutePath : relative(process.cwd(), absolutePath)
+    const unsafeWrite = writeManifestAtomic as (path: string, value: VideoRunManifest) => Promise<void>
+
+    await expect(unsafeWrite(directPath, manifest)).rejects.toThrow('unsafe artifact path')
+    await expect(fs.access(absolutePath)).rejects.toThrow()
+  })
+
+  it('removes the temporary file when atomic rename fails', async () => {
+    const root = await temporaryRoot()
+    const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
+    vi.mocked(fs.rename).mockRejectedValueOnce(new Error('rename failed'))
+
+    await expect(writeManifestAtomic(path, manifest)).rejects.toThrow('rename failed')
+
+    expect(await fs.readdir(dirname(path))).toEqual([])
+    await expect(fs.access(path)).rejects.toThrow()
   })
 
   it('rejects unknown fields and recursively rejects private URL data', async () => {
@@ -143,9 +185,31 @@ describe('video run manifests', () => {
     }
   })
 
+  it.each([
+    'https://provider.test/license',
+    'See https://provider.test/license for attribution.',
+    'Provider value: https://signed.test/X-Amz-Signature?value=abc',
+  ])('rejects a URL stored outside requiredAttributionUrl in note value %j', async note => {
+    const root = await temporaryRoot()
+    const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
+    const value: VideoRunManifest = {
+      ...manifest,
+      scenes: [{
+        index: 0,
+        captionKind: 'original',
+        captionEn: 'Caption',
+        captionZh: '\u5b57\u5e55',
+        visualTheme: 'Dawn',
+        note,
+      }],
+    }
+
+    await expect(writeManifestAtomic(path, value)).rejects.toThrow('invalid manifest')
+  })
+
   it('retains stable attribution while excluding private provider URL forms', async () => {
     const root = await temporaryRoot()
-    const path = join(root, 'manifest.json')
+    const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
     const withAttribution: VideoRunManifest = {
       ...manifest,
       stage: 'downloading',
@@ -160,6 +224,71 @@ describe('video run manifests', () => {
     await writeManifestAtomic(path, withAttribution)
 
     expect(await readManifest(path)).toEqual(withAttribution)
+  })
+
+  it('accepts a credential-free HTTP attribution URL', async () => {
+    const root = await temporaryRoot()
+    const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
+    const withAttribution: VideoRunManifest = {
+      ...manifest,
+      stage: 'downloading',
+      sources: [{
+        artifactKey: artifactKey(renderId, 'assets/scene-01.mp4'),
+        sha256: 'b'.repeat(64),
+        requiredAttributionUrl: 'http://provider.test/license',
+      }],
+    }
+
+    await writeManifestAtomic(path, withAttribution)
+
+    expect(await readManifest(path)).toEqual(withAttribution)
+  })
+
+  it.each([
+    'not a URL',
+    'https://',
+    'ftp://provider.test/license',
+    'https://user:password@provider.test/license',
+    'https://signed.test/license',
+    'https://signed.test/X-Amz-Signature',
+    'https://status.provider.test/license',
+    'https://provider.test/download',
+    'https://provider.test/signature',
+    'https://provider.test/X-Amz-Signature',
+    'https://provider.test/license?token=abc',
+    'https://provider.test/license?note=token',
+    'https://provider.test/license?secret=abc',
+    'https://provider.test/license?credential=abc',
+    'https://provider.test/license?policy=abc',
+    'https://provider.test/license?expires=123',
+    'https://provider.test/license?key-pair-id=abc',
+    'https://provider.test/license#authorization',
+  ])('rejects unsafe required attribution URL %j', async requiredAttributionUrl => {
+    const root = await temporaryRoot()
+    const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
+    const value: VideoRunManifest = {
+      ...manifest,
+      stage: 'downloading',
+      sources: [{
+        artifactKey: artifactKey(renderId, 'assets/scene-01.mp4'),
+        sha256: 'b'.repeat(64),
+        requiredAttributionUrl,
+      }],
+    }
+
+    await expect(writeManifestAtomic(path, value)).rejects.toThrow('invalid manifest')
+  })
+
+  it.each(['source', 'output'])('rejects a cross-run %s artifact key', async kind => {
+    const root = await temporaryRoot()
+    const path = resolveArtifactPath(root, artifactKey(otherRunId, 'manifest.json'))
+    const source = { artifactKey: artifactKey(renderId, 'assets/scene-01.mp4'), sha256: 'b'.repeat(64) }
+    const output = { artifactKey: artifactKey(renderId, 'final.mp4'), sha256: 'c'.repeat(64) }
+    const value: VideoRunManifest = kind === 'source'
+      ? { ...manifest, renderId: otherRunId, stage: 'downloading', sources: [source] }
+      : { ...manifest, renderId: otherRunId, stage: 'completed', output }
+
+    await expect(writeManifestAtomic(path, value)).rejects.toThrow('invalid manifest')
   })
 
   it('produces deterministic digest bytes without a local plan identifier', () => {
@@ -182,8 +311,8 @@ describe('video run manifests', () => {
 
   it('serializes equivalent nested manifest values in a stable field order', async () => {
     const root = await temporaryRoot()
-    const firstPath = join(root, 'first.json')
-    const secondPath = join(root, 'second.json')
+    const firstPath = resolveArtifactPath(root, artifactKey(renderId, 'first.json'))
+    const secondPath = resolveArtifactPath(root, artifactKey(renderId, 'second.json'))
     const sourceKey = artifactKey(renderId, 'assets/scene-01.mp4')
     const first: VideoRunManifest = {
       ...manifest,
@@ -237,5 +366,24 @@ describe('local file reuse', () => {
     expect(nextIncompleteStage(completed, {
       hashes: { ...matching.hashes, [output.artifactKey]: '0'.repeat(64) },
     })).toBe('rendering')
+  })
+
+  it('rejects completed reuse state containing cross-run artifact keys', () => {
+    const source = { artifactKey: artifactKey(otherRunId, 'assets/scene-01.mp4'), sha256: 'b'.repeat(64) }
+    const output = { artifactKey: artifactKey(otherRunId, 'final.mp4'), sha256: 'c'.repeat(64) }
+    const completed: VideoRunManifest = {
+      ...manifest,
+      stage: 'completed',
+      sources: [source],
+      output,
+    }
+    const localFiles: LocalFileState = {
+      hashes: {
+        [source.artifactKey]: source.sha256,
+        [output.artifactKey]: output.sha256,
+      },
+    }
+
+    expect(() => nextIncompleteStage(completed, localFiles)).toThrow('invalid manifest')
   })
 })

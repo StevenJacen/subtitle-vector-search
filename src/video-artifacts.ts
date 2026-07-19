@@ -80,27 +80,37 @@ export interface LocalFileState {
   hashes: Readonly<Record<string, string | undefined>>
 }
 
+declare const resolvedArtifactPathBrand: unique symbol
+export type ResolvedArtifactPath = string & { readonly [resolvedArtifactPathBrand]: true }
+
+interface ArtifactPathRegistration {
+  root: string
+  key: string
+  destination: string
+}
+
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const sha256Pattern = /^[0-9a-f]{64}$/
 const stageValues = new Set<VideoRunStage>(['review', 'downloading', 'rendering', 'completed', 'failed'])
 const forbiddenArtifactTerm = /url|token|secret|authorization/i
-const privateUrlPart = /(?:preview|signed|status|download|token|secret|authorization)/i
+const sensitiveUrlVocabulary = /(?:signed|status|download|signature|x-amz-[a-z0-9-]*|token|secret|credential|policy|expires|key-pair-id|authorization)/i
+const embeddedUrl = /(?:[a-z][a-z0-9+.-]*:\/\/|(?:https?|ftp|file|data|mailto):)[^\s<>"']+/gi
+const windowsDeviceName = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i
+const artifactPathRegistrations = new Map<string, ArtifactPathRegistration>()
 
 export function artifactKey(renderId: string, relativePath: string): string {
   if (!isUuid(renderId) || !isSafeRelativePath(relativePath)) throw new Error('invalid artifact key')
   return `video-runs/${renderId.toLowerCase()}/${relativePath}`
 }
 
-export function resolveArtifactPath(root: string, key: string): string {
+export function resolveArtifactPath(root: string, key: string): ResolvedArtifactPath {
   if (!isSafeArtifactKey(key)) throw new Error('invalid artifact key')
 
   const artifactRoot = resolve(root)
   const destination = resolve(artifactRoot, ...key.split('/'))
-  const pathFromRoot = relative(artifactRoot, destination)
-  if (pathFromRoot === '' || pathFromRoot === '..' || pathFromRoot.startsWith(`..${sep}`)) {
-    throw new Error('invalid artifact key')
-  }
-  return destination
+  assertContainedPath(artifactRoot, destination, 'invalid artifact key')
+  artifactPathRegistrations.set(destination, { root: artifactRoot, key, destination })
+  return destination as ResolvedArtifactPath
 }
 
 export async function sha256File(path: string): Promise<string> {
@@ -109,17 +119,19 @@ export async function sha256File(path: string): Promise<string> {
   return hash.digest('hex')
 }
 
-export async function writeManifestAtomic(path: string, manifest: VideoRunManifest): Promise<void> {
+export async function writeManifestAtomic(path: ResolvedArtifactPath, manifest: VideoRunManifest): Promise<void> {
+  assertRegisteredArtifactPath(path)
   const parsed = parseManifest(manifest)
-  const target = resolve(path)
-  const directory = dirname(target)
-  const temporary = join(directory, `.${randomUUID()}.manifest.tmp`)
+  const directory = dirname(path)
   const bytes = `${JSON.stringify(serializableManifest(parsed), null, 2)}\n`
 
   await mkdir(directory, { recursive: true })
+  assertRegisteredArtifactPath(path)
+  const temporary = join(directory, `.${randomUUID()}.manifest.tmp`)
   try {
     await writeFile(temporary, bytes, { encoding: 'utf8', flag: 'wx' })
-    await rename(temporary, target)
+    assertRegisteredArtifactPath(path)
+    await rename(temporary, path)
   } catch (error) {
     await rm(temporary, { force: true }).catch(() => undefined)
     throw error
@@ -184,8 +196,9 @@ function parseManifest(value: unknown): VideoRunManifest {
     createdAt: manifest.createdAt,
     updatedAt: manifest.updatedAt,
   }
-  if (manifest.sources !== undefined) parsed.sources = array(manifest.sources).map(parseSource)
-  if (manifest.output !== undefined) parsed.output = parseOutput(manifest.output)
+  const ownerId = parsed.renderId ?? parsed.planId
+  if (manifest.sources !== undefined) parsed.sources = array(manifest.sources).map(value => parseSource(value, ownerId))
+  if (manifest.output !== undefined) parsed.output = parseOutput(manifest.output, ownerId)
   if (parsed.stage === 'completed' && parsed.output === undefined) throw invalidManifest()
   return parsed
 }
@@ -229,13 +242,13 @@ function parseScene(value: unknown): VideoRunScene {
   return parsed.runId === undefined ? parsed : { ...parsed, runId: parsed.runId.toLowerCase() }
 }
 
-function parseSource(value: unknown): VideoRunSource {
+function parseSource(value: unknown, ownerId: string): VideoRunSource {
   const source = record(value)
   exactKeys(source, ['artifactKey', 'sha256'], [
     'selectionId', 'sizeBytes', 'width', 'height', 'durationMs', 'frameRate', 'videoCodec', 'audioCodec',
     'requiresAttribution', 'requiredAttributionUrl', 'quotaLimit', 'quotaRemaining',
   ])
-  if (!isSafeArtifactKey(source.artifactKey)
+  if (!isOwnedArtifactKey(source.artifactKey, ownerId)
     || !isSha256(source.sha256)
     || !optionalPositiveInteger(source.selectionId)
     || !optionalPositiveInteger(source.sizeBytes)
@@ -254,10 +267,10 @@ function parseSource(value: unknown): VideoRunSource {
   return source as unknown as VideoRunSource
 }
 
-function parseOutput(value: unknown): VideoRunOutput {
+function parseOutput(value: unknown, ownerId: string): VideoRunOutput {
   const output = record(value)
   exactKeys(output, ['artifactKey', 'sha256'], ['sizeBytes', 'durationMs', 'videoCodec', 'audioCodec', 'pixelFormat', 'ffmpegVersion'])
-  if (!isSafeArtifactKey(output.artifactKey)
+  if (!isOwnedArtifactKey(output.artifactKey, ownerId)
     || !isSha256(output.sha256)
     || !optionalPositiveInteger(output.sizeBytes)
     || !optionalPositiveInteger(output.durationMs)
@@ -352,12 +365,16 @@ function rejectPrivateContent(value: unknown): void {
     return
   }
   if (typeof value === 'string') {
-    if (isPrivateUrl(value)) throw invalidManifest()
+    if (containsUrl(value)) throw invalidManifest()
     return
   }
   if (typeof value !== 'object' || value === null) return
   for (const [key, nested] of Object.entries(value)) {
     if (isForbiddenManifestKey(key)) throw invalidManifest()
+    if (key === 'requiredAttributionUrl') {
+      if (nested !== undefined && nested !== null && !stableAttributionUrl(nested)) throw invalidManifest()
+      continue
+    }
     rejectPrivateContent(nested)
   }
 }
@@ -371,23 +388,45 @@ function isForbiddenManifestKey(key: string): boolean {
     || normalized.includes('authorization')
 }
 
-function isPrivateUrl(value: string): boolean {
+function stableAttributionUrl(value: unknown): boolean {
+  if (typeof value !== 'string') return false
   try {
     const url = new URL(value)
-    return url.protocol !== 'https:' || privateUrlPart.test(`${url.pathname}${url.search}${url.hash}`)
+    const components = decodeUrlComponents(`${url.hostname}\n${url.pathname}\n${url.search}\n${url.hash}`)
+    return (url.protocol === 'http:' || url.protocol === 'https:')
+      && url.hostname !== ''
+      && url.username === ''
+      && url.password === ''
+      && !sensitiveUrlVocabulary.test(components)
   } catch {
     return false
   }
 }
 
-function stableAttributionUrl(value: unknown): boolean {
-  if (typeof value !== 'string') return false
-  try {
-    const url = new URL(value)
-    return url.protocol === 'https:' && !privateUrlPart.test(`${url.pathname}${url.search}${url.hash}`)
-  } catch {
-    return false
+function containsUrl(value: string): boolean {
+  embeddedUrl.lastIndex = 0
+  return Array.from(value.matchAll(embeddedUrl)).some(match => {
+    try {
+      new URL(match[0])
+      return true
+    } catch {
+      return false
+    }
+  })
+}
+
+function decodeUrlComponents(value: string): string {
+  let decoded = value
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const next = decodeURIComponent(decoded.replace(/\+/g, ' '))
+      if (next === decoded) return decoded
+      decoded = next
+    } catch {
+      return decoded
+    }
   }
+  return decoded
 }
 
 function withoutPlanId(value: unknown): unknown {
@@ -414,13 +453,40 @@ function isSafeArtifactKey(value: unknown): value is string {
   return match !== null && isUuid(match[1]) && isSafeRelativePath(match[2])
 }
 
+function isOwnedArtifactKey(value: unknown, ownerId: string): value is string {
+  if (!isSafeArtifactKey(value)) return false
+  const runId = value.split('/')[1]
+  return runId.toLowerCase() === ownerId.toLowerCase()
+}
+
 function isSafeRelativePath(value: unknown): value is string {
   return typeof value === 'string'
     && value.length > 0
     && !forbiddenArtifactTerm.test(value)
     && !/[\\\u0000-\u001f\u007f]/.test(value)
     && !/^[a-z][a-z0-9+.-]*:/i.test(value)
-    && value.split('/').every(segment => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(segment) && segment !== '.' && segment !== '..')
+    && value.split('/').every(segment => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(segment)
+      && segment !== '.'
+      && segment !== '..'
+      && !segment.endsWith('.')
+      && !segment.endsWith(' ')
+      && !windowsDeviceName.test(segment))
+}
+
+function assertRegisteredArtifactPath(path: string): ArtifactPathRegistration {
+  const registration = artifactPathRegistrations.get(path)
+  if (registration === undefined) throw new Error('unsafe artifact path')
+
+  const root = resolve(registration.root)
+  const destination = resolve(root, ...registration.key.split('/'))
+  assertContainedPath(root, destination, 'unsafe artifact path')
+  if (destination !== registration.destination || destination !== path) throw new Error('unsafe artifact path')
+  return registration
+}
+
+function assertContainedPath(root: string, destination: string, message: string): void {
+  const pathFromRoot = relative(root, destination)
+  if (pathFromRoot === '' || pathFromRoot === '..' || pathFromRoot.startsWith(`..${sep}`)) throw new Error(message)
 }
 
 function record(value: unknown): Record<string, unknown> {
