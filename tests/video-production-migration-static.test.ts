@@ -185,6 +185,8 @@ describe('video production migration', () => {
   it('uses aggregate pgTAP assertions for exact browser and service privileges', () => {
     const databaseTest = readFileSync(databaseTestPath, 'utf8')
 
+    expect(databaseTest).toContain('create extension if not exists pgtap with schema extensions')
+    expect(databaseTest).toContain('set local search_path = public, extensions')
     expect(databaseTest).toContain("values ('public'::name), ('anon'::name), ('authenticated'::name)")
     expect(databaseTest).toContain("array['select', 'insert', 'update', 'delete', 'truncate', 'references', 'trigger']::text[]")
     expect(databaseTest).toContain('has_table_privilege(client_role.role_name, private_table.table_name, table_privilege.privilege_name)')

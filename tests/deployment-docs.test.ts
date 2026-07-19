@@ -158,6 +158,7 @@ it('documents the complete resumable local video production workflow', () => {
   expect(workflow).toContain('npx supabase db push --dry-run --linked')
   expect(workflow).toContain('npx supabase db push --linked')
   expect(workflow).toContain('npx supabase test db --linked supabase/tests/database/video_production.sql')
+  expect(workflow).toContain('npx supabase db query --linked --file supabase/tests/database/video_production.sql')
   expect(workflow).toContain('npx supabase functions deploy video-production-metadata --no-verify-jwt')
   expect(workflow).toContain('$plan = npm run --silent video -- plan --theme "Crossing darkness toward dawn" --candidate-count 8 --json | ConvertFrom-Json')
   expect(workflow).toContain('npm run video -- produce --manifest $plan.manifestPath --review $plan.reviewPath --max-downloads 4')

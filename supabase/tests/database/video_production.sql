@@ -1,4 +1,6 @@
 begin;
+create extension if not exists pgtap with schema extensions;
+set local search_path = public, extensions;
 select plan(36);
 
 -- 1-3: private production tables exist

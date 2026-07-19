@@ -225,8 +225,13 @@ migration, focused database test, and metadata deployment in this order:
 npx supabase db push --dry-run --linked
 npx supabase db push --linked
 npx supabase test db --linked supabase/tests/database/video_production.sql
+npx supabase db query --linked --file supabase/tests/database/video_production.sql
 npx supabase functions deploy video-production-metadata --no-verify-jwt
 ```
+
+The `db query` form is the Docker-free fallback for CLI builds where linked
+`test db` still invokes a local container. The test transaction temporarily
+enables pgTAP and rolls back the extension together with all fixture rows.
 
 Local rendering requires `ffmpeg` and `ffprobe` on `PATH`, plus the Microsoft
 YaHei font at the renderer's configured Windows font path. Set the existing
