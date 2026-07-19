@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildStoryboard } from '../src/storyboard.js'
+import { buildStoryboard, StoryboardError } from '../src/storyboard.js'
 import type { SelectedQuote } from '../src/quote-selection.js'
 
 const selectedQuote: SelectedQuote = {
@@ -43,6 +43,34 @@ describe('buildStoryboard', () => {
       expect(scene.visualTheme).not.toContain(selectedQuote.text.trim())
       expect(scene.visualTheme).not.toContain(selectedQuote.movieTitle)
     }
+  })
+
+  it('fails closed when normalized quote text equals the fixed quote visual theme', () => {
+    const collidingQuote = {
+      ...selectedQuote,
+      text: '  A SOLITARY TRAVELER REACHING A RIDGE AS STORM CLOUDS BREAK AND FIRST LIGHT APPEARS, CINEMATIC WIDE SHOT  ',
+    }
+
+    expect(() => buildStoryboard(collidingQuote, 'caption')).toThrowError(StoryboardError)
+    expect(() => buildStoryboard(collidingQuote, 'caption')).toThrowError(
+      expect.objectContaining({ code: 'unsafe_visual_collision' }),
+    )
+  })
+
+  it('fails closed when normalized quote text is contained in the fixed quote visual theme', () => {
+    const collidingQuote = { ...selectedQuote, text: '  STORM CLOUDS BREAK  ' }
+
+    expect(() => buildStoryboard(collidingQuote, 'caption')).toThrowError(
+      expect.objectContaining({ code: 'unsafe_visual_collision' }),
+    )
+  })
+
+  it('fails closed when the movie title is contained in the fixed quote visual theme', () => {
+    const collidingQuote = { ...selectedQuote, movieTitle: 'Storm Clouds Break' }
+
+    expect(() => buildStoryboard(collidingQuote, 'caption')).toThrowError(
+      expect.objectContaining({ code: 'unsafe_visual_collision' }),
+    )
   })
 
   it('stores source fields only on the quote scene', () => {

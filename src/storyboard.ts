@@ -20,6 +20,15 @@ export interface Storyboard {
   scenes: StoryboardScene[]
 }
 
+export class StoryboardError extends Error {
+  readonly code = 'unsafe_visual_collision' as const
+
+  constructor() {
+    super('unsafe visual collision')
+    this.name = 'StoryboardError'
+  }
+}
+
 const originalScenes = [
   {
     captionEn: 'Every night has a horizon.',
@@ -66,5 +75,19 @@ export function buildStoryboard(quote: SelectedQuote, captionZh: string): Storyb
     { index: 3, captionKind: 'original', ...originalScenes[2] },
   ]
 
+  const normalizedQuoteText = normalizeForCollision(quote.text)
+  const normalizedMovieTitle = normalizeForCollision(quote.movieTitle)
+  if (scenes.some(scene => {
+    const normalizedTheme = normalizeForCollision(scene.visualTheme)
+    return normalizedQuoteText !== '' && normalizedTheme.includes(normalizedQuoteText)
+      || normalizedMovieTitle !== '' && normalizedTheme.includes(normalizedMovieTitle)
+  })) {
+    throw new StoryboardError()
+  }
+
   return { scenes }
+}
+
+function normalizeForCollision(value: string): string {
+  return value.trim().toLowerCase()
 }
