@@ -133,6 +133,8 @@ export function validateFinalMediaProbe(
     || probe.durationMs > expected.durationSeconds * 1_000 + durationToleranceMs
     || probe.videoCodec !== 'h264'
     || probe.audioCodec !== 'aac'
+    || probe.audioSampleRate !== 48_000
+    || probe.audioChannels !== 2
     || probe.pixelFormat !== 'yuv420p') {
     throw new Error('invalid final media')
   }

@@ -107,6 +107,7 @@ describe('FFmpeg argument builders', () => {
       '-c:a', 'aac',
       '-b:a', '192k',
       '-ar', '48000',
+      '-ac', '2',
       '-movflags', '+faststart',
       '-t', '30',
     ]))
@@ -192,12 +193,19 @@ describe('real local FFmpeg render', () => {
     })
 
     const finalProbe = await probeMedia(finalPath)
-    expect(finalProbe).toMatchObject({ width: 320, height: 180, videoCodec: 'h264', audioCodec: 'aac' })
+    expect(finalProbe).toMatchObject({
+      width: 320,
+      height: 180,
+      videoCodec: 'h264',
+      audioCodec: 'aac',
+      audioSampleRate: 48_000,
+      audioChannels: 2,
+    })
     expect(finalProbe.durationMs).toBeGreaterThanOrEqual(3_900)
     expect(finalProbe.durationMs).toBeLessThanOrEqual(4_100)
     expect((await fs.stat(contactSheetPath)).size).toBeGreaterThan(0)
     expect(result.blackFrames.every(frame => frame.durationSeconds <= 1)).toBe(true)
-    expect(result.finalProbe.audioCodec).toBe('aac')
+    expect(result.finalProbe).toMatchObject({ audioCodec: 'aac', audioSampleRate: 48_000, audioChannels: 2 })
   }, 120_000)
 })
 

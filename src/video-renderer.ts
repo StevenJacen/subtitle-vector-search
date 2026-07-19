@@ -136,6 +136,7 @@ export function buildFinalRenderArgs(
     '-c:a', 'aac',
     '-b:a', '192k',
     '-ar', '48000',
+    '-ac', '2',
     '-movflags', '+faststart',
     '-t', formatNumber(render.totalDurationSeconds),
     '-y',

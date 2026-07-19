@@ -95,6 +95,8 @@ describe('validateFinalMediaProbe', () => {
     ['long duration', { durationMs: 31_001 }],
     ['video codec', { videoCodec: 'hevc' }],
     ['audio codec', { audioCodec: 'opus' }],
+    ['audio sample rate', { audioSampleRate: 44_100 }],
+    ['audio channels', { audioChannels: 1 }],
     ['pixel format', { pixelFormat: 'yuv444p' }],
   ])('rejects final output with invalid %s', (_name, change) => {
     expect(() => validateFinalMediaProbe({ ...finalProbe, ...change })).toThrow('invalid final media')
