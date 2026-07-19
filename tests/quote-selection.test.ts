@@ -77,11 +77,38 @@ describe('selectExactQuote', () => {
     expect(selectExactQuote([lower, higher]).cueIndex).toBe(2)
   })
 
+  it('prefers a query-relevant cue over a shorter aside in the same matched chunk', () => {
+    const result = searchResult({ cues: [
+      cue(1, 'What are you talking about now?', 0, 1_700),
+      cue(2, 'Yet hope remains while the Company is true.', 2_000, 6_580),
+    ] })
+
+    expect(selectExactQuote(
+      [result],
+      'hope after hardship, moving through darkness toward dawn, resilience and a new beginning',
+    ).cueIndex).toBe(2)
+  })
+
   it('breaks equal-similarity ties by shorter cue duration', () => {
     const longer = searchResult({ similarity: 0.8, cues: [cue(1, 'same score quote here today', 0, 8_000)] })
     const shorter = searchResult({ similarity: 0.8, cues: [cue(2, 'same score quote here today', 10_000, 14_000)] })
 
     expect(selectExactQuote([longer, shorter]).cueIndex).toBe(2)
+  })
+
+  it('does not use query hits to replace cross-result duration tie-breaking', () => {
+    const relevantLonger = searchResult({
+      similarity: 0.8,
+      chunkIndex: 1,
+      cues: [cue(1, 'Hope remains with us through every hardship', 0, 8_000)],
+    })
+    const unrelatedShorter = searchResult({
+      similarity: 0.8,
+      chunkIndex: 2,
+      cues: [cue(2, 'What are you talking about now?', 10_000, 14_000)],
+    })
+
+    expect(selectExactQuote([relevantLonger, unrelatedShorter], 'hope after hardship').cueIndex).toBe(2)
   })
 
   it('breaks remaining ties by movie, track, then cue identifiers', () => {

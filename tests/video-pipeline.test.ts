@@ -74,7 +74,10 @@ describe('video pipeline', () => {
     }, harness.dependencies)
 
     expect(result.planId).toMatch(planIdPattern)
-    expect(harness.subtitleApi.search).toHaveBeenCalledWith({ query: 'hope during hard times', limit: 20 })
+    expect(harness.subtitleApi.search).toHaveBeenCalledWith({
+      query: 'hope after hardship, moving through darkness toward dawn, resilience and a new beginning',
+      limit: 20,
+    })
     expect(harness.productionApi.matchScene).toHaveBeenCalledTimes(4)
     expect(harness.productionApi.matchScene.mock.calls.map(([input]) => input)).toEqual([
       { theme: 'dark rain clouds moving over a remote landscape before dawn, cinematic wide shot', candidateCount: 8 },

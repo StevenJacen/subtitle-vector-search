@@ -137,7 +137,7 @@ interface RunTransitionState {
   phase: TransitionPhase
 }
 
-const CANONICAL_QUOTE_QUERY = 'hope during hard times'
+const CANONICAL_QUOTE_QUERY = 'hope after hardship, moving through darkness toward dawn, resilience and a new beginning'
 const PENDING_DIGEST = '0'.repeat(64)
 const REVIEW_FILE = 'review-input.json'
 const CANDIDATE_FILE = 'review-candidates.json'
@@ -154,7 +154,7 @@ export async function planVideo(
 ): Promise<VideoPlanPaths> {
   validatePlanInput(input)
   const results = await dependencies.subtitleApi.search({ query: CANONICAL_QUOTE_QUERY, limit: 20 })
-  const quote = selectExactQuote(results)
+  const quote = selectExactQuote(results, CANONICAL_QUOTE_QUERY)
   const storyboard = buildStoryboard(quote, 'REVIEW_REQUIRED')
   const matches: VideoAssetMatchResponse[] = []
   for (const scene of storyboard.scenes) {

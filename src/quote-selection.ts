@@ -26,9 +26,10 @@ export class QuoteSelectionError extends Error {
 
 const englishWordPattern = /[A-Za-z]+(?:'[A-Za-z]+)?/g
 
-export function selectExactQuote(results: SubtitleSearchResult[]): SelectedQuote {
-  const preferred = findCandidate(results, 5, 18, 8_000)
-  const candidate = preferred ?? findCandidate(results, 3, 24, 10_000)
+export function selectExactQuote(results: SubtitleSearchResult[], query = ''): SelectedQuote {
+  const queryWords = contentWords(query)
+  const preferred = findCandidate(results, queryWords, 5, 18, 8_000)
+  const candidate = preferred ?? findCandidate(results, queryWords, 3, 24, 10_000)
 
   if (candidate === undefined) throw new QuoteSelectionError()
 
@@ -50,11 +51,18 @@ interface Candidate {
   result: SubtitleSearchResult
   cue: Cue
   durationMs: number
+  queryHits: number
+  resultOrder: number
   order: number
 }
 
+const queryStopWords = new Set([
+  'a', 'an', 'and', 'after', 'for', 'in', 'of', 'on', 'the', 'through', 'to', 'toward', 'with',
+])
+
 function findCandidate(
   results: SubtitleSearchResult[],
+  queryWords: Set<string>,
   minimumWords: number,
   maximumWords: number,
   maximumDurationMs: number,
@@ -62,7 +70,7 @@ function findCandidate(
   const candidates: Candidate[] = []
   let order = 0
 
-  for (const result of results) {
+  for (const [resultOrder, result] of results.entries()) {
     for (const cue of result.cues) {
       const trimmedText = cue.text.trim()
       const words = trimmedText.match(englishWordPattern)?.length ?? 0
@@ -74,7 +82,14 @@ function findCandidate(
         order += 1
         continue
       }
-      candidates.push({ result, cue, durationMs, order })
+      candidates.push({
+        result,
+        cue,
+        durationMs,
+        queryHits: countQueryHits(trimmedText, queryWords),
+        resultOrder,
+        order,
+      })
       order += 1
     }
   }
@@ -91,12 +106,33 @@ function findCandidate(
 }
 
 function compareCandidates(left: Candidate, right: Candidate): number {
-  return right.result.similarity - left.result.similarity
-    || left.durationMs - right.durationMs
+  const similarity = right.result.similarity - left.result.similarity
+  if (similarity !== 0) return similarity
+
+  if (left.resultOrder === right.resultOrder) {
+    return right.queryHits - left.queryHits
+      || left.cue.index - right.cue.index
+      || left.order - right.order
+  }
+
+  return left.durationMs - right.durationMs
     || left.result.movie.id - right.result.movie.id
     || left.result.trackId - right.result.trackId
     || left.cue.index - right.cue.index
     || left.order - right.order
+}
+
+function contentWords(text: string): Set<string> {
+  return new Set((text.toLowerCase().match(englishWordPattern) ?? [])
+    .filter(word => !queryStopWords.has(word)))
+}
+
+function countQueryHits(text: string, queryWords: Set<string>): number {
+  let matches = 0
+  for (const word of new Set(text.toLowerCase().match(englishWordPattern) ?? [])) {
+    if (queryWords.has(word)) matches += 1
+  }
+  return matches
 }
 
 function isRejectedCue(text: string): boolean {
