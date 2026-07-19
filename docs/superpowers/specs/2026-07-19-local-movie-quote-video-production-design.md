@@ -271,9 +271,11 @@ six actions:
 The function uses service-role-only SQL RPCs for state transitions. Requests
 contain stable metadata only. The function rejects URL-shaped artifact keys and
 rejects any unrecognized fields so a signed provider URL cannot be persisted by
-mistake. `recordDownload` accepts a selection ID but does not trust a caller-
-supplied provider or resource ID; its RPC resolves both values through the
-selected candidate and stores that authoritative snapshot.
+mistake. `recordDownload` accepts a selection ID but does not trust caller-
+supplied candidate, provider, or resource IDs; its RPC resolves all three
+values through the selected candidate and stores that authoritative snapshot.
+Once a selection has a download record, `select-video-asset` must reject
+replacement with `409 selection_locked` so historical provenance cannot change.
 
 ## Database Design
 
@@ -311,7 +313,8 @@ controlled failure code and no `completed_at`.
 
 - `id bigint generated always as identity primary key`
 - `render_id uuid not null references public.video_render_jobs(id)`
-- `selection_id bigint not null unique references public.video_asset_selections(id)`
+- `selection_id bigint not null unique`
+- `candidate_id bigint not null`
 - `provider text not null default 'vecteezy'`
 - `provider_resource_id bigint not null`
 - `artifact_key text not null`
@@ -330,12 +333,15 @@ controlled failure code and no `completed_at`.
 - `quota_remaining integer null`
 - `downloaded_at timestamptz not null default now()`
 
-Use a unique `(render_id, provider_resource_id)` constraint in addition to the
-unique selection, plus unique `(render_id, id)` to support an ownership foreign
-key from timeline segments. Require exactly `vecteezy`, positive technical
-values, an MP4 file type, valid SHA-256, and a stable relative artifact key.
-Attribution URL is the only allowed URL field and is accepted only when
-attribution is required. There is deliberately no download-URL column.
+Add unique `(id, candidate_id)` to `video_asset_selections`, then use a composite
+foreign key from download `(selection_id, candidate_id)` to selection
+`(id, candidate_id)` with updates restricted. This freezes the candidate behind
+a downloaded selection. Also use unique `(render_id, provider_resource_id)` and
+unique `(render_id, id)` to support timeline ownership. Require exactly
+`vecteezy`, positive technical values, an MP4 file type, valid SHA-256, and a
+stable relative artifact key. Attribution URL is the only allowed URL field and
+is accepted only when attribution is required. There is deliberately no
+download-URL column.
 
 ### `video_render_segments`
 
