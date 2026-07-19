@@ -209,6 +209,78 @@ migration to remove the five private matching tables and their RPCs only when
 their audit records are no longer needed. Do not call Vecteezy media or download
 routes as part of rollback.
 
+## Local Video Production
+
+This resumable workflow keeps every source clip, review file, subtitle file,
+render, contact sheet, manifest, and retry record under ignored `artifacts/`.
+There is no Storage upload: media remains on the trusted operator machine. The
+three private metadata tables are `video_render_jobs`, `video_asset_downloads`,
+and `video_render_segments`.
+
+Remote-only migration and database testing are required for this workflow.
+Review the linked project before applying changes, then run the dry run,
+migration, focused database test, and metadata deployment in this order:
+
+```powershell
+npx supabase db push --dry-run --linked
+npx supabase db push --linked
+npx supabase test db --linked supabase/tests/database/video_production.sql
+npx supabase functions deploy video-production-metadata --no-verify-jwt
+```
+
+Local rendering requires `ffmpeg` and `ffprobe` on `PATH`, plus the Microsoft
+YaHei font at the renderer's configured Windows font path. Set the existing
+Supabase, subtitle token, Vecteezy, and planner environment values in `.env`.
+The plan command requires only `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, and
+`SUBTITLE_PERSONAL_TOKEN`; produce and resume also require `VECTEEZY_ACCOUNT`
+and `VECTEEZY_API_KEY`.
+
+Create a plan with the approved generic theme:
+
+```powershell
+$plan = npm run --silent video -- plan --theme "Crossing darkness toward dawn" --candidate-count 8 --json | ConvertFrom-Json
+```
+
+The command emits one path-only JSON object and writes the same pointer to
+`artifacts/latest-plan.json`. Planning searches the private subtitle index,
+protects the exact quote so it is never trimmed or rewritten, and creates four
+generic visual searches. It sends no dialogue to Ollama. Plan does not consume
+any Vecteezy download quota and makes no formal download request.
+
+Open the generated `review-candidates.json` beside `$plan.reviewPath`, inspect
+its temporary previews locally, and fill the strict `review-input.json` with a
+reviewed Chinese quote translation, one listed resource ID per scene, a review
+note, and a nonnegative source in-point. Review must finish before `produce`.
+Do not paste signed or status URLs into the input.
+
+```powershell
+npm run video -- produce --manifest $plan.manifestPath --review $plan.reviewPath --max-downloads 4
+```
+
+The production contract has a hard exactly-four-download budget. The runner
+preflights sizes, records four manual selections, starts one idempotent render
+job, then permits at most four formal provider calls. Matching local hashes are
+reused. A failed transfer or render preserves verified source files for resume,
+and a completed local manifest is immutable even when remote completion needs
+another attempt.
+
+In a later PowerShell session, resume from the current render-owned path rather
+than guessing a UUID:
+
+```powershell
+$active = Get-Content -Raw artifacts/latest-plan.json | ConvertFrom-Json
+npm run video -- resume --manifest $active.manifestPath
+```
+
+### Rollback and deactivation
+
+Stop `video produce` and `video resume`, then delete or deactivate the
+`video-production-metadata` function deployment. Existing local files remain
+under ignored `artifacts/` and are not uploaded. Remove `video_render_segments`,
+`video_asset_downloads`, and `video_render_jobs` only through a reviewed
+follow-up migration after their audit records are no longer required. The
+subtitle search and candidate matching workflows remain independent.
+
 ## Movie Quote Montage
 
 `movie-quote-montage` accepts an English theme and returns a deterministic montage of exact stored subtitle chunks. It limits how many chunks can come from one movie, so a single title does not dominate the result. The `copy` field joins the selected chunks with blank lines; it is retrieved dialogue, not newly generated prose.
