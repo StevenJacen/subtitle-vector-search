@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import * as fs from 'node:fs/promises'
-import { dirname, join, relative } from 'node:path'
+import { dirname, join, relative, sep } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   artifactKey,
@@ -147,6 +147,87 @@ describe('video run manifests', () => {
     expect(await fs.readdir(dirname(path))).toEqual(['manifest.json'])
   })
 
+  it('uses an exclusively created temporary path accepted by artifact containment', async () => {
+    const root = await temporaryRoot()
+    const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
+
+    await writeManifestAtomic(path, manifest)
+
+    const [temporaryPath, , options] = vi.mocked(fs.writeFile).mock.calls.at(-1)!
+    const temporaryKey = relative(root, String(temporaryPath)).split(sep).join('/')
+    expect(() => resolveArtifactPath(root, temporaryKey)).not.toThrow()
+    expect(options).toMatchObject({ encoding: 'utf8', flag: 'wx' })
+  })
+
+  it('rejects an existing in-root symlink or junction without touching its external target', async context => {
+    const root = await temporaryRoot()
+    const external = await temporaryRoot()
+    const runDirectory = join(root, 'video-runs', renderId)
+    await fs.mkdir(dirname(runDirectory), { recursive: true })
+    await fs.writeFile(join(external, 'sentinel.txt'), 'untouched')
+    try {
+      await fs.symlink(external, runDirectory, process.platform === 'win32' ? 'junction' : 'dir')
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'EPERM') {
+        context.skip('symlink or junction creation is not permitted on this Windows host')
+        return
+      }
+      throw error
+    }
+    const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
+
+    await expect(writeManifestAtomic(path, manifest)).rejects.toThrow('unsafe artifact path')
+
+    expect(await fs.readdir(external)).toEqual(['sentinel.txt'])
+    expect(await fs.readFile(join(external, 'sentinel.txt'), 'utf8')).toBe('untouched')
+  })
+
+  it('rejects a parent changed to an external junction after the temporary write', async context => {
+    const root = await temporaryRoot()
+    const external = await temporaryRoot()
+    const runDirectory = join(root, 'video-runs', renderId)
+    const movedDirectory = join(root, 'moved-run')
+    const probe = join(root, 'junction-probe')
+    const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
+    const output = { artifactKey: artifactKey(renderId, 'final.mp4'), sha256: 'c'.repeat(64) }
+    const completed: VideoRunManifest = { ...manifest, output, stage: 'completed' }
+    const completedBytes = `${JSON.stringify({
+      version: manifest.version,
+      planId: manifest.planId,
+      renderId: manifest.renderId,
+      requestDigest: manifest.requestDigest,
+      theme: manifest.theme,
+      quote: manifest.quote,
+      scenes: manifest.scenes,
+      output,
+      stage: 'completed',
+      createdAt: manifest.createdAt,
+      updatedAt: manifest.updatedAt,
+    }, null, 2)}\n`
+    const actualFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
+    try {
+      await actualFs.symlink(external, probe, process.platform === 'win32' ? 'junction' : 'dir')
+      await actualFs.rm(probe)
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'EPERM') {
+        context.skip('symlink or junction creation is not permitted on this Windows host')
+        return
+      }
+      throw error
+    }
+    await actualFs.writeFile(join(external, 'manifest.json'), completedBytes)
+    vi.mocked(fs.writeFile).mockImplementationOnce(async (file, data, options) => {
+      await actualFs.writeFile(file, data, options)
+      await actualFs.rename(runDirectory, movedDirectory)
+      await actualFs.symlink(external, runDirectory, process.platform === 'win32' ? 'junction' : 'dir')
+    })
+
+    await expect(writeManifestAtomic(path, completed)).rejects.toThrow('unsafe artifact path')
+
+    expect(await actualFs.readdir(external)).toEqual(['manifest.json'])
+    expect(await actualFs.readFile(join(external, 'manifest.json'), 'utf8')).toBe(completedBytes)
+  })
+
   it.each(['absolute', 'relative'])('rejects an unregistered %s manifest path before writing', async kind => {
     const root = await temporaryRoot()
     const absolutePath = join(root, `${kind}-manifest.json`)
@@ -189,6 +270,8 @@ describe('video run manifests', () => {
     'https://provider.test/license',
     'See https://provider.test/license for attribution.',
     'Provider value: https://signed.test/X-Amz-Signature?value=abc',
+    '//provider.test/license',
+    'Provider value: //provider.test/license',
   ])('rejects a URL stored outside requiredAttributionUrl in note value %j', async note => {
     const root = await temporaryRoot()
     const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
@@ -262,6 +345,14 @@ describe('video run manifests', () => {
     'https://provider.test/license?policy=abc',
     'https://provider.test/license?expires=123',
     'https://provider.test/license?key-pair-id=abc',
+    'https://provider.test/license?api_key=abc',
+    'https://provider.test/license?apikey=abc',
+    'https://provider.test/license?access_key=abc',
+    'https://provider.test/license?accesskey=abc',
+    'https://provider.test/license?sig=abc',
+    'https://provider.test/license?auth=abc',
+    'https://provider.test/license?X-Amz-Date=20260719T000000Z',
+    'https://provider.test/license?X-Goog-Signature=abc',
     'https://provider.test/license#authorization',
   ])('rejects unsafe required attribution URL %j', async requiredAttributionUrl => {
     const root = await temporaryRoot()
@@ -277,6 +368,23 @@ describe('video run manifests', () => {
     }
 
     await expect(writeManifestAtomic(path, value)).rejects.toThrow('invalid manifest')
+  })
+
+  it.each([
+    'api_key',
+    'apikey',
+    'access_key',
+    'accesskey',
+    'sig',
+    'auth',
+    'x-amz-date',
+    'x-goog-signature',
+    'credential',
+    'policy',
+    'expires',
+    'key-pair-id',
+  ])('rejects sensitive recursive field name %j', key => {
+    expect(() => canonicalRequestDigestInput({ metadata: { [key]: 'redacted' } })).toThrow('invalid manifest')
   })
 
   it.each(['source', 'output'])('rejects a cross-run %s artifact key', async kind => {
@@ -330,7 +438,66 @@ describe('video run manifests', () => {
 
     expect(await fs.readFile(firstPath, 'utf8')).toBe(await fs.readFile(secondPath, 'utf8'))
   })
+
+  it('writes completed bytes once and performs no filesystem rewrite for an identical retry', async () => {
+    const root = await temporaryRoot()
+    const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
+    const output = { artifactKey: artifactKey(renderId, 'final.mp4'), sha256: 'c'.repeat(64) }
+    const completed: VideoRunManifest = { ...manifest, output, stage: 'completed' }
+    const expectedBytes = `${JSON.stringify({
+      version: manifest.version,
+      planId: manifest.planId,
+      renderId: manifest.renderId,
+      requestDigest: manifest.requestDigest,
+      theme: manifest.theme,
+      quote: manifest.quote,
+      scenes: manifest.scenes,
+      output,
+      stage: 'completed',
+      createdAt: manifest.createdAt,
+      updatedAt: manifest.updatedAt,
+    }, null, 2)}\n`
+
+    await writeManifestAtomic(path, completed)
+
+    expect(await fs.readFile(path, 'utf8')).toBe(expectedBytes)
+    expect(await sha256File(path)).toBe(createHash('sha256').update(expectedBytes).digest('hex'))
+    expect(expectedBytes).not.toContain('manifestSha256')
+    vi.mocked(fs.writeFile).mockClear()
+    vi.mocked(fs.rename).mockClear()
+
+    await writeManifestAtomic(path, completed)
+
+    expect(vi.mocked(fs.writeFile)).not.toHaveBeenCalled()
+    expect(vi.mocked(fs.rename)).not.toHaveBeenCalled()
+    expect(await fs.readFile(path, 'utf8')).toBe(expectedBytes)
+  })
+
+  it('rejects a changed retry after completion and preserves the completed bytes', async () => {
+    const root = await temporaryRoot()
+    const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
+    const completed: VideoRunManifest = {
+      ...manifest,
+      output: { artifactKey: artifactKey(renderId, 'final.mp4'), sha256: 'c'.repeat(64) },
+      stage: 'completed',
+    }
+    await writeManifestAtomic(path, completed)
+    const originalBytes = await fs.readFile(path, 'utf8')
+    vi.mocked(fs.writeFile).mockClear()
+    vi.mocked(fs.rename).mockClear()
+
+    await expect(writeManifestAtomic(path, { ...completed, theme: 'Changed after completion' }))
+      .rejects.toThrow('completed_manifest_immutable')
+
+    expect(vi.mocked(fs.writeFile)).not.toHaveBeenCalled()
+    expect(vi.mocked(fs.rename)).not.toHaveBeenCalled()
+    expect(await fs.readFile(path, 'utf8')).toBe(originalBytes)
+  })
 })
+
+function isNodeError(value: unknown): value is NodeJS.ErrnoException {
+  return value instanceof Error && 'code' in value
+}
 
 describe('local file reuse', () => {
   it('streams a lower-case SHA-256 and reuses only exact source and output hashes', async () => {

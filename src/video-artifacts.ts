@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 
 export type VideoRunStage = 'review' | 'downloading' | 'rendering' | 'completed' | 'failed'
@@ -93,8 +93,8 @@ const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}
 const sha256Pattern = /^[0-9a-f]{64}$/
 const stageValues = new Set<VideoRunStage>(['review', 'downloading', 'rendering', 'completed', 'failed'])
 const forbiddenArtifactTerm = /url|token|secret|authorization/i
-const sensitiveUrlVocabulary = /(?:signed|status|download|signature|x-amz-[a-z0-9-]*|token|secret|credential|policy|expires|key-pair-id|authorization)/i
-const embeddedUrl = /(?:[a-z][a-z0-9+.-]*:\/\/|(?:https?|ftp|file|data|mailto):)[^\s<>"']+/gi
+const sensitiveUrlVocabulary = /(?:signed|status|download|signature|x-amz-[a-z0-9-]*|x-goog-[a-z0-9-]*|api[_-]?key|access[_-]?key|token|secret|credential|policy|expires|key-pair-id|authorization|(?:^|[^a-z0-9])(?:sig|auth)(?:$|[^a-z0-9]))/i
+const embeddedUrl = /(?:[a-z][a-z0-9+.-]*:\/\/|(?:https?|ftp|file|data|mailto):|\/\/[a-z0-9.-]+)[^\s<>"']*/gi
 const windowsDeviceName = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i
 const artifactPathRegistrations = new Map<string, ArtifactPathRegistration>()
 
@@ -120,20 +120,41 @@ export async function sha256File(path: string): Promise<string> {
 }
 
 export async function writeManifestAtomic(path: ResolvedArtifactPath, manifest: VideoRunManifest): Promise<void> {
-  assertRegisteredArtifactPath(path)
+  const registration = assertRegisteredArtifactPath(path)
   const parsed = parseManifest(manifest)
   const directory = dirname(path)
   const bytes = `${JSON.stringify(serializableManifest(parsed), null, 2)}\n`
 
+  await mkdir(registration.root, { recursive: true })
+  await assertPhysicalArtifactParent(registration)
   await mkdir(directory, { recursive: true })
-  assertRegisteredArtifactPath(path)
-  const temporary = join(directory, `.${randomUUID()}.manifest.tmp`)
+  await assertPhysicalArtifactParent(registration)
+  if (await identicalCompletedManifest(path, bytes)) return
+
+  const temporaryKey = temporaryArtifactKey(registration.key)
+  const temporary = resolveArtifactPath(registration.root, temporaryKey)
+  const temporaryRegistration = assertRegisteredArtifactPath(temporary)
+  let temporaryWritten = false
   try {
+    await assertPhysicalArtifactParent(registration)
+    await assertPhysicalArtifactParent(temporaryRegistration)
     await writeFile(temporary, bytes, { encoding: 'utf8', flag: 'wx' })
+    temporaryWritten = true
     assertRegisteredArtifactPath(path)
+    assertRegisteredArtifactPath(temporary)
+    await assertPhysicalArtifactParent(registration)
+    await assertPhysicalArtifactParent(temporaryRegistration)
+    if (await identicalCompletedManifest(path, bytes)) {
+      await assertPhysicalArtifactParent(registration)
+      await assertPhysicalArtifactParent(temporaryRegistration)
+      await removeValidatedTemporary(temporary, temporaryRegistration)
+      return
+    }
+    await assertPhysicalArtifactParent(registration)
+    await assertPhysicalArtifactParent(temporaryRegistration)
     await rename(temporary, path)
   } catch (error) {
-    await rm(temporary, { force: true }).catch(() => undefined)
+    if (temporaryWritten) await removeValidatedTemporary(temporary, temporaryRegistration)
     throw error
   }
 }
@@ -386,6 +407,16 @@ function isForbiddenManifestKey(key: string): boolean {
     || normalized.includes('token')
     || normalized.includes('secret')
     || normalized.includes('authorization')
+    || normalized.includes('apikey')
+    || normalized.includes('accesskey')
+    || normalized.startsWith('xamz')
+    || normalized.startsWith('xgoog')
+    || normalized.includes('credential')
+    || normalized.includes('policy')
+    || normalized.includes('expires')
+    || normalized.includes('keypairid')
+    || normalized === 'sig'
+    || normalized === 'auth'
 }
 
 function stableAttributionUrl(value: unknown): boolean {
@@ -397,6 +428,7 @@ function stableAttributionUrl(value: unknown): boolean {
       && url.hostname !== ''
       && url.username === ''
       && url.password === ''
+      && !Array.from(url.searchParams.keys()).some(isForbiddenManifestKey)
       && !sensitiveUrlVocabulary.test(components)
   } catch {
     return false
@@ -407,7 +439,7 @@ function containsUrl(value: string): boolean {
   embeddedUrl.lastIndex = 0
   return Array.from(value.matchAll(embeddedUrl)).some(match => {
     try {
-      new URL(match[0])
+      new URL(match[0].startsWith('//') ? `https:${match[0]}` : match[0])
       return true
     } catch {
       return false
@@ -482,6 +514,81 @@ function assertRegisteredArtifactPath(path: string): ArtifactPathRegistration {
   assertContainedPath(root, destination, 'unsafe artifact path')
   if (destination !== registration.destination || destination !== path) throw new Error('unsafe artifact path')
   return registration
+}
+
+async function identicalCompletedManifest(path: string, proposedBytes: string): Promise<boolean> {
+  let stats
+  try {
+    stats = await lstat(path)
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return false
+    throw new Error('unsafe artifact path')
+  }
+  if (stats.isSymbolicLink() || !stats.isFile()) throw new Error('unsafe artifact path')
+
+  const existingBytes = await readFile(path, 'utf8')
+  let existing: VideoRunManifest
+  try {
+    existing = parseManifest(JSON.parse(existingBytes))
+  } catch {
+    return false
+  }
+  if (existing.stage !== 'completed') return false
+  if (existingBytes === proposedBytes) return true
+  throw new Error('completed_manifest_immutable')
+}
+
+async function assertPhysicalArtifactParent(registration: ArtifactPathRegistration): Promise<void> {
+  const rootStats = await lstat(registration.root).catch(() => {
+    throw new Error('unsafe artifact path')
+  })
+  if (rootStats.isSymbolicLink() || !rootStats.isDirectory()) throw new Error('unsafe artifact path')
+  const realRoot = await realpath(registration.root).catch(() => {
+    throw new Error('unsafe artifact path')
+  })
+  const parentSegments = registration.key.split('/').slice(0, -1)
+  let current = registration.root
+
+  for (const segment of parentSegments) {
+    current = join(current, segment)
+    let stats
+    try {
+      stats = await lstat(current)
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'ENOENT') break
+      throw new Error('unsafe artifact path')
+    }
+    if (stats.isSymbolicLink() || !stats.isDirectory()) throw new Error('unsafe artifact path')
+    const realParent = await realpath(current).catch(() => {
+      throw new Error('unsafe artifact path')
+    })
+    assertPhysicallyContained(realRoot, realParent)
+  }
+}
+
+async function removeValidatedTemporary(path: string, registration: ArtifactPathRegistration): Promise<void> {
+  try {
+    await assertPhysicalArtifactParent(registration)
+    await rm(path, { force: true })
+  } catch {
+    // Leave an unreachable temporary file behind rather than follow a changed parent.
+  }
+}
+
+function temporaryArtifactKey(key: string): string {
+  const segments = key.split('/')
+  const filename = segments.pop()
+  if (filename === undefined) throw new Error('unsafe artifact path')
+  return [...segments, `${filename}.tmp-${randomUUID()}`].join('/')
+}
+
+function assertPhysicallyContained(realRoot: string, realParent: string): void {
+  const pathFromRoot = relative(realRoot, realParent)
+  if (pathFromRoot === '..' || pathFromRoot.startsWith(`..${sep}`)) throw new Error('unsafe artifact path')
+}
+
+function isNodeError(value: unknown): value is NodeJS.ErrnoException {
+  return value instanceof Error && 'code' in value
 }
 
 function assertContainedPath(root: string, destination: string, message: string): void {
