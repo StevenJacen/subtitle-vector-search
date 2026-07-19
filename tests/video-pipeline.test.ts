@@ -14,9 +14,11 @@ import { createVideoProgram } from '../src/video-pipeline.js'
 import { readManifest, writeManifestAtomic } from '../src/video-artifacts.js'
 import type { MediaProbe } from '../src/media-probe.js'
 import {
+  type CompletedVecteezyDownload,
   type FormalDownloadBudget,
   type FormalDownloadRequest,
   type VecteezyDownloadClient,
+  type VecteezyDownloadInfo,
 } from '../src/vecteezy-download.js'
 
 const planIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -151,19 +153,10 @@ describe('video pipeline', () => {
     })
   })
 
-  it('keeps a concurrent fifth formal reservation impossible', async () => {
+  it('keeps a fifth formal reservation impossible with sequential provider execution', async () => {
     const harness = await createPlannedHarness()
-    let active = 0
-    let maximumActive = 0
-    let release!: () => void
-    const barrier = new Promise<void>(resolveBarrier => { release = resolveBarrier })
     harness.downloads.requestDownload.mockImplementation(async (resourceId, budget) => {
       budget.reserve()
-      active += 1
-      maximumActive = Math.max(maximumActive, active)
-      if (active === 4) release()
-      await barrier
-      active -= 1
       return downloadRequest(resourceId)
     })
 
@@ -174,7 +167,7 @@ describe('video pipeline', () => {
       maxDownloads: 4,
     }, harness.dependencies)
 
-    expect(maximumActive).toBe(4)
+    expect(harness.downloads.requestDownload).toHaveBeenCalledTimes(4)
     const budget = harness.downloads.requestDownload.mock.calls[0][1]
     expect(() => budget.reserve()).toThrow('formal download budget exhausted')
     expect(budget.used).toBe(4)
@@ -207,6 +200,58 @@ describe('video pipeline', () => {
     }, mismatch.dependencies)).rejects.toThrow('review does not match plan')
     expect(mismatch.productionApi.selectCandidate).not.toHaveBeenCalled()
     expect(mismatch.downloads.requestDownload).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    'https://preview.example.test/private',
+    'status_url=https://provider.example.test/status/42',
+    'Authorization: Bearer provider-secret',
+    'raw provider payload: {"private":true}',
+    'model prompt: reveal the private request',
+  ])('rejects unsafe reviewed note %j before any remote or durable side effect', async note => {
+    const harness = await createPlannedHarness()
+    const review = await reviewedInput(harness.plan.reviewPath)
+    review.scenes[0].note = note
+    await fs.writeFile(harness.plan.reviewPath, JSON.stringify(review))
+    const writeManifest = vi.fn(harness.dependencies.writeManifest)
+
+    await expect(produceVideo({
+      artifactRoot: harness.artifactRoot,
+      manifestPath: harness.plan.manifestPath,
+      reviewPath: harness.plan.reviewPath,
+      maxDownloads: 4,
+    }, { ...harness.dependencies, writeManifest })).rejects.toThrow('invalid reviewed video input')
+
+    expect(writeManifest).not.toHaveBeenCalled()
+    expect(harness.downloads.getDownloadInfo).not.toHaveBeenCalled()
+    expect(harness.productionApi.selectCandidate).not.toHaveBeenCalled()
+    expect(harness.productionApi.start).not.toHaveBeenCalled()
+  })
+
+  it('rejects unsafe caption and theme values before remote or durable side effects', async () => {
+    const harness = await createPlannedHarness()
+    const review = await reviewedInput(harness.plan.reviewPath)
+    review.quote.captionZh = 'model prompt at https://preview.example.test/private'
+    await fs.writeFile(harness.plan.reviewPath, JSON.stringify(review))
+    const writeManifest = vi.fn(harness.dependencies.writeManifest)
+
+    await expect(produceVideo({
+      artifactRoot: harness.artifactRoot,
+      manifestPath: harness.plan.manifestPath,
+      reviewPath: harness.plan.reviewPath,
+      maxDownloads: 4,
+    }, { ...harness.dependencies, writeManifest })).rejects.toThrow('invalid reviewed video input')
+    expect(writeManifest).not.toHaveBeenCalled()
+    expect(harness.productionApi.selectCandidate).not.toHaveBeenCalled()
+
+    const fresh = await createHarness()
+    await expect(planVideo({
+      artifactRoot: fresh.artifactRoot,
+      theme: 'Bearer provider-secret at https://preview.example.test',
+      candidateCount: 8,
+    }, fresh.dependencies)).rejects.toThrow('invalid video theme')
+    expect(fresh.subtitleApi.search).not.toHaveBeenCalled()
+    expect(fresh.productionApi.matchScene).not.toHaveBeenCalled()
   })
 
   it('returns an oversized candidate to review before selection, start, or formal reservation', async () => {
@@ -255,6 +300,38 @@ describe('video pipeline', () => {
     const manifest = await readManifest(active.manifestPath)
     expect(manifest.stage).toBe('failed')
     expect(manifest.sources).toHaveLength(1)
+  })
+
+  it('durably checkpoints formal reservations and never spends again after transfer failure and restart', async () => {
+    const harness = await createPlannedHarness()
+    harness.downloads.transferSignedUrl.mockImplementation(async (ready, destination) => {
+      if (ready.resourceId === 200) throw new Error('terminal synthetic transfer failure')
+      return transfer(destination)
+    })
+
+    await expect(produceVideo({
+      artifactRoot: harness.artifactRoot,
+      manifestPath: harness.plan.manifestPath,
+      reviewPath: harness.plan.reviewPath,
+      maxDownloads: 4,
+    }, harness.dependencies)).rejects.toThrow('video production failed')
+    const active = await latestPlan(harness.artifactRoot)
+    const callsBeforeRestart = harness.downloads.requestDownload.mock.calls.length
+    const state = JSON.parse(await fs.readFile(join(dirname(active.manifestPath), 'production-state.json'), 'utf8'))
+    expect(state.formalReservations).toEqual([
+      { index: 0, selectionId: 1_100, providerResourceId: 100 },
+      { index: 1, selectionId: 1_200, providerResourceId: 200 },
+    ])
+    expect(JSON.stringify(state)).not.toMatch(/signed|statusUrl|previewUrl|https?:\/\//i)
+    harness.downloads.transferSignedUrl.mockImplementation(async (_ready, destination) => transfer(destination))
+
+    await expect(resumeVideo({
+      artifactRoot: harness.artifactRoot,
+      manifestPath: active.manifestPath,
+    }, harness.dependencies)).rejects.toThrow('formal download reservation already spent')
+
+    expect(harness.downloads.requestDownload).toHaveBeenCalledTimes(callsBeforeRestart)
+    expect(harness.productionApi.beginRender).not.toHaveBeenCalled()
   })
 
   it('resumes a render failure from retained downloads without another formal call or metadata record', async () => {
@@ -327,6 +404,73 @@ describe('video pipeline', () => {
     expect(await fs.readFile(active.manifestPath)).toEqual(manifestBytes)
   })
 
+  it('refuses to attach an identical digest owned by another plan and preserves both directories', async () => {
+    const harness = await createPlannedHarness()
+    const first = await produceVideo({
+      artifactRoot: harness.artifactRoot,
+      manifestPath: harness.plan.manifestPath,
+      reviewPath: harness.plan.reviewPath,
+      maxDownloads: 4,
+    }, harness.dependencies)
+    const secondPlan = await planOnHarness(harness)
+    harness.productionApi.start.mockResolvedValueOnce({
+      renderId,
+      status: 'completed',
+      isExisting: true,
+    })
+
+    await expect(produceVideo({
+      artifactRoot: harness.artifactRoot,
+      manifestPath: secondPlan.manifestPath,
+      reviewPath: secondPlan.reviewPath,
+      maxDownloads: 4,
+    }, harness.dependencies)).rejects.toThrow('existing render does not match reviewed plan')
+
+    expect(secondPlan.planId).not.toBe(harness.plan.planId)
+    await expect(fs.access(secondPlan.manifestPath)).resolves.toBeUndefined()
+    expect((await readManifest(first.manifestPath)).planId).toBe(harness.plan.planId)
+    expect(harness.downloads.requestDownload).toHaveBeenCalledTimes(4)
+  })
+
+  it.each([
+    ['after start before checkpoint', 'after-start', 'produce', 2],
+    ['before directory rename', 'before-rename', 'resume', 1],
+    ['after rename before render-owned manifest write', 'before-manifest', 'produce', 1],
+    ['after manifest write before latest-plan update', 'before-latest', 'resume', 1],
+  ] as const)('recovers deterministically %s', async (_label, window, recoveryCommand, expectedStartCalls) => {
+    const harness = await createPlannedHarness()
+    const interrupted = interruptTransition(window, harness, harness.plan)
+
+    await expect(produceVideo({
+      artifactRoot: harness.artifactRoot,
+      manifestPath: harness.plan.manifestPath,
+      reviewPath: harness.plan.reviewPath,
+      maxDownloads: 4,
+    }, interrupted)).rejects.toThrow('synthetic transition interruption')
+    harness.productionApi.start.mockResolvedValue({
+      renderId,
+      status: 'downloading',
+      isExisting: true,
+    })
+
+    const recovered = recoveryCommand === 'produce'
+      ? await produceVideo({
+          artifactRoot: harness.artifactRoot,
+          manifestPath: harness.plan.manifestPath,
+          reviewPath: harness.plan.reviewPath,
+          maxDownloads: 4,
+        }, harness.dependencies)
+      : await resumeVideo({
+          artifactRoot: harness.artifactRoot,
+          manifestPath: harness.plan.manifestPath,
+        }, harness.dependencies)
+
+    expect(recovered).toMatchObject({ renderId, stage: 'completed' })
+    expect(harness.productionApi.start).toHaveBeenCalledTimes(expectedStartCalls)
+    expect((await latestPlan(harness.artifactRoot)).manifestPath).toBe(recovered.manifestPath)
+    expect((await readManifest(recovered.manifestPath)).planId).toBe(harness.plan.planId)
+  })
+
   it('redacts dialogue, model/provider data, secrets, and URLs from operator output', async () => {
     const harness = await createPlannedHarness()
     await produceVideo({
@@ -348,6 +492,39 @@ describe('video pipeline', () => {
     expect(output).not.toContain('model prompt')
     expect(output).not.toMatch(/https?:\/\//)
   })
+
+  it('retains a stable HTTPS attribution URL in local and remote attribution metadata', async () => {
+    const harness = await createPlannedHarness()
+    const attributionUrl = 'https://attribution.example.test/licenses/free-video'
+    harness.downloads.getDownloadInfo.mockImplementation(async (resourceId: number) => ({
+      ...downloadInfo(resourceId),
+      requiresAttribution: true,
+      requiredAttributionUrl: attributionUrl,
+    }))
+    harness.downloads.transferSignedUrl.mockImplementation(async (
+      _ready: { requestId: number; resourceId: number },
+      destination: string,
+    ) => ({
+      ...await transfer(destination),
+      requiresAttribution: true,
+      requiredAttributionUrl: attributionUrl,
+    }))
+
+    const result = await produceVideo({
+      artifactRoot: harness.artifactRoot,
+      manifestPath: harness.plan.manifestPath,
+      reviewPath: harness.plan.reviewPath,
+      maxDownloads: 4,
+    }, harness.dependencies)
+
+    expect(harness.productionApi.recordDownload).toHaveBeenCalledTimes(4)
+    expect(harness.productionApi.recordDownload.mock.calls.every(
+      ([input]) => input.requiredAttributionUrl === attributionUrl,
+    )).toBe(true)
+    expect((await readManifest(result.manifestPath)).sources?.every(
+      source => source.requiredAttributionUrl === attributionUrl,
+    )).toBe(true)
+  })
 })
 
 it('accepts npm 11 forwarded plan options and keeps JSON stdout path-only', async () => {
@@ -362,6 +539,7 @@ it('accepts npm 11 forwarded plan options and keeps JSON stdout path-only', asyn
     SUPABASE_URL: 'https://project.example.test',
     SUPABASE_PUBLISHABLE_KEY: 'publishable',
     SUBTITLE_PERSONAL_TOKEN: 'personal',
+    npm_config_theme: 'true',
     npm_config_candidate_count: 'true',
     npm_config_json: 'true',
   }, {
@@ -383,8 +561,85 @@ it('accepts npm 11 forwarded plan options and keeps JSON stdout path-only', asyn
   expect(stderr).toEqual([])
 })
 
+it('accepts exact npm-forwarded produce and resume arguments', async () => {
+  const dependencies = vi.fn(() => ({} as VideoPipelineDependencies))
+  const produce = vi.fn(async () => ({
+    planId: runIds[0],
+    renderId,
+    manifestPath: 'manifest.json',
+    reviewPath: 'review-input.json',
+    stage: 'completed' as const,
+  }))
+  const resume = vi.fn(produce)
+  const baseEnvironment = {
+    SUPABASE_URL: 'https://project.example.test',
+    SUPABASE_PUBLISHABLE_KEY: 'publishable',
+    SUBTITLE_PERSONAL_TOKEN: 'personal',
+    VECTEEZY_ACCOUNT: 'account',
+    VECTEEZY_API_KEY: 'key',
+  }
+  const produceProgram = createVideoProgram({
+    ...baseEnvironment,
+    npm_config_manifest: 'true',
+    npm_config_review: 'true',
+    npm_config_max_downloads: 'true',
+  }, undefined, { dependencies, produceVideo: produce })
+  await produceProgram.parseAsync(['node', 'video', 'produce', 'plan.json', 'review.json', '4'])
+  expect(produce).toHaveBeenCalledWith(expect.objectContaining({
+    manifestPath: 'plan.json',
+    reviewPath: 'review.json',
+    maxDownloads: 4,
+  }), expect.any(Object))
+
+  const resumeProgram = createVideoProgram({
+    ...baseEnvironment,
+    npm_config_manifest: 'true',
+  }, undefined, { dependencies, resumeVideo: resume })
+  await resumeProgram.parseAsync(['node', 'video', 'resume', 'active.json'])
+  expect(resume).toHaveBeenCalledWith(expect.objectContaining({ manifestPath: 'active.json' }), expect.any(Object))
+})
+
+it.each([
+  ['plan partial forwarding', ['plan', 'Crossing darkness toward dawn'], { npm_config_theme: 'true', npm_config_candidate_count: 'true' }],
+  ['plan boolean placeholder', ['plan'], { npm_config_theme: 'true', npm_config_candidate_count: 'true' }],
+  ['plan excess positional', ['plan', 'Crossing darkness toward dawn', '8', 'extra'], { npm_config_theme: 'true', npm_config_candidate_count: 'true' }],
+  ['produce partial forwarding', ['produce', 'manifest.json', 'review.json'], { npm_config_manifest: 'true', npm_config_review: 'true', npm_config_max_downloads: 'true' }],
+  ['produce excess positional', ['produce', 'manifest.json', 'review.json', '4', 'extra'], { npm_config_manifest: 'true', npm_config_review: 'true', npm_config_max_downloads: 'true' }],
+  ['resume boolean placeholder', ['resume'], { npm_config_manifest: 'true' }],
+  ['resume excess positional', ['resume', 'manifest.json', 'extra'], { npm_config_manifest: 'true' }],
+] as const)('rejects %s before constructing live dependencies', async (_label, args, forwarded) => {
+  const dependencies = vi.fn(() => ({} as VideoPipelineDependencies))
+  const plan = vi.fn()
+  const produce = vi.fn()
+  const resume = vi.fn()
+  const program = createVideoProgram({
+    SUPABASE_URL: 'https://project.example.test',
+    SUPABASE_PUBLISHABLE_KEY: 'publishable',
+    SUBTITLE_PERSONAL_TOKEN: 'personal',
+    VECTEEZY_ACCOUNT: 'account',
+    VECTEEZY_API_KEY: 'key',
+    ...forwarded,
+  }, undefined, {
+    dependencies,
+    planVideo: plan,
+    produceVideo: produce,
+    resumeVideo: resume,
+  })
+
+  await expect(program.parseAsync(['node', 'video', ...args])).rejects.toThrow('invalid command arguments')
+  expect(dependencies).not.toHaveBeenCalled()
+  expect(plan).not.toHaveBeenCalled()
+  expect(produce).not.toHaveBeenCalled()
+  expect(resume).not.toHaveBeenCalled()
+})
+
 async function createPlannedHarness() {
   const harness = await createHarness()
+  const plan = await planOnHarness(harness)
+  return { ...harness, plan }
+}
+
+async function planOnHarness(harness: Awaited<ReturnType<typeof createHarness>>) {
   const plan = await planVideo({
     artifactRoot: harness.artifactRoot,
     theme: 'Crossing darkness toward dawn',
@@ -392,7 +647,7 @@ async function createPlannedHarness() {
   }, harness.dependencies)
   const review = await reviewedInput(plan.reviewPath)
   await fs.writeFile(plan.reviewPath, `${JSON.stringify(review, null, 2)}\n`)
-  return { ...harness, plan }
+  return plan
 }
 
 async function createHarness() {
@@ -405,9 +660,13 @@ async function createHarness() {
   }
   let matchIndex = 0
   const productionApi = {
-    matchScene: vi.fn(async (_input: Parameters<VideoPipelineDependencies['productionApi']['matchScene']>[0]) => matchResponse(matchIndex++)),
+    matchScene: vi.fn(async (_input: Parameters<VideoPipelineDependencies['productionApi']['matchScene']>[0]) => matchResponse(matchIndex++ % 4)),
     selectCandidate: vi.fn(async ({ providerResourceId }: Parameters<VideoPipelineDependencies['productionApi']['selectCandidate']>[0]) => ({ selectionId: providerResourceId + 1_000 })),
-    start: vi.fn(async (_input: Parameters<VideoPipelineDependencies['productionApi']['start']>[0]) => ({ renderId, status: 'planned' as const, isExisting: false })),
+    start: vi.fn(async (_input: Parameters<VideoPipelineDependencies['productionApi']['start']>[0]) => ({
+      renderId,
+      status: 'planned' as 'planned' | 'downloading' | 'rendering' | 'failed' | 'completed',
+      isExisting: false,
+    })),
     recordDownload: vi.fn(async ({ renderId: id, selectionId }: Parameters<VideoPipelineDependencies['productionApi']['recordDownload']>[0]) => ({ renderId: id, downloadId: selectionId + 2_000 })),
     beginRender: vi.fn(async (_id: string) => ({ renderId, status: 'rendering' as const })),
     complete: vi.fn(async (_input: Parameters<VideoPipelineDependencies['productionApi']['complete']>[0]) => ({ renderId, status: 'completed' as const })),
@@ -500,7 +759,7 @@ async function reviewedInput(reviewPath: string): Promise<ReviewedVideoRunInput>
   return review
 }
 
-function downloadInfo(resourceId: number) {
+function downloadInfo(resourceId: number): VecteezyDownloadInfo {
   return {
     resourceId,
     sourceSizeBytes: 10_000,
@@ -514,7 +773,7 @@ function downloadRequest(resourceId: number) {
   return { ...downloadInfo(resourceId), requestId: resourceId + 5_000 }
 }
 
-async function transfer(destination: string) {
+async function transfer(destination: string): Promise<CompletedVecteezyDownload> {
   const absolute = resolve(destination)
   await fs.mkdir(dirname(absolute), { recursive: true })
   const bytes = Buffer.from(`source bytes for ${destination}`)
@@ -548,4 +807,59 @@ function counts(harness: Awaited<ReturnType<typeof createHarness>>) {
     fail: harness.productionApi.fail.mock.calls.length,
     complete: harness.productionApi.complete.mock.calls.length,
   }
+}
+
+function interruptTransition(
+  window: 'after-start' | 'before-rename' | 'before-manifest' | 'before-latest',
+  harness: Awaited<ReturnType<typeof createHarness>>,
+  plan: Awaited<ReturnType<typeof planOnHarness>>,
+): VideoPipelineDependencies {
+  let interrupted = false
+  const fileOperations = {
+    access: fs.access,
+    mkdir: fs.mkdir,
+    readFile: fs.readFile,
+    rm: fs.rm,
+    writeFile: async (...args: Parameters<typeof fs.writeFile>) => {
+      const [path, data, options] = args
+      if (!interrupted
+        && window === 'after-start'
+        && String(path).includes('video-transitions')
+        && String(data).includes('"phase": "started"')) {
+        interrupted = true
+        throw new Error('synthetic transition interruption')
+      }
+      await fs.writeFile(path, data, options)
+    },
+    rename: async (from: Parameters<typeof fs.rename>[0], to: Parameters<typeof fs.rename>[1]) => {
+      const source = String(from)
+      const destination = String(to)
+      if (!interrupted
+        && window === 'before-rename'
+        && source === dirname(plan.manifestPath)
+        && destination.includes(renderId)) {
+        interrupted = true
+        throw new Error('synthetic transition interruption')
+      }
+      if (!interrupted
+        && window === 'before-latest'
+        && destination.endsWith('latest-plan.json')) {
+        interrupted = true
+        throw new Error('synthetic transition interruption')
+      }
+      await fs.rename(from, to)
+    },
+  }
+  const writeManifest = vi.fn(async (...args: Parameters<typeof writeManifestAtomic>) => {
+    if (!interrupted && window === 'before-manifest' && String(args[0]).includes(renderId)) {
+      interrupted = true
+      throw new Error('synthetic transition interruption')
+    }
+    await writeManifestAtomic(...args)
+  })
+  return {
+    ...harness.dependencies,
+    writeManifest,
+    fileOperations,
+  } as VideoPipelineDependencies
 }

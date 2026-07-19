@@ -39,6 +39,16 @@ export interface VideoPipelineDependencies {
   writeManifest: typeof writeManifestAtomic
   output: (message: string) => void
   now: () => string
+  fileOperations?: VideoPipelineFileOperations
+}
+
+export interface VideoPipelineFileOperations {
+  access: typeof access
+  mkdir: typeof mkdir
+  readFile: typeof readFile
+  rename: typeof rename
+  rm: typeof rm
+  writeFile: typeof writeFile
 }
 
 export interface ReviewedVideoRunInput {
@@ -99,12 +109,31 @@ interface PersistedDownload {
   source: VideoRunSource
 }
 
+interface FormalReservation {
+  index: number
+  selectionId: number
+  providerResourceId: number
+}
+
 interface ProductionState {
   version: 1
   renderId: string
   requestDigest: string
+  formalReservations: FormalReservation[]
   downloads: PersistedDownload[]
   completion?: CompleteRenderRequest
+}
+
+type TransitionPhase = 'prepared' | 'started' | 'renamed' | 'attached'
+
+interface RunTransitionState {
+  version: 1
+  planId: string
+  requestDigest: string
+  renderId: string | null
+  status: 'planned' | 'downloading' | 'rendering' | 'failed' | 'completed' | null
+  isExisting: boolean | null
+  phase: TransitionPhase
 }
 
 const CANONICAL_QUOTE_QUERY = 'hope during hard times'
@@ -113,6 +142,7 @@ const REVIEW_FILE = 'review-input.json'
 const CANDIDATE_FILE = 'review-candidates.json'
 const STATE_FILE = 'production-state.json'
 const LATEST_PLAN_FILE = 'latest-plan.json'
+const TRANSITION_DIRECTORY = 'video-transitions'
 const MAX_FILE_SIZE_BYTES = 512 * 1024 * 1024
 const MAX_AGGREGATE_SIZE_BYTES = 2 * 1024 * 1024 * 1024
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -181,7 +211,7 @@ export async function planVideo(
   await writeJson(join(runDirectory, CANDIDATE_FILE), packet)
   await writeJson(reviewPath, reviewTemplate)
   const paths = { planId, manifestPath, reviewPath }
-  if (input.writeLatestPlan === true) await writeLatestPlan(input.artifactRoot, paths)
+  if (input.writeLatestPlan === true) await writeLatestPlan(input.artifactRoot, paths, dependencies)
   dependencies.output(`plan ${planId}: 4 scenes, ${matches.reduce((sum, match) => sum + match.candidates.length, 0)} candidates, manifest.json, review-input.json`)
   return paths
 }
@@ -191,6 +221,19 @@ export async function produceVideo(
   dependencies: VideoPipelineDependencies,
 ): Promise<VideoProductionResult> {
   if (input.maxDownloads !== 4) throw new Error('max downloads must equal 4')
+  const transition = await readRunTransition(input.artifactRoot, ownerIdFromManifestPath(
+    input.artifactRoot,
+    input.manifestPath,
+  ), dependencies)
+  if (transition !== undefined) {
+    return continueRunTransition(
+      input.artifactRoot,
+      input.manifestPath,
+      input.reviewPath,
+      transition,
+      dependencies,
+    )
+  }
   const manifest = await dependencies.readManifest(input.manifestPath)
   assertOwnedPlanPaths(input.artifactRoot, input.manifestPath, input.reviewPath, manifest)
   if (manifest.stage !== 'review' || manifest.renderId !== null) throw new Error('manifest is not ready for review')
@@ -239,29 +282,31 @@ export async function produceVideo(
     updatedAt: dependencies.now(),
   }
   await dependencies.writeManifest(manifestPathFor(input.artifactRoot, manifest.planId), reviewedManifest)
-
+  const prepared: RunTransitionState = {
+    version: 1,
+    planId: manifest.planId,
+    requestDigest,
+    renderId: null,
+    status: null,
+    isExisting: null,
+    phase: 'prepared',
+  }
+  await writeRunTransition(input.artifactRoot, prepared, dependencies)
   const started = await dependencies.productionApi.start({ requestDigest, theme: manifest.theme })
-  const attached = await attachAuthoritativeRun(
+  const startedTransition: RunTransitionState = {
+    ...prepared,
+    renderId: started.renderId,
+    status: started.status,
+    isExisting: started.isExisting,
+    phase: 'started',
+  }
+  await writeRunTransition(input.artifactRoot, startedTransition, dependencies)
+  return finishRunTransition(
     input.artifactRoot,
     input.manifestPath,
     input.reviewPath,
     reviewedManifest,
-    started.renderId,
-    dependencies,
-  )
-  await writeLatestPlan(input.artifactRoot, attached.paths)
-
-  if (started.isExisting === true && started.status === 'completed') {
-    dependencies.output(`render ${started.renderId}: completed job already exists; no provider download`)
-    return { ...attached.paths, renderId: started.renderId, stage: 'completed' }
-  }
-  if (started.isExisting === true && started.status === 'failed') {
-    await dependencies.productionApi.retry(started.renderId)
-  }
-  return continueProduction(
-    input.artifactRoot,
-    attached.manifest,
-    attached.paths,
+    startedTransition,
     dependencies,
     downloadInfo,
   )
@@ -271,6 +316,19 @@ export async function resumeVideo(
   input: ResumeVideoInput,
   dependencies: VideoPipelineDependencies,
 ): Promise<VideoProductionResult> {
+  const transition = await readRunTransition(input.artifactRoot, ownerIdFromManifestPath(
+    input.artifactRoot,
+    input.manifestPath,
+  ), dependencies)
+  if (transition !== undefined) {
+    return continueRunTransition(
+      input.artifactRoot,
+      input.manifestPath,
+      join(dirname(input.manifestPath), REVIEW_FILE),
+      transition,
+      dependencies,
+    )
+  }
   const manifest = await dependencies.readManifest(input.manifestPath)
   if (manifest.renderId === null) throw new Error('manifest has no render ownership')
   const expectedPath = manifestPathFor(input.artifactRoot, manifest.renderId)
@@ -280,7 +338,7 @@ export async function resumeVideo(
     manifestPath: expectedPath,
     reviewPath: join(dirname(expectedPath), REVIEW_FILE),
   }
-  await writeLatestPlan(input.artifactRoot, paths)
+  await writeLatestPlan(input.artifactRoot, paths, dependencies)
   const state = await readProductionState(dirname(expectedPath), manifest)
 
   if (manifest.stage === 'completed') {
@@ -300,6 +358,88 @@ export async function resumeVideo(
   return continueProduction(input.artifactRoot, manifest, paths, dependencies)
 }
 
+async function continueRunTransition(
+  artifactRoot: string,
+  sourceManifestPath: string,
+  sourceReviewPath: string,
+  transition: RunTransitionState,
+  dependencies: VideoPipelineDependencies,
+): Promise<VideoProductionResult> {
+  let manifest = await readTransitionManifest(
+    artifactRoot,
+    sourceManifestPath,
+    transition,
+    dependencies,
+  )
+  assertTransitionManifest(transition, manifest)
+  let current = transition
+  if (current.phase === 'prepared') {
+    const started = await dependencies.productionApi.start({
+      requestDigest: current.requestDigest,
+      theme: manifest.theme,
+    })
+    current = {
+      ...current,
+      renderId: started.renderId,
+      status: started.status,
+      isExisting: started.isExisting,
+      phase: 'started',
+    }
+    await writeRunTransition(artifactRoot, current, dependencies)
+  }
+  if (current.renderId === null || current.status === null || current.isExisting === null) {
+    throw new Error('invalid run transition')
+  }
+  manifest = await readTransitionManifest(artifactRoot, sourceManifestPath, current, dependencies)
+  assertTransitionManifest(current, manifest)
+  return finishRunTransition(
+    artifactRoot,
+    sourceManifestPath,
+    sourceReviewPath,
+    manifest,
+    current,
+    dependencies,
+  )
+}
+
+async function finishRunTransition(
+  artifactRoot: string,
+  sourceManifestPath: string,
+  sourceReviewPath: string,
+  manifest: VideoRunManifest,
+  transition: RunTransitionState,
+  dependencies: VideoPipelineDependencies,
+  preflight?: VecteezyDownloadInfo[],
+): Promise<VideoProductionResult> {
+  if (transition.renderId === null || transition.status === null || transition.isExisting === null) {
+    throw new Error('invalid run transition')
+  }
+  const attached = await attachAuthoritativeRun(
+    artifactRoot,
+    sourceManifestPath,
+    sourceReviewPath,
+    manifest,
+    transition,
+    dependencies,
+  )
+  await writeLatestPlan(artifactRoot, attached.paths, dependencies)
+
+  if (transition.isExisting && transition.status === 'completed') {
+    dependencies.output(`render ${transition.renderId}: completed job already exists; no provider download`)
+    return { ...attached.paths, renderId: transition.renderId, stage: 'completed' }
+  }
+  if (transition.isExisting && transition.status === 'failed') {
+    await dependencies.productionApi.retry(transition.renderId)
+  }
+  return continueProduction(
+    artifactRoot,
+    attached.manifest,
+    attached.paths,
+    dependencies,
+    preflight,
+  )
+}
+
 async function continueProduction(
   artifactRoot: string,
   initialManifest: VideoRunManifest,
@@ -315,22 +455,38 @@ async function continueProduction(
   const missingScenes = manifest.scenes.filter(scene => !validDownloads.has(scene.index))
 
   if (missingScenes.length > 0) {
+    if (missingScenes.some(scene => state.formalReservations.some(reservation => reservation.index === scene.index))) {
+      return failProduction(
+        'download_failure',
+        'formal download reservation already spent',
+        'formal download reservation already spent',
+      )
+    }
     const infoByResource = new Map((preflight ?? await preflightManifestDownloads(manifest, dependencies))
       .map(info => [info.resourceId, info]))
     const budget = new FormalDownloadBudget(4)
-    let requests: Awaited<ReturnType<VecteezyDownloadClient['requestDownload']>>[]
-    try {
-      requests = await Promise.all(missingScenes.map(scene => dependencies.downloads.requestDownload(
-        requiredPositiveInteger(scene.providerResourceId, 'scene resource ID'),
-        budget,
-      )))
-    } catch {
-      return failProduction('download_failure', 'video source download failed')
-    }
-
-    for (const [requestIndex, scene] of missingScenes.entries()) {
+    for (const scene of missingScenes) {
       try {
-        const ready = await dependencies.downloads.waitForDownload(requests[requestIndex])
+        if (state.formalReservations.length >= 4) {
+          return failProduction(
+            'download_failure',
+            'formal download budget exhausted',
+            'formal download reservation already spent',
+          )
+        }
+        const selectionId = requiredPositiveInteger(scene.selectionId, 'scene selection ID')
+        const providerResourceId = requiredPositiveInteger(scene.providerResourceId, 'scene resource ID')
+        state = {
+          ...state,
+          formalReservations: [...state.formalReservations, {
+            index: scene.index,
+            selectionId,
+            providerResourceId,
+          }],
+        }
+        await writeProductionState(dirname(paths.manifestPath), state)
+        const request = await dependencies.downloads.requestDownload(providerResourceId, budget)
+        const ready = await dependencies.downloads.waitForDownload(request)
         const key = artifactKey(renderId, `assets/scene-${String(scene.index + 1).padStart(2, '0')}.mp4`)
         const destination = resolveArtifactPath(artifactRoot, key)
         const relativeDestination = relative(process.cwd(), destination)
@@ -339,8 +495,7 @@ async function continueProduction(
         }
         const completed = await dependencies.downloads.transferSignedUrl(ready, relativeDestination)
         const probe = await dependencies.probeMedia(destination)
-        const selectionId = requiredPositiveInteger(scene.selectionId, 'scene selection ID')
-        const info = infoByResource.get(requiredPositiveInteger(scene.providerResourceId, 'scene resource ID'))
+        const info = infoByResource.get(providerResourceId)
         if (info === undefined) throw new Error('download preflight state is unavailable')
         const recorded = await dependencies.productionApi.recordDownload({
           renderId,
@@ -462,12 +617,13 @@ async function continueProduction(
   async function failProduction(
     failureCode: 'download_failure' | 'source_validation_failure' | 'render_failure',
     failureMessage: string,
+    operatorMessage = 'video production failed',
   ): Promise<never> {
     const failed = { ...manifest, stage: 'failed' as const, updatedAt: dependencies.now() }
     await dependencies.writeManifest(manifestPathFor(artifactRoot, renderId), failed).catch(() => undefined)
     await dependencies.productionApi.fail({ renderId, failureCode, failureMessage }).catch(() => undefined)
     dependencies.output(`render ${renderId}: failed; ${state.downloads.length} sources retained`)
-    throw new Error('video production failed')
+    throw new Error(operatorMessage)
   }
 }
 
@@ -544,43 +700,63 @@ async function attachAuthoritativeRun(
   sourceManifestPath: string,
   sourceReviewPath: string,
   manifest: VideoRunManifest,
-  renderId: string,
+  transition: RunTransitionState,
   dependencies: VideoPipelineDependencies,
 ): Promise<{ manifest: VideoRunManifest; paths: VideoPlanPaths }> {
+  const renderId = transition.renderId
+  if (renderId === null) throw new Error('invalid render ownership')
   if (!uuidPattern.test(renderId)) throw new Error('invalid render ownership')
+  assertTransitionManifest(transition, manifest)
+  const operations = fileOperations(dependencies)
   const sourceDirectory = dirname(sourceManifestPath)
   const destinationManifestPath = manifestPathFor(artifactRoot, renderId)
   const destinationDirectory = dirname(destinationManifestPath)
+  const sourceBackupPath = join(sourceDirectory, 'plan-manifest.json')
+  const destinationBackupPath = join(destinationDirectory, 'plan-manifest.json')
   let attachedManifest: VideoRunManifest
 
-  if (await exists(destinationManifestPath)) {
+  if (await exists(destinationManifestPath, dependencies)) {
     const destination = await dependencies.readManifest(destinationManifestPath)
     assertCompatibleRun(destination, manifest, renderId)
     attachedManifest = destination
     if (resolve(sourceDirectory) !== resolve(destinationDirectory)) {
-      await rm(sourceDirectory, { recursive: true, force: true })
+      await operations.rm(sourceDirectory, { recursive: true, force: true })
     }
   } else {
-    const backupManifestPath = join(sourceDirectory, 'plan-manifest.json')
-    await rename(sourceManifestPath, backupManifestPath)
-    try {
-      await rename(sourceDirectory, destinationDirectory)
-    } catch (error) {
-      await rename(backupManifestPath, sourceManifestPath).catch(() => undefined)
-      if (!await exists(destinationManifestPath)) throw error
-      const destination = await dependencies.readManifest(destinationManifestPath)
-      assertCompatibleRun(destination, manifest, renderId)
-      attachedManifest = destination
-      await rm(sourceDirectory, { recursive: true, force: true })
-      return {
-        manifest: attachedManifest,
-        paths: {
-          planId: manifest.planId,
-          manifestPath: destinationManifestPath,
-          reviewPath: join(destinationDirectory, basename(sourceReviewPath)),
-        },
+    if (await exists(destinationBackupPath, dependencies)) {
+      const backup = await dependencies.readManifest(destinationBackupPath)
+      assertTransitionManifest(transition, backup)
+      manifest = backup
+    } else {
+      let movedManifest = false
+      if (await exists(sourceManifestPath, dependencies)) {
+        await operations.rename(sourceManifestPath, sourceBackupPath)
+        movedManifest = true
+      } else if (!await exists(sourceBackupPath, dependencies)) {
+        throw new Error('run transition manifest is unavailable')
+      }
+      try {
+        await operations.rename(sourceDirectory, destinationDirectory)
+      } catch (error) {
+        if (movedManifest) {
+          await operations.rename(sourceBackupPath, sourceManifestPath).catch(() => undefined)
+        }
+        if (!await exists(destinationManifestPath, dependencies)) throw error
+        const destination = await dependencies.readManifest(destinationManifestPath)
+        assertCompatibleRun(destination, manifest, renderId)
+        attachedManifest = destination
+        await operations.rm(sourceDirectory, { recursive: true, force: true })
+        return {
+          manifest: attachedManifest,
+          paths: {
+            planId: manifest.planId,
+            manifestPath: destinationManifestPath,
+            reviewPath: join(destinationDirectory, basename(sourceReviewPath)),
+          },
+        }
       }
     }
+    await writeRunTransition(artifactRoot, { ...transition, phase: 'renamed' }, dependencies)
     attachedManifest = {
       ...manifest,
       renderId,
@@ -588,7 +764,8 @@ async function attachAuthoritativeRun(
       updatedAt: dependencies.now(),
     }
     await dependencies.writeManifest(destinationManifestPath, attachedManifest)
-    await rm(join(destinationDirectory, 'plan-manifest.json'), { force: true })
+    await writeRunTransition(artifactRoot, { ...transition, phase: 'attached' }, dependencies)
+    await operations.rm(destinationBackupPath, { force: true })
   }
 
   const paths = {
@@ -612,7 +789,8 @@ function assertCompatibleRun(destination: VideoRunManifest, source: VideoRunMani
     providerResourceId: scene.providerResourceId,
     selectionId: scene.selectionId,
   }))
-  if (destination.renderId !== renderId
+  if (destination.planId !== source.planId
+    || destination.renderId !== renderId
     || destination.requestDigest !== source.requestDigest
     || destination.theme !== source.theme
     || JSON.stringify(destination.quote) !== JSON.stringify(source.quote)
@@ -687,7 +865,9 @@ function parseReviewedInput(value: unknown): ReviewedVideoRunInput {
     if (input.version !== 1) throw new Error()
     const quote = record(input.quote)
     exactKeys(quote, ['trackId', 'cueIndex', 'captionZh'])
-    if (!positiveInteger(quote.trackId) || !nonnegativeInteger(quote.cueIndex) || !boundedText(quote.captionZh, 300)) throw new Error()
+    if (!positiveInteger(quote.trackId)
+      || !nonnegativeInteger(quote.cueIndex)
+      || !safeDurableText(quote.captionZh, 300)) throw new Error()
     if (!Array.isArray(input.scenes) || input.scenes.length !== 4) throw new Error()
     const scenes = input.scenes.map((value, index) => {
       const scene = record(value)
@@ -695,7 +875,7 @@ function parseReviewedInput(value: unknown): ReviewedVideoRunInput {
       if (scene.index !== index
         || !uuidPattern.test(String(scene.runId))
         || !positiveInteger(scene.providerResourceId)
-        || !boundedText(scene.note, 500)
+        || !safeDurableText(scene.note, 500)
         || !nonnegativeInteger(scene.sourceInMs)) throw new Error()
       return {
         index: index as 0 | 1 | 2 | 3,
@@ -739,7 +919,13 @@ async function readProductionState(directory: string, manifest: VideoRunManifest
   const path = join(directory, STATE_FILE)
   if (!await exists(path)) {
     if (manifest.renderId === null) throw new Error('manifest has no render ownership')
-    return { version: 1, renderId: manifest.renderId, requestDigest: manifest.requestDigest, downloads: [] }
+    return {
+      version: 1,
+      renderId: manifest.renderId,
+      requestDigest: manifest.requestDigest,
+      formalReservations: [],
+      downloads: [],
+    }
   }
   const value = await readJson(path) as ProductionState
   if (value.version !== 1
@@ -747,6 +933,16 @@ async function readProductionState(directory: string, manifest: VideoRunManifest
     || value.requestDigest !== manifest.requestDigest
     || !Array.isArray(value.downloads)) {
     throw new Error('invalid production state')
+  }
+  if (!Array.isArray(value.formalReservations)) {
+    return {
+      ...value,
+      formalReservations: manifest.scenes.map(scene => ({
+        index: scene.index,
+        selectionId: requiredPositiveInteger(scene.selectionId, 'scene selection ID'),
+        providerResourceId: requiredPositiveInteger(scene.providerResourceId, 'scene resource ID'),
+      })),
+    }
   }
   return value
 }
@@ -801,12 +997,112 @@ function manifestPathFor(artifactRoot: string, ownerId: string): ResolvedArtifac
   return resolveArtifactPath(artifactRoot, artifactKey(ownerId, 'manifest.json'))
 }
 
-async function writeLatestPlan(artifactRoot: string, paths: VideoPlanPaths): Promise<void> {
-  await mkdir(resolve(artifactRoot), { recursive: true })
+function ownerIdFromManifestPath(artifactRoot: string, manifestPath: string): string {
+  const ownerId = basename(dirname(resolve(manifestPath)))
+  if (!uuidPattern.test(ownerId)
+    || resolve(manifestPath) !== resolve(manifestPathFor(artifactRoot, ownerId))) {
+    throw new Error('manifest run ownership mismatch')
+  }
+  return ownerId
+}
+
+async function readRunTransition(
+  artifactRoot: string,
+  planId: string,
+  dependencies: VideoPipelineDependencies,
+): Promise<RunTransitionState | undefined> {
+  const path = transitionPathFor(artifactRoot, planId)
+  if (!await exists(path, dependencies)) return undefined
+  try {
+    const transition = record(JSON.parse(await fileOperations(dependencies).readFile(path, 'utf8')))
+    exactKeys(transition, [
+      'version',
+      'planId',
+      'requestDigest',
+      'renderId',
+      'status',
+      'isExisting',
+      'phase',
+    ])
+    const phases: TransitionPhase[] = ['prepared', 'started', 'renamed', 'attached']
+    const statuses: Array<Exclude<RunTransitionState['status'], null>> = [
+      'planned',
+      'downloading',
+      'rendering',
+      'failed',
+      'completed',
+    ]
+    if (transition.version !== 1
+      || transition.planId !== planId
+      || !/^[0-9a-f]{64}$/i.test(String(transition.requestDigest))
+      || !phases.includes(transition.phase as TransitionPhase)) throw new Error()
+    if (transition.phase === 'prepared') {
+      if (transition.renderId !== null || transition.status !== null || transition.isExisting !== null) throw new Error()
+    } else if (!uuidPattern.test(String(transition.renderId))
+      || !statuses.includes(transition.status as Exclude<RunTransitionState['status'], null>)
+      || typeof transition.isExisting !== 'boolean') throw new Error()
+    return transition as unknown as RunTransitionState
+  } catch {
+    throw new Error('invalid run transition')
+  }
+}
+
+async function writeRunTransition(
+  artifactRoot: string,
+  transition: RunTransitionState,
+  dependencies: VideoPipelineDependencies,
+): Promise<void> {
+  await writeJsonAtomicWithOperations(
+    transitionPathFor(artifactRoot, transition.planId),
+    transition,
+    fileOperations(dependencies),
+  )
+}
+
+function transitionPathFor(artifactRoot: string, planId: string): string {
+  if (!uuidPattern.test(planId)) throw new Error('invalid run transition')
+  return join(resolve(artifactRoot), TRANSITION_DIRECTORY, `${planId}.json`)
+}
+
+async function readTransitionManifest(
+  artifactRoot: string,
+  sourceManifestPath: string,
+  transition: RunTransitionState,
+  dependencies: VideoPipelineDependencies,
+): Promise<VideoRunManifest> {
+  const candidates = [
+    sourceManifestPath,
+    join(dirname(sourceManifestPath), 'plan-manifest.json'),
+  ]
+  if (transition.renderId !== null) {
+    const destination = manifestPathFor(artifactRoot, transition.renderId)
+    candidates.push(destination, join(dirname(destination), 'plan-manifest.json'))
+  }
+  for (const path of candidates) {
+    if (await exists(path, dependencies)) return dependencies.readManifest(path)
+  }
+  throw new Error('run transition manifest is unavailable')
+}
+
+function assertTransitionManifest(transition: RunTransitionState, manifest: VideoRunManifest): void {
+  if (manifest.planId !== transition.planId
+    || manifest.requestDigest !== transition.requestDigest
+    || (manifest.renderId !== null && manifest.renderId !== transition.renderId)) {
+    throw new Error('invalid run transition')
+  }
+}
+
+async function writeLatestPlan(
+  artifactRoot: string,
+  paths: VideoPlanPaths,
+  dependencies: VideoPipelineDependencies,
+): Promise<void> {
+  const operations = fileOperations(dependencies)
+  await operations.mkdir(resolve(artifactRoot), { recursive: true })
   const destination = join(resolve(artifactRoot), LATEST_PLAN_FILE)
   const temporary = `${destination}.${randomUUID()}.tmp`
-  await writeFile(temporary, `${JSON.stringify(paths, null, 2)}\n`, 'utf8')
-  await rename(temporary, destination)
+  await operations.writeFile(temporary, `${JSON.stringify(paths, null, 2)}\n`, 'utf8')
+  await operations.rename(temporary, destination)
 }
 
 async function writeJson(path: string, value: unknown): Promise<void> {
@@ -826,6 +1122,22 @@ async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
   }
 }
 
+async function writeJsonAtomicWithOperations(
+  path: string,
+  value: unknown,
+  operations: VideoPipelineFileOperations,
+): Promise<void> {
+  await operations.mkdir(dirname(path), { recursive: true })
+  const temporary = `${path}.${randomUUID()}.tmp`
+  try {
+    await operations.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+    await operations.rename(temporary, path)
+  } catch (error) {
+    await operations.rm(temporary, { force: true }).catch(() => undefined)
+    throw error
+  }
+}
+
 async function readJson(path: string): Promise<unknown> {
   try {
     return JSON.parse(await readFile(path, 'utf8'))
@@ -834,17 +1146,21 @@ async function readJson(path: string): Promise<unknown> {
   }
 }
 
-async function exists(path: string): Promise<boolean> {
+async function exists(path: string, dependencies?: VideoPipelineDependencies): Promise<boolean> {
   try {
-    await access(path)
+    await (dependencies === undefined ? access : fileOperations(dependencies).access)(path)
     return true
   } catch {
     return false
   }
 }
 
+function fileOperations(dependencies: VideoPipelineDependencies): VideoPipelineFileOperations {
+  return dependencies.fileOperations ?? { access, mkdir, readFile, rename, rm, writeFile }
+}
+
 function validatePlanInput(input: PlanVideoInput): void {
-  if (input.theme.trim() === '' || input.theme.length > 300) throw new Error('invalid video theme')
+  if (!safeDurableText(input.theme, 300)) throw new Error('invalid video theme')
   if (!Number.isSafeInteger(input.candidateCount) || input.candidateCount < 5 || input.candidateCount > 10) {
     throw new Error('candidate count must be between 5 and 10')
   }
@@ -869,6 +1185,11 @@ function nonnegativeInteger(value: unknown): value is number {
 
 function boundedText(value: unknown, maximum: number): value is string {
   return typeof value === 'string' && value.trim() !== '' && value.length <= maximum
+}
+
+function safeDurableText(value: unknown, maximum: number): value is string {
+  if (!boundedText(value, maximum)) return false
+  return !/(?:[a-z][a-z0-9+.-]*:\/\/|www\.|authorization\s*:|bearer\s+|api[_ -]?key|secret|access[_ -]?token|refresh[_ -]?token|preview[_ -]?url|status[_ -]?url|signed[_ -]?(?:url|media)|raw\s+provider\s+payload|provider\s+payload|model\s+prompt)/i.test(value)
 }
 
 function requiredPositiveInteger(value: unknown, name: string): number {

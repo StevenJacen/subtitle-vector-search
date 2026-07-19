@@ -20,6 +20,10 @@ export interface RenderStatusResponse {
   isExisting?: boolean
 }
 
+export interface StartRenderResponse extends RenderStatusResponse {
+  isExisting: boolean
+}
+
 export type RecordDownloadRequest = { renderId: string; selectionId: number } & DownloadMetadata
 
 export interface CompleteRenderRequest {
@@ -41,6 +45,7 @@ type WireDownloadResponse = { downloadId: number }
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const queryKinds = new Set(['literal', 'action', 'metaphor'])
+const statusValues = new Set<Status>(['planned', 'downloading', 'rendering', 'completed', 'failed'])
 
 export class VideoProductionApi {
   private readonly fetchFn: typeof fetch
@@ -85,11 +90,11 @@ export class VideoProductionApi {
     return { selectionId: response.selectionId }
   }
 
-  start(input: { requestDigest: string; theme: string }): Promise<RenderStatusResponse> {
+  start(input: { requestDigest: string; theme: string }): Promise<StartRenderResponse> {
     return this.request(
       this.metadataUrl,
       { action: 'start', requestDigest: input.requestDigest, theme: input.theme },
-      isPlannedStartResponse,
+      isStartStatusResponse,
       'video production start',
     )
   }
@@ -321,12 +326,13 @@ function isSelectionResponse(value: unknown): value is WireSelectionResponse {
     && positiveInteger(value.selectionId)
 }
 
-function isPlannedStartResponse(value: unknown): value is RenderStatusResponse {
+function isStartStatusResponse(value: unknown): value is StartRenderResponse {
   return isRecord(value)
-    && hasExactKeys(value, ['renderId', 'status'], ['isExisting'])
+    && hasExactKeys(value, ['renderId', 'status', 'isExisting'])
     && isUuid(value.renderId)
-    && value.status === 'planned'
-    && (value.isExisting === undefined || typeof value.isExisting === 'boolean')
+    && typeof value.status === 'string'
+    && statusValues.has(value.status as Status)
+    && typeof value.isExisting === 'boolean'
 }
 
 function isExpectedStatusResponse(value: unknown, expected: Status): value is WireStatusResponse {

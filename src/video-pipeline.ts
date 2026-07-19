@@ -51,14 +51,17 @@ export function createVideoProgram(
     .option('--candidate-count <count>', 'candidate count', integerOption)
     .option('--json', 'emit one path-only JSON object')
     .action(async (options, command: Command) => {
-      const configuration = baseConfiguration(environment)
-      const jsonMode = options.json === true || environment.npm_config_json === 'true'
-      const theme = requiredCliOption(options.theme ?? forwardedText(command.args[0], environment.npm_config_theme), '--theme')
-      const candidateCount = forwardedInteger(
-        options.candidateCount,
-        forwardedText(command.args[1], environment.npm_config_candidate_count),
-        8,
+      const forwarded = exactForwardedArguments(
+        command.args,
+        environment,
+        ['npm_config_theme', 'npm_config_candidate_count'],
       )
+      const jsonMode = options.json === true || environment.npm_config_json === 'true'
+      const theme = requiredCliOption(forwarded?.[0] ?? options.theme, '--theme')
+      const candidateCount = forwarded === undefined
+        ? optionalInteger(options.candidateCount, 8)
+        : integerOption(forwarded[1])
+      const configuration = baseConfiguration(environment)
       const dependencies = dependencyFactory(configuration, undefined, jsonMode ? io.stderr : io.stdout)
       const result = await planVideo({
         artifactRoot: 'artifacts',
@@ -75,12 +78,16 @@ export function createVideoProgram(
     .option('--review <path>')
     .option('--max-downloads <count>', 'hard production download budget', integerOption)
     .action(async (options, command: Command) => {
-      const manifestPath = requiredCliOption(options.manifest ?? forwardedText(command.args[0], environment.npm_config_manifest), '--manifest')
-      const reviewPath = requiredCliOption(options.review ?? forwardedText(command.args[1], environment.npm_config_review), '--review')
-      const maxDownloads = forwardedInteger(
-        options.maxDownloads,
-        forwardedText(command.args[2], environment.npm_config_max_downloads),
+      const forwarded = exactForwardedArguments(
+        command.args,
+        environment,
+        ['npm_config_manifest', 'npm_config_review', 'npm_config_max_downloads'],
       )
+      const manifestPath = requiredCliOption(forwarded?.[0] ?? options.manifest, '--manifest')
+      const reviewPath = requiredCliOption(forwarded?.[1] ?? options.review, '--review')
+      const maxDownloads = forwarded === undefined
+        ? requiredInteger(options.maxDownloads)
+        : integerOption(forwarded[2])
       if (maxDownloads !== 4) throw new Error('--max-downloads must equal 4')
       const configuration = baseConfiguration(environment)
       const vecteezy = vecteezyConfiguration(environment)
@@ -96,7 +103,12 @@ export function createVideoProgram(
     .allowExcessArguments(true)
     .option('--manifest <path>')
     .action(async (options, command: Command) => {
-      const manifestPath = requiredCliOption(options.manifest ?? forwardedText(command.args[0], environment.npm_config_manifest), '--manifest')
+      const forwarded = exactForwardedArguments(
+        command.args,
+        environment,
+        ['npm_config_manifest'],
+      )
+      const manifestPath = requiredCliOption(forwarded?.[0] ?? options.manifest, '--manifest')
       const configuration = baseConfiguration(environment)
       const vecteezy = vecteezyConfiguration(environment)
       await resumeVideo({
@@ -176,15 +188,29 @@ function integerOption(value: string): number {
   return Number(value)
 }
 
-function forwardedInteger(value: unknown, forwarded: string | undefined, fallback?: number): number {
+function optionalInteger(value: unknown, fallback: number): number {
   if (typeof value === 'number') return value
-  if (forwarded !== undefined) return integerOption(forwarded)
-  if (fallback !== undefined) return fallback
+  return fallback
+}
+
+function requiredInteger(value: unknown): number {
+  if (typeof value === 'number') return value
   throw new Error('option must be an integer')
 }
 
-function forwardedText(positional: string | undefined, configured: string | undefined): string | undefined {
-  return positional !== undefined && positional.trim() !== '' ? positional : configured
+function exactForwardedArguments(
+  arguments_: string[],
+  environment: NodeJS.ProcessEnv,
+  placeholders: string[],
+): string[] | undefined {
+  const hasPlaceholder = placeholders.some(name => environment[name] !== undefined)
+  if (arguments_.length === 0 && !hasPlaceholder) return undefined
+  if (arguments_.length !== placeholders.length
+    || placeholders.some(name => environment[name] !== 'true')
+    || arguments_.some(value => value.trim() === '' || value === 'true' || value.startsWith('--'))) {
+    throw new Error('invalid command arguments')
+  }
+  return arguments_
 }
 
 function requiredCliOption(value: unknown, name: string): string {
@@ -206,6 +232,7 @@ function publicErrorMessage(error: unknown): string {
     || error.message === '--max-downloads must equal 4'
     || /^--(?:theme|manifest|review) is required$/.test(error.message)
     || error.message === 'option must be an integer'
+    || error.message === 'invalid command arguments'
     || error.message === 'candidate count must be between 5 and 10'
     || error.message === 'invalid video theme'
     || error.message === 'max downloads must equal 4'

@@ -348,6 +348,32 @@ describe('VideoProductionApi', () => {
     await expect(api.retry(renderId)).resolves.toEqual(publicStatusResponse('downloading'))
   })
 
+  it.each(['planned', 'downloading', 'rendering', 'failed', 'completed'] as const)(
+    'accepts a strict existing-job start response with %s status',
+    async status => {
+      const payload = { renderId, status, isExisting: true }
+      const fetchFn = vi.fn().mockResolvedValue(response(payload))
+      const api = createApi(fetchFn)
+
+      await expect(api.start({ requestDigest: sha256, theme: 'Classic cinema' })).resolves.toEqual(payload)
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+    },
+  )
+
+  it.each([
+    { renderId, status: 'planned' },
+    { renderId, status: 'planned', isExisting: 'true' },
+    { renderId, status: 'unknown', isExisting: true },
+    { renderId, status: 'completed', isExisting: true, extra: 'forbidden' },
+  ])('rejects a non-strict start status envelope %#', async payload => {
+    const fetchFn = vi.fn().mockResolvedValue(response(payload))
+    const api = createApi(fetchFn)
+
+    await expect(api.start({ requestDigest: sha256, theme: 'Classic cinema' }))
+      .rejects.toMatchObject({ status: 502, code: 'invalid_response' })
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
   it('validates candidate, selection, and metadata success payloads', async () => {
     const invalidResponses = [
       [response({ ...sceneMatch, candidates: [{ ...candidate, providerResourceId: 0 }] }), (api: VideoProductionApi) => api.matchScene({ theme: 'x', candidateCount: 1 })],
