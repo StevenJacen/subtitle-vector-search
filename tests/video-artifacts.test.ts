@@ -41,6 +41,7 @@ const manifest: VideoRunManifest = {
 
 afterEach(async () => {
   vi.restoreAllMocks()
+  vi.clearAllMocks()
   await Promise.all(roots.splice(0).map(root => fs.rm(root, { force: true, recursive: true })))
 })
 
@@ -131,7 +132,7 @@ describe('video run manifests', () => {
   it('atomically writes and strictly reads a stable manifest', async () => {
     const root = await temporaryRoot()
     const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
-    const writeFile = vi.mocked(fs.writeFile)
+    const open = vi.mocked(fs.open)
     const rename = vi.mocked(fs.rename)
 
     await writeManifestAtomic(path, manifest)
@@ -139,9 +140,10 @@ describe('video run manifests', () => {
     const bytes = await fs.readFile(path, 'utf8')
     expect(bytes).toBe(`${JSON.stringify(manifest, null, 2)}\n`)
     expect(await readManifest(path)).toEqual(manifest)
-    expect(writeFile).toHaveBeenCalledTimes(1)
+    const temporaryOpenIndex = open.mock.calls.findIndex(([file]) => String(file).includes('.tmp-'))
+    expect(temporaryOpenIndex).toBeGreaterThanOrEqual(0)
     expect(rename).toHaveBeenCalledTimes(1)
-    expect(writeFile.mock.invocationCallOrder[0]).toBeLessThan(rename.mock.invocationCallOrder[0])
+    expect(open.mock.invocationCallOrder[temporaryOpenIndex]).toBeLessThan(rename.mock.invocationCallOrder[0])
     expect(rename.mock.calls[0][0]).not.toBe(path)
     expect(rename.mock.calls[0][1]).toBe(path)
     expect(await fs.readdir(dirname(path))).toEqual(['manifest.json'])
@@ -153,10 +155,40 @@ describe('video run manifests', () => {
 
     await writeManifestAtomic(path, manifest)
 
-    const [temporaryPath, , options] = vi.mocked(fs.writeFile).mock.calls.at(-1)!
+    const temporaryCall = vi.mocked(fs.open).mock.calls.find(([file]) => String(file).includes('.tmp-'))
+    expect(temporaryCall).toBeDefined()
+    const [temporaryPath, flags] = temporaryCall!
     const temporaryKey = relative(root, String(temporaryPath)).split(sep).join('/')
     expect(() => resolveArtifactPath(root, temporaryKey)).not.toThrow()
-    expect(options).toMatchObject({ encoding: 'utf8', flag: 'wx' })
+    expect(flags).toBe('wx')
+  })
+
+  it('uses an exclusively created lock path accepted by artifact containment and removes it', async () => {
+    const root = await temporaryRoot()
+    const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
+
+    await writeManifestAtomic(path, manifest)
+
+    const lockCall = vi.mocked(fs.open).mock.calls.find(([file]) => String(file).endsWith('manifest.json.lock'))
+    expect(lockCall).toBeDefined()
+    const [lockPath, flags] = lockCall!
+    const lockKey = relative(root, String(lockPath)).split(sep).join('/')
+    expect(() => resolveArtifactPath(root, lockKey)).not.toThrow()
+    expect(flags).toBe('wx')
+    await expect(fs.access(lockPath)).rejects.toThrow()
+  })
+
+  it('fails in a controlled way without removing a lock artifact owned by another process', async () => {
+    const root = await temporaryRoot()
+    const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
+    const lockPath = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json.lock'))
+    await fs.mkdir(dirname(lockPath), { recursive: true })
+    await fs.writeFile(lockPath, 'held elsewhere')
+
+    await expect(writeManifestAtomic(path, manifest)).rejects.toThrow('manifest_write_locked')
+
+    expect(await fs.readFile(lockPath, 'utf8')).toBe('held elsewhere')
+    await expect(fs.access(path)).rejects.toThrow()
   })
 
   it('rejects an existing in-root symlink or junction without touching its external target', async context => {
@@ -216,11 +248,23 @@ describe('video run manifests', () => {
       throw error
     }
     await actualFs.writeFile(join(external, 'manifest.json'), completedBytes)
-    vi.mocked(fs.writeFile).mockImplementationOnce(async (file, data, options) => {
-      await actualFs.writeFile(file, data, options)
-      await actualFs.rename(runDirectory, movedDirectory)
-      await actualFs.symlink(external, runDirectory, process.platform === 'win32' ? 'junction' : 'dir')
-    })
+    let lockHandle: Awaited<ReturnType<typeof actualFs.open>> | undefined
+    vi.mocked(fs.open)
+      .mockImplementationOnce(async (file, flags, mode) => {
+        lockHandle = await actualFs.open(file, flags, mode)
+        return lockHandle
+      })
+      .mockImplementationOnce(async (file, flags, mode) => {
+        const handle = await actualFs.open(file, flags, mode)
+        const actualClose = handle.close.bind(handle)
+        vi.spyOn(handle, 'close').mockImplementationOnce(async () => {
+          await actualClose()
+          await lockHandle?.close()
+          await actualFs.rename(runDirectory, movedDirectory)
+          await actualFs.symlink(external, runDirectory, process.platform === 'win32' ? 'junction' : 'dir')
+        })
+        return handle
+      })
 
     await expect(writeManifestAtomic(path, completed)).rejects.toThrow('unsafe artifact path')
 
@@ -238,6 +282,32 @@ describe('video run manifests', () => {
     await expect(fs.access(absolutePath)).rejects.toThrow()
   })
 
+  it.each([
+    ['another run', artifactKey(otherRunId, 'manifest.json')],
+    ['a nested filename', artifactKey(renderId, 'nested/manifest.json')],
+    ['an alternate filename', artifactKey(renderId, 'run.json')],
+  ])('rejects a manifest destination registered for %s', async (_kind, key) => {
+    const root = await temporaryRoot()
+    const path = resolveArtifactPath(root, key)
+
+    await expect(writeManifestAtomic(path, manifest)).rejects.toThrow('invalid manifest destination')
+
+    expect(await fs.readdir(root)).toEqual([])
+  })
+
+  it('rejects a current manifest whose owner does not match its registered destination', async () => {
+    const root = await temporaryRoot()
+    const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
+    const current: VideoRunManifest = { ...manifest, planId: otherRunId }
+    await fs.mkdir(dirname(path), { recursive: true })
+    await fs.writeFile(path, `${JSON.stringify(current, null, 2)}\n`)
+    const currentBytes = await fs.readFile(path, 'utf8')
+
+    await expect(writeManifestAtomic(path, manifest)).rejects.toThrow('invalid manifest destination')
+
+    expect(await fs.readFile(path, 'utf8')).toBe(currentBytes)
+  })
+
   it('removes the temporary file when atomic rename fails', async () => {
     const root = await temporaryRoot()
     const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
@@ -247,6 +317,28 @@ describe('video run manifests', () => {
 
     expect(await fs.readdir(dirname(path))).toEqual([])
     await expect(fs.access(path)).rejects.toThrow()
+  })
+
+  it('removes a partially written temporary file when writing rejects after creation', async () => {
+    const root = await temporaryRoot()
+    const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
+    const actualFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
+    vi.mocked(fs.open)
+      .mockImplementationOnce((file, flags, mode) => actualFs.open(file, flags, mode))
+      .mockImplementationOnce(async (file, flags, mode) => {
+        const handle = await actualFs.open(file, flags, mode)
+        const actualWrite = handle.writeFile.bind(handle)
+        vi.spyOn(handle, 'writeFile').mockImplementationOnce(async data => {
+          await actualWrite(Buffer.from(String(data).slice(0, 16)))
+          throw new Error('injected write failure after creation')
+        })
+        return handle
+      })
+
+    await expect(writeManifestAtomic(path, manifest)).rejects.toThrow('injected write failure after creation')
+
+    expect(await actualFs.readdir(dirname(path))).toEqual([])
+    await expect(actualFs.access(path)).rejects.toThrow()
   })
 
   it('rejects unknown fields and recursively rejects private URL data', async () => {
@@ -418,9 +510,10 @@ describe('video run manifests', () => {
   })
 
   it('serializes equivalent nested manifest values in a stable field order', async () => {
-    const root = await temporaryRoot()
-    const firstPath = resolveArtifactPath(root, artifactKey(renderId, 'first.json'))
-    const secondPath = resolveArtifactPath(root, artifactKey(renderId, 'second.json'))
+    const firstRoot = await temporaryRoot()
+    const secondRoot = await temporaryRoot()
+    const firstPath = resolveArtifactPath(firstRoot, artifactKey(renderId, 'manifest.json'))
+    const secondPath = resolveArtifactPath(secondRoot, artifactKey(renderId, 'manifest.json'))
     const sourceKey = artifactKey(renderId, 'assets/scene-01.mp4')
     const first: VideoRunManifest = {
       ...manifest,
@@ -463,12 +556,12 @@ describe('video run manifests', () => {
     expect(await fs.readFile(path, 'utf8')).toBe(expectedBytes)
     expect(await sha256File(path)).toBe(createHash('sha256').update(expectedBytes).digest('hex'))
     expect(expectedBytes).not.toContain('manifestSha256')
-    vi.mocked(fs.writeFile).mockClear()
+    vi.mocked(fs.open).mockClear()
     vi.mocked(fs.rename).mockClear()
 
     await writeManifestAtomic(path, completed)
 
-    expect(vi.mocked(fs.writeFile)).not.toHaveBeenCalled()
+    expect(vi.mocked(fs.open).mock.calls.filter(([file]) => String(file).includes('.tmp-'))).toEqual([])
     expect(vi.mocked(fs.rename)).not.toHaveBeenCalled()
     expect(await fs.readFile(path, 'utf8')).toBe(expectedBytes)
   })
@@ -483,17 +576,89 @@ describe('video run manifests', () => {
     }
     await writeManifestAtomic(path, completed)
     const originalBytes = await fs.readFile(path, 'utf8')
-    vi.mocked(fs.writeFile).mockClear()
+    vi.mocked(fs.open).mockClear()
     vi.mocked(fs.rename).mockClear()
 
     await expect(writeManifestAtomic(path, { ...completed, theme: 'Changed after completion' }))
       .rejects.toThrow('completed_manifest_immutable')
 
-    expect(vi.mocked(fs.writeFile)).not.toHaveBeenCalled()
+    expect(vi.mocked(fs.open).mock.calls.filter(([file]) => String(file).includes('.tmp-'))).toEqual([])
     expect(vi.mocked(fs.rename)).not.toHaveBeenCalled()
     expect(await fs.readFile(path, 'utf8')).toBe(originalBytes)
   })
+
+  it('serializes concurrent distinct completed writers around one immutable winner', async () => {
+    const root = await temporaryRoot()
+    const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
+    const first: VideoRunManifest = {
+      ...manifest,
+      theme: 'First immutable candidate',
+      output: { artifactKey: artifactKey(renderId, 'final.mp4'), sha256: 'c'.repeat(64) },
+      stage: 'completed',
+    }
+    const second: VideoRunManifest = { ...first, theme: 'Second immutable candidate' }
+    const expectedBytes = [completedBytes(first), completedBytes(second)]
+    const settle = async (value: VideoRunManifest) => writeManifestAtomic(path, value)
+      .then(() => ({ status: 'fulfilled' as const }))
+      .catch((error: unknown) => ({ status: 'rejected' as const, error }))
+
+    const outcomes = await Promise.all([settle(first), settle(second)])
+
+    expect(outcomes.filter(outcome => outcome.status === 'fulfilled')).toHaveLength(1)
+    const rejection = outcomes.find(outcome => outcome.status === 'rejected')
+    expect(rejection).toBeDefined()
+    expect((rejection as { error: Error }).error.message).toBe('completed_manifest_immutable')
+    const winnerBytes = await fs.readFile(path, 'utf8')
+    expect(expectedBytes).toContain(winnerBytes)
+    const winner = winnerBytes === expectedBytes[0] ? first : second
+    const changed = winner === first ? second : first
+    const winnerHash = await sha256File(path)
+    vi.mocked(fs.open).mockClear()
+    vi.mocked(fs.rename).mockClear()
+
+    await writeManifestAtomic(path, winner)
+
+    expect(await sha256File(path)).toBe(winnerHash)
+    expect(vi.mocked(fs.open).mock.calls.filter(([file]) => String(file).includes('.tmp-'))).toEqual([])
+    expect(vi.mocked(fs.rename)).not.toHaveBeenCalled()
+    await expect(writeManifestAtomic(path, changed)).rejects.toThrow('completed_manifest_immutable')
+    expect(await fs.readFile(path, 'utf8')).toBe(winnerBytes)
+  })
+
+  it('coalesces concurrent identical completed writers into one manifest rename', async () => {
+    const root = await temporaryRoot()
+    const path = resolveArtifactPath(root, artifactKey(renderId, 'manifest.json'))
+    const completed: VideoRunManifest = {
+      ...manifest,
+      output: { artifactKey: artifactKey(renderId, 'final.mp4'), sha256: 'c'.repeat(64) },
+      stage: 'completed',
+    }
+
+    await Promise.all([
+      writeManifestAtomic(path, completed),
+      writeManifestAtomic(path, completed),
+    ])
+
+    expect(await fs.readFile(path, 'utf8')).toBe(completedBytes(completed))
+    expect(vi.mocked(fs.rename)).toHaveBeenCalledTimes(1)
+  })
 })
+
+function completedBytes(value: VideoRunManifest): string {
+  return `${JSON.stringify({
+    version: value.version,
+    planId: value.planId,
+    renderId: value.renderId,
+    requestDigest: value.requestDigest,
+    theme: value.theme,
+    quote: value.quote,
+    scenes: value.scenes,
+    output: value.output,
+    stage: value.stage,
+    createdAt: value.createdAt,
+    updatedAt: value.updatedAt,
+  }, null, 2)}\n`
+}
 
 function isNodeError(value: unknown): value is NodeJS.ErrnoException {
   return value instanceof Error && 'code' in value

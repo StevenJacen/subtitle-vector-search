@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, open, readFile, realpath, rename, rm } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 
 export type VideoRunStage = 'review' | 'downloading' | 'rendering' | 'completed' | 'failed'
@@ -97,6 +97,7 @@ const sensitiveUrlVocabulary = /(?:signed|status|download|signature|x-amz-[a-z0-
 const embeddedUrl = /(?:[a-z][a-z0-9+.-]*:\/\/|(?:https?|ftp|file|data|mailto):|\/\/[a-z0-9.-]+)[^\s<>"']*/gi
 const windowsDeviceName = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i
 const artifactPathRegistrations = new Map<string, ArtifactPathRegistration>()
+const manifestWriteMutexes = new Map<string, Promise<void>>()
 
 export function artifactKey(renderId: string, relativePath: string): string {
   if (!isUuid(renderId) || !isSafeRelativePath(relativePath)) throw new Error('invalid artifact key')
@@ -122,6 +123,7 @@ export async function sha256File(path: string): Promise<string> {
 export async function writeManifestAtomic(path: ResolvedArtifactPath, manifest: VideoRunManifest): Promise<void> {
   const registration = assertRegisteredArtifactPath(path)
   const parsed = parseManifest(manifest)
+  assertManifestDestination(registration, parsed)
   const directory = dirname(path)
   const bytes = `${JSON.stringify(serializableManifest(parsed), null, 2)}\n`
 
@@ -129,34 +131,43 @@ export async function writeManifestAtomic(path: ResolvedArtifactPath, manifest: 
   await assertPhysicalArtifactParent(registration)
   await mkdir(directory, { recursive: true })
   await assertPhysicalArtifactParent(registration)
-  if (await identicalCompletedManifest(path, bytes)) return
+  await withManifestWriteMutex(registration.destination, async () => {
+    await withManifestFileLock(registration, async () => {
+      if (await identicalCompletedManifest(registration, bytes)) return
 
-  const temporaryKey = temporaryArtifactKey(registration.key)
-  const temporary = resolveArtifactPath(registration.root, temporaryKey)
-  const temporaryRegistration = assertRegisteredArtifactPath(temporary)
-  let temporaryWritten = false
-  try {
-    await assertPhysicalArtifactParent(registration)
-    await assertPhysicalArtifactParent(temporaryRegistration)
-    await writeFile(temporary, bytes, { encoding: 'utf8', flag: 'wx' })
-    temporaryWritten = true
-    assertRegisteredArtifactPath(path)
-    assertRegisteredArtifactPath(temporary)
-    await assertPhysicalArtifactParent(registration)
-    await assertPhysicalArtifactParent(temporaryRegistration)
-    if (await identicalCompletedManifest(path, bytes)) {
-      await assertPhysicalArtifactParent(registration)
-      await assertPhysicalArtifactParent(temporaryRegistration)
-      await removeValidatedTemporary(temporary, temporaryRegistration)
-      return
-    }
-    await assertPhysicalArtifactParent(registration)
-    await assertPhysicalArtifactParent(temporaryRegistration)
-    await rename(temporary, path)
-  } catch (error) {
-    if (temporaryWritten) await removeValidatedTemporary(temporary, temporaryRegistration)
-    throw error
-  }
+      const temporaryKey = temporaryArtifactKey(registration.key)
+      const temporary = resolveArtifactPath(registration.root, temporaryKey)
+      const temporaryRegistration = assertRegisteredArtifactPath(temporary)
+      let temporaryCreated = false
+      let temporaryHandle: Awaited<ReturnType<typeof open>> | undefined
+      try {
+        await assertPhysicalArtifactParent(registration)
+        await assertPhysicalArtifactParent(temporaryRegistration)
+        temporaryHandle = await open(temporary, 'wx')
+        temporaryCreated = true
+        await assertPhysicalArtifactParent(registration)
+        await assertPhysicalArtifactParent(temporaryRegistration)
+        await temporaryHandle.writeFile(bytes, { encoding: 'utf8' })
+        await temporaryHandle.close()
+        temporaryHandle = undefined
+        assertRegisteredArtifactPath(path)
+        assertRegisteredArtifactPath(temporary)
+        await assertPhysicalArtifactParent(registration)
+        await assertPhysicalArtifactParent(temporaryRegistration)
+        if (await identicalCompletedManifest(registration, bytes)) {
+          await removeValidatedTemporary(temporary, temporaryRegistration)
+          return
+        }
+        await assertPhysicalArtifactParent(registration)
+        await assertPhysicalArtifactParent(temporaryRegistration)
+        await rename(temporary, path)
+      } catch (error) {
+        await temporaryHandle?.close().catch(() => undefined)
+        if (temporaryCreated) await removeValidatedTemporary(temporary, temporaryRegistration)
+        throw error
+      }
+    })
+  })
 }
 
 export async function readManifest(path: string): Promise<VideoRunManifest> {
@@ -516,7 +527,56 @@ function assertRegisteredArtifactPath(path: string): ArtifactPathRegistration {
   return registration
 }
 
-async function identicalCompletedManifest(path: string, proposedBytes: string): Promise<boolean> {
+function assertManifestDestination(registration: ArtifactPathRegistration, manifest: VideoRunManifest): void {
+  const expectedKey = artifactKey(manifest.renderId ?? manifest.planId, 'manifest.json')
+  if (registration.key !== expectedKey) throw new Error('invalid manifest destination')
+}
+
+async function withManifestWriteMutex<T>(destination: string, operation: () => Promise<T>): Promise<T> {
+  const previous = manifestWriteMutexes.get(destination) ?? Promise.resolve()
+  let release = (): void => undefined
+  const current = new Promise<void>(resolveCurrent => {
+    release = resolveCurrent
+  })
+  manifestWriteMutexes.set(destination, current)
+  await previous
+  try {
+    return await operation()
+  } finally {
+    release()
+    if (manifestWriteMutexes.get(destination) === current) manifestWriteMutexes.delete(destination)
+  }
+}
+
+async function withManifestFileLock<T>(
+  registration: ArtifactPathRegistration,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const lock = resolveArtifactPath(registration.root, lockArtifactKey(registration.key))
+  const lockRegistration = assertRegisteredArtifactPath(lock)
+  let lockHandle: Awaited<ReturnType<typeof open>> | undefined
+  try {
+    await assertPhysicalArtifactParent(registration)
+    await assertPhysicalArtifactParent(lockRegistration)
+    try {
+      lockHandle = await open(lock, 'wx')
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'EEXIST') throw new Error('manifest_write_locked')
+      throw error
+    }
+    await assertPhysicalArtifactParent(registration)
+    await assertPhysicalArtifactParent(lockRegistration)
+    return await operation()
+  } finally {
+    if (lockHandle !== undefined) {
+      await lockHandle.close().catch(() => undefined)
+      await removeValidatedTemporary(lock, lockRegistration)
+    }
+  }
+}
+
+async function identicalCompletedManifest(registration: ArtifactPathRegistration, proposedBytes: string): Promise<boolean> {
+  const path = registration.destination
   let stats
   try {
     stats = await lstat(path)
@@ -533,12 +593,15 @@ async function identicalCompletedManifest(path: string, proposedBytes: string): 
   } catch {
     return false
   }
+  assertManifestDestination(registration, existing)
   if (existing.stage !== 'completed') return false
   if (existingBytes === proposedBytes) return true
   throw new Error('completed_manifest_immutable')
 }
 
 async function assertPhysicalArtifactParent(registration: ArtifactPathRegistration): Promise<void> {
+  // Trusted-filesystem boundary: the artifact root is process-owned. Repeated checks reject
+  // non-racing link/junction escapes; portable Node APIs cannot close Windows syscall races.
   const rootStats = await lstat(registration.root).catch(() => {
     throw new Error('unsafe artifact path')
   })
@@ -580,6 +643,10 @@ function temporaryArtifactKey(key: string): string {
   const filename = segments.pop()
   if (filename === undefined) throw new Error('unsafe artifact path')
   return [...segments, `${filename}.tmp-${randomUUID()}`].join('/')
+}
+
+function lockArtifactKey(key: string): string {
+  return `${key}.lock`
 }
 
 function assertPhysicallyContained(realRoot: string, realParent: string): void {
