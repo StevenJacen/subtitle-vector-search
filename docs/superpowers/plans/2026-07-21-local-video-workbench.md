@@ -47,7 +47,7 @@
 - `src/media-probe.ts`: validate chosen dimensions and a null audio codec for v2.
 - `src/video-renderer.ts`: add dynamic silent 5-10-scene rendering beside the existing v1 renderer.
 - `src/video-production-api.ts`: add explicit v2 metadata methods without changing v1 wire bodies.
-- `supabase/migrations/20260721090000_local_video_workbench_v2.sql`: additive v2 columns/checks and six versioned service-role RPCs.
+- `supabase/migrations/20260721055220_local_video_workbench_v2.sql`: additive v2 columns/checks and six versioned service-role RPCs.
 - `supabase/tests/database/video_production_v2.sql`: linked pgTAP for v1 compatibility and v2 invariants.
 - `supabase/functions/_shared/video-production-v2.ts`: strict v2 action and payload contracts.
 - `supabase/functions/_shared/video-production-repository.ts`: additive v2 RPC methods.
@@ -197,7 +197,7 @@ export function nextWorkbenchStage(manifest: WorkbenchManifest, files: LocalFile
 ### Task 5: Additive Supabase Version-2 Production Contract
 
 **Files:**
-- Create: `supabase/migrations/20260721090000_local_video_workbench_v2.sql`
+- Create: `supabase/migrations/20260721055220_local_video_workbench_v2.sql`
 - Create: `supabase/tests/database/video_production_v2.sql`
 - Create: `supabase/functions/_shared/video-production-v2.ts`
 - Modify: `supabase/functions/_shared/video-production-repository.ts`
@@ -416,7 +416,7 @@ GET    /api/previews/:previewId
 
 - [ ] Read the current Supabase CLI/Edge/Postgres changelog before deploying; verify linked project ref is `kwoppqigrtvgmmbnzbpx` and inspect migration status.
 - [ ] Run all local tests and a clean production frontend build.
-- [ ] Push `20260721090000_local_video_workbench_v2.sql`, deploy `subtitle-passages`, deploy the changed matching function only if pagination changed it, and deploy `video-production-metadata`.
+- [ ] Push `20260721055220_local_video_workbench_v2.sql`, deploy `subtitle-passages`, deploy the changed matching function only if pagination changed it, and deploy `video-production-metadata`.
 - [ ] Run linked pgTAP `supabase/tests/database/video_production_v2.sql`, `npx supabase db lint --linked --level warning`, and inspect function logs for controlled failures only.
 - [ ] Start the real localhost service against configured Supabase/Ollama/Vecteezy and run health. Do not issue formal downloads during a health or planning smoke test.
 - [ ] Create one real five-scene task, verify exact passage/translation and eight candidates per scene, but stop before formal production unless all candidate licenses/previews are acceptable. Formal production requires the normal explicit UI confirmations.

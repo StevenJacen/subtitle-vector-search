@@ -106,6 +106,7 @@ export async function planPassageWithOllama(input: PlanPassageInput): Promise<Pl
       prompt: buildPassagePrompt(input.cues),
       stream: false,
       format: 'json',
+      think: false,
     }),
     redirect: 'manual',
     signal,

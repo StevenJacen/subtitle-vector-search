@@ -1,10 +1,20 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-const migrationPath = resolve(process.cwd(), 'supabase/migrations/20260721090000_local_video_workbench_v2.sql')
+const migrationPath = resolve(process.cwd(), 'supabase/migrations/20260721055220_local_video_workbench_v2.sql')
 const databaseTestPath = resolve(process.cwd(), 'supabase/tests/database/video_production_v2.sql')
 const v1MigrationPath = resolve(process.cwd(), 'supabase/migrations/20260719024919_video_production.sql')
+const repairMigrationName = readdirSync(resolve(process.cwd(), 'supabase/migrations'))
+  .find(name => name.endsWith('_fix_workbench_v2_coalesce.sql'))
+const repairMigrationPath = repairMigrationName === undefined
+  ? null
+  : resolve(process.cwd(), 'supabase/migrations', repairMigrationName)
+const indexMigrationName = readdirSync(resolve(process.cwd(), 'supabase/migrations'))
+  .find(name => name.endsWith('_cover_workbench_v2_foreign_keys.sql'))
+const indexMigrationPath = indexMigrationName === undefined
+  ? null
+  : resolve(process.cwd(), 'supabase/migrations', indexMigrationName)
 
 const v2Functions = [
   'start_video_render_v2',
@@ -141,5 +151,27 @@ describe('video production v2 migration', () => {
     expect(source).toContain('v1 complete remains compatible')
     expect(source).toContain('reservation')
     expect(source).toContain('null audio')
+  })
+
+  it('repairs the v2 download RPC without schema-qualifying the coalesce expression', () => {
+    expect(repairMigrationPath).not.toBeNull()
+    const source = readFileSync(repairMigrationPath!, 'utf8')
+
+    expect(source).toContain('create or replace function public.record_video_asset_download_v2(')
+    expect(source).toContain('artifact_task_id = coalesce(job.artifact_task_id, v_artifact_task_id)')
+    expect(source).not.toContain('pg_catalog.coalesce')
+    expect(source).not.toMatch(/create or replace function public\.(?!record_video_asset_download_v2)/)
+    expect(source).toMatch(/revoke all on function public\.record_video_asset_download_v2\([^;]+\) from public, anon, authenticated;/)
+    expect(source).toMatch(/grant execute on function public\.record_video_asset_download_v2\([^;]+\) to service_role, postgres;/)
+  })
+
+  it('covers both composite subtitle-cue foreign keys', () => {
+    expect(indexMigrationPath).not.toBeNull()
+    const source = readFileSync(indexMigrationPath!, 'utf8')
+
+    expect(source).toContain('create index if not exists video_render_jobs_v2_source_start_idx')
+    expect(source).toContain('on public.video_render_jobs (source_track_id, source_start_cue_index)')
+    expect(source).toContain('create index if not exists video_render_jobs_v2_source_end_idx')
+    expect(source).toContain('on public.video_render_jobs (source_track_id, source_end_cue_index)')
   })
 })

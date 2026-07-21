@@ -250,6 +250,12 @@ Ollama model, Vecteezy account access, FFmpeg, ffprobe, the font, and disk space
 The Vecteezy health check uses an ordinary search and never calls the formal
 download endpoint.
 
+Ollama model health verifies availability through `/api/tags`; it does not
+guarantee that scene planning will finish inside the 60-second request budget.
+Workbench generation requests disable Qwen thinking to reduce latency. If task
+creation times out while health remains available, use a faster model or host
+and update `OLLAMA_MODEL` before retrying.
+
 Creating a task selects 5-10 consecutive cues from one ready subtitle track and
 loads exactly eight review candidates per scene. `Load more` appends up to eight
 deduplicated candidates and preserves prior pages and selections. Candidate

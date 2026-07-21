@@ -179,6 +179,7 @@ describe('Ollama passage-plan transport', () => {
       prompt: buildPassagePrompt(cues),
       stream: false,
       format: 'json',
+      think: false,
     })
     expect(init.headers).not.toHaveProperty('authorization')
   })
