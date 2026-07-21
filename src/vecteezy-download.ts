@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { createWriteStream } from 'node:fs'
 import { rename, rm } from 'node:fs/promises'
 import { isAbsolute, normalize } from 'node:path'
@@ -9,10 +9,13 @@ const API_BASE_URL = 'https://api.vecteezy.com'
 const FILE_TYPE = 'mp4'
 const MAX_FILE_SIZE_BYTES = 512 * 1024 * 1024
 const MAX_AGGREGATE_SIZE_BYTES = 2 * 1024 * 1024 * 1024
-const MAX_FORMAL_DOWNLOADS = 4
+const DEFAULT_FORMAL_DOWNLOADS = 4
+const MAX_FORMAL_DOWNLOADS = 10
 const API_ORIGIN = new URL(API_BASE_URL).origin
 
 let formalDownloadsUsed = 0
+const formalReservationIds = new Set<string>()
+const startedFormalReservationIds = new Set<string>()
 
 export interface DownloadQuota {
   limit: number | null
@@ -79,12 +82,12 @@ export class VecteezyDownloadError extends Error {
 export class FormalDownloadBudget {
   readonly maximum: number
 
-  constructor(maximum: number) {
+  constructor(maximum = DEFAULT_FORMAL_DOWNLOADS) {
     if (!Number.isSafeInteger(maximum) || maximum < 0) {
       throw new Error('formal download maximum must be a non-negative integer')
     }
     if (maximum > MAX_FORMAL_DOWNLOADS) {
-      throw new Error('formal download maximum cannot exceed four')
+      throw new Error('formal download maximum cannot exceed ten')
     }
     this.maximum = maximum
   }
@@ -93,12 +96,20 @@ export class FormalDownloadBudget {
     return formalDownloadsUsed
   }
 
-  reserve(): number {
+  get remaining(): number {
+    return Math.max(0, this.maximum - formalDownloadsUsed)
+  }
+
+  reserve(requestId: string): void
+  reserve(): void
+  reserve(requestId?: string): void {
+    const normalizedRequestId = requestId ?? randomUUID()
+    if (formalReservationIds.has(normalizedRequestId)) return
     if (formalDownloadsUsed >= this.maximum) {
       throw new VecteezyDownloadError('download_budget_exhausted', 'formal download budget exhausted')
     }
+    formalReservationIds.add(normalizedRequestId)
     formalDownloadsUsed += 1
-    return formalDownloadsUsed
   }
 }
 
@@ -164,6 +175,16 @@ export class VecteezyDownloadClient {
     fileType = FILE_TYPE,
   ): Promise<FormalDownloadRequest> {
     const info = await this.getDownloadInfo(resourceId, fileType)
+    return this.requestDownloadWithInfo(info, budget, randomUUID(), fileType)
+  }
+
+  async requestDownloadWithInfo(
+    info: VecteezyDownloadInfo,
+    budget: FormalDownloadBudget,
+    reservationId: string,
+    fileType = FILE_TYPE,
+  ): Promise<FormalDownloadRequest> {
+    validateDownloadInfo(info)
     if (info.sourceSizeBytes > this.#options.maxFileSizeBytes) {
       throw new VecteezyDownloadError('file_size_limit_exceeded', 'Vecteezy file exceeds the 512 MiB limit')
     }
@@ -172,9 +193,13 @@ export class VecteezyDownloadClient {
     }
 
     // Reserve synchronously immediately before every quota-consuming request.
-    budget.reserve()
+    budget.reserve(reservationId)
+    if (startedFormalReservationIds.has(reservationId)) {
+      throw new VecteezyDownloadError('formal_reservation_reused', 'formal download reservation was already used')
+    }
+    startedFormalReservationIds.add(reservationId)
     this.#aggregateSizeBytes += info.sourceSizeBytes
-    const response = await this.#providerRequest(this.#resourceUrl(resourceId, 'download', fileType))
+    const response = await this.#providerRequest(this.#resourceUrl(info.resourceId, 'download', fileType))
     const payload = await providerJson(response)
     const signedUrl = signedUrlFrom(payload)
     const statusUrl = stringOrNull(payload.download_status_url)
@@ -413,6 +438,17 @@ function signedUrlFrom(payload: Record<string, unknown>): string | null {
 function validateResourceId(resourceId: number): void {
   if (!Number.isSafeInteger(resourceId) || resourceId < 1) {
     throw new Error('invalid Vecteezy resource ID')
+  }
+}
+
+function validateDownloadInfo(info: VecteezyDownloadInfo): void {
+  validateResourceId(info.resourceId)
+  if (!Number.isSafeInteger(info.sourceSizeBytes) || info.sourceSizeBytes < 1
+    || typeof info.requiresAttribution !== 'boolean'
+    || !(info.requiredAttributionUrl === null || typeof info.requiredAttributionUrl === 'string')
+    || !Number.isSafeInteger(info.quota.limit ?? 0)
+    || !Number.isSafeInteger(info.quota.remaining ?? 0)) {
+    throw new VecteezyDownloadError('invalid_download_info', 'Vecteezy download info is invalid')
   }
 }
 

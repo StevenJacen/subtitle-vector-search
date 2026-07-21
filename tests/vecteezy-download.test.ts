@@ -259,8 +259,72 @@ describe('Vecteezy formal downloads', () => {
     expect(budget.used).toBe(4)
   })
 
-  it.each([5, 10, Number.MAX_SAFE_INTEGER])('rejects a configured maximum above four: %i', maximum => {
-    expect(() => new FormalDownloadBudget(maximum)).toThrow('formal download maximum cannot exceed four')
+  it('retains the v1 default and maximum of four formal downloads', () => {
+    const budget = new FormalDownloadBudget()
+
+    expect(budget.maximum).toBe(4)
+    expect(budget.used).toBe(0)
+    expect(budget.remaining).toBe(4)
+  })
+
+  it.each([5, 10])('allows a v2 formal download limit of %i', maximum => {
+    const budget = new FormalDownloadBudget(maximum)
+
+    expect(budget.maximum).toBe(maximum)
+    expect(budget.remaining).toBe(maximum)
+  })
+
+  it.each([11, Number.MAX_SAFE_INTEGER])('rejects a configured maximum above ten: %i', maximum => {
+    expect(() => new FormalDownloadBudget(maximum)).toThrow('formal download maximum cannot exceed ten')
+  })
+
+  it('makes reservation IDs process-wide and idempotent across budget instances', () => {
+    const firstBudget = new FormalDownloadBudget(5)
+    const secondBudget = new FormalDownloadBudget(5)
+
+    firstBudget.reserve('10000000-0000-4000-8000-000000000001')
+    secondBudget.reserve('10000000-0000-4000-8000-000000000001')
+    secondBudget.reserve('10000000-0000-4000-8000-000000000002')
+
+    expect(firstBudget.used).toBe(2)
+    expect(secondBudget.used).toBe(2)
+    expect(firstBudget.remaining).toBe(3)
+    expect(secondBudget.remaining).toBe(3)
+  })
+
+  it('cannot reuse an idempotent reservation to start a second formal provider call', async () => {
+    const budget = new FormalDownloadBudget(5)
+    const info = {
+      resourceId: 42,
+      sourceSizeBytes: 123,
+      requiresAttribution: false,
+      requiredAttributionUrl: null,
+      quota: { limit: null, remaining: null },
+    }
+    const fetcher = vi.fn().mockResolvedValue(formalDownload())
+    const downloadClient = client(fetcher)
+    const reservationId = '10000000-0000-4000-8000-000000000001'
+
+    await downloadClient.requestDownloadWithInfo(info, budget, reservationId)
+    await expect(downloadClient.requestDownloadWithInfo(info, budget, reservationId))
+      .rejects.toMatchObject({ code: 'formal_reservation_reused' })
+
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    expect(budget.used).toBe(1)
+  })
+
+  it('reserves synchronously under concurrent scheduling without exceeding the process limit', async () => {
+    const budget = new FormalDownloadBudget(5)
+    const attempts = Array.from({ length: 6 }, (_, index) => Promise.resolve().then(() => {
+      budget.reserve(`10000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`)
+    }))
+
+    const results = await Promise.allSettled(attempts)
+
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(5)
+    expect(results.filter(result => result.status === 'rejected')).toHaveLength(1)
+    expect(budget.used).toBe(5)
+    expect(budget.remaining).toBe(0)
   })
 
   it('shares formal usage across budget instances and rejects the fifth request', async () => {
