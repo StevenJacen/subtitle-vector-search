@@ -65,8 +65,19 @@ export class SearchRequestError extends SearchContractError {
 }
 
 export function parseSearchRequest(value: unknown): SearchRequest {
+  return parseRequest(value, englishQuery)
+}
+
+export function parseHybridSearchRequest(value: unknown): SearchRequest {
+  return parseRequest(value, hybridQuery)
+}
+
+function parseRequest(
+  value: unknown,
+  queryParser: (value: unknown) => string,
+): SearchRequest {
   const input = object(value)
-  const query = englishQuery(input.query)
+  const query = queryParser(input.query)
   const requestedLimit = input.limit === undefined ? 10 : positiveInteger(input.limit)
   const movieId = input.movieId === undefined ? undefined : positiveInteger(input.movieId)
 
@@ -187,6 +198,12 @@ function englishQuery(value: unknown): string {
   if (!/^[\x09-\x0D\x20-\x7E]+$/.test(query) || !/[A-Za-z]/.test(query)) {
     throw new SearchRequestError('english_query_required')
   }
+  return query
+}
+
+function hybridQuery(value: unknown): string {
+  const query = nonBlankString(value)
+  if (query.length > 500) throw new SearchRequestError()
   return query
 }
 

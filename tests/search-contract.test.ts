@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 import {
   assertQueryEmbedding,
   mapSearchResults,
+  parseHybridSearchRequest,
   parseSearchRequest,
 } from '../supabase/functions/_shared/search.js'
 
@@ -46,6 +47,18 @@ describe('search request contract', () => {
       limit: 50,
       movieId: 7,
     })
+  })
+
+  it('keeps legacy search English-only while accepting bounded Han hybrid queries', () => {
+    expect(requestErrorFor({ query: '面对恐惧' })).toMatchObject({
+      code: 'english_query_required',
+    })
+    expect(parseHybridSearchRequest({ query: '面对恐惧', limit: 20, movieId: 7 })).toEqual({
+      query: '面对恐惧',
+      limit: 20,
+      movieId: 7,
+    })
+    expect(() => parseHybridSearchRequest({ query: 'x'.repeat(501) })).toThrow('invalid request')
   })
 })
 

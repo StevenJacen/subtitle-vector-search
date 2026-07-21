@@ -83,6 +83,7 @@ export class SubtitleLibraryClient {
     const results = parseHybridSearchResponse(
       await this.request(this.hybridSearchUrl, { query: normalized.query, limit }),
     )
+    if (results.length > limit) invalidResponse()
     return {
       originalQuery,
       normalizedQuery: normalized.query,

@@ -6,7 +6,7 @@ import {
 } from '../_shared/hybrid-search.ts'
 import {
   assertQueryEmbedding,
-  parseSearchRequest,
+  parseHybridSearchRequest,
   type SearchRequest,
   type SubtitleCueRow,
   SearchRequestError,
@@ -22,7 +22,7 @@ Deno.serve(async request => {
 
   return await handleAuthenticatedRequest(request, Deno.env, async () => {
     try {
-      const input = parseSearchRequest(await request.json())
+      const input = parseHybridSearchRequest(await request.json())
       const client = createServiceClient()
       return jsonResponse(await hybridSearch(client, input))
     } catch (error) {

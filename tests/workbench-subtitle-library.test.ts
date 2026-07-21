@@ -84,6 +84,20 @@ describe('subtitle library client', () => {
       .rejects.toThrow('subtitle library search returned an invalid response')
   })
 
+  it('rejects more hybrid results than the requested limit', async () => {
+    const client = new SubtitleLibraryClient({
+      supabaseUrl: 'https://supabase.test',
+      publishableKey: 'publishable-key',
+      personalToken: 'personal-token',
+      ollamaEndpoint: new URL('http://ollama.test'),
+      ollamaModel: 'gemma4:12b',
+      fetchFn: async () => new Response(JSON.stringify({ results: [hybridResult, hybridResult] })),
+    })
+
+    await expect(client.search({ query: 'face fear', limit: 1 }))
+      .rejects.toThrow('subtitle library search returned an invalid response')
+  })
+
   it('returns only ready-library aggregate counts', async () => {
     const client = new SubtitleLibraryClient({
       supabaseUrl: 'https://supabase.test',

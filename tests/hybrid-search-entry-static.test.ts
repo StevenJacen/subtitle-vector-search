@@ -14,6 +14,8 @@ describe('hybrid subtitle search Edge entry', () => {
     expect(source).toContain("import 'jsr:@supabase/functions-js/edge-runtime.d.ts'")
     expect(source).toContain("from 'npm:@supabase/supabase-js@2.110.2'")
     expect(source).toContain("new Supabase.ai.Session('gte-small')")
+    expect(source).toContain('parseHybridSearchRequest')
+    expect(source).toContain('parseHybridSearchRequest(await request.json())')
     expect(source).toContain('handleAuthenticatedRequest(request, Deno.env')
     expect(source.indexOf('handleAuthenticatedRequest(request, Deno.env'))
       .toBeLessThan(source.indexOf('embeddingSession.run'))
