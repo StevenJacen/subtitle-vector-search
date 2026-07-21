@@ -46,6 +46,20 @@ function response(runId = run1, page = 1): VideoAssetMatchResponse {
 }
 
 describe('local Vecteezy candidate adapter', () => {
+  it('restores an approved preview under its durable opaque ID after restart', () => {
+    const registry = new PreviewRegistry()
+    const previewId = '10000000-0000-4000-8000-000000000001'
+
+    registry.restore(previewId, 'https://cdn.vecteezy.com/recovered.mp4')
+    registry.restore(previewId, 'https://cdn.vecteezy.com/recovered.mp4')
+
+    expect(registry.resolve(previewId)).toBe('https://cdn.vecteezy.com/recovered.mp4')
+    expect(() => registry.restore(previewId, 'https://cdn.vecteezy.com/different.mp4'))
+      .toThrowError(expect.objectContaining({ code: 'preview_id_collision' }))
+    expect(() => registry.restore(previewId, 'http://127.0.0.1/private.mp4'))
+      .toThrowError(expect.objectContaining({ code: 'preview_url_forbidden' }))
+  })
+
   it('requests eight candidates by page and chains later pages to the source run', async () => {
     const matchScene = vi.fn()
       .mockResolvedValueOnce(response(run1, 1))

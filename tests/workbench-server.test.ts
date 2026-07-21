@@ -1,0 +1,128 @@
+import { describe, expect, it, vi } from 'vitest'
+import {
+  createLazyPreviewResolver,
+  parseWorkbenchServerConfiguration,
+  requestSubtitlePassage,
+} from '../src/workbench/server.js'
+import { PreviewRegistry } from '../src/workbench/vecteezy-candidates.js'
+
+const environment = {
+  SUPABASE_URL: 'https://project.supabase.co',
+  SUPABASE_PUBLISHABLE_KEY: 'publishable-key',
+  SUBTITLE_PERSONAL_TOKEN: 'personal-token',
+  VECTEEZY_ACCOUNT: '161976',
+  VECTEEZY_API_KEY: 'vecteezy-key',
+  AI_INFERENCE_API_HOST: 'http://54.67.73.171',
+  OLLAMA_MODEL: 'qwen3:30b',
+  WORKBENCH_PORT: '4317',
+  WORKBENCH_ARTIFACT_ROOT: 'artifacts',
+}
+
+describe('workbench server configuration', () => {
+  it('parses the production environment with conservative local defaults', () => {
+    expect(parseWorkbenchServerConfiguration(environment)).toEqual({
+      supabaseUrl: 'https://project.supabase.co',
+      supabasePublishableKey: 'publishable-key',
+      personalToken: 'personal-token',
+      vecteezyAccount: '161976',
+      vecteezyApiKey: 'vecteezy-key',
+      ollamaEndpoint: new URL('http://54.67.73.171'),
+      ollamaModel: 'qwen3:30b',
+      artifactRoot: 'artifacts',
+      fontPath: 'C:\\Windows\\Fonts\\msyh.ttc',
+      port: 4317,
+    })
+  })
+
+  it.each([
+    ['missing token', { ...environment, SUBTITLE_PERSONAL_TOKEN: '' }],
+    ['invalid Supabase URL', { ...environment, SUPABASE_URL: 'file:///private' }],
+    ['invalid account', { ...environment, VECTEEZY_ACCOUNT: 'account' }],
+    ['invalid Ollama URL', { ...environment, AI_INFERENCE_API_HOST: 'file:///private' }],
+    ['invalid port', { ...environment, WORKBENCH_PORT: '70000' }],
+  ])('rejects %s without echoing configuration values', (_name, input) => {
+    expect(() => parseWorkbenchServerConfiguration(input)).toThrow('invalid workbench configuration')
+  })
+})
+
+describe('subtitle passage client', () => {
+  it('posts the exact theme/count and returns a validated continuous passage', async () => {
+    const fetcher = vi.fn(async () => Response.json({ passage: passage() }))
+
+    const result = await requestSubtitlePassage({
+      supabaseUrl: environment.SUPABASE_URL,
+      publishableKey: environment.SUPABASE_PUBLISHABLE_KEY,
+      personalToken: environment.SUBTITLE_PERSONAL_TOKEN,
+      theme: 'hope after confinement',
+      sceneCount: 5,
+      fetcher,
+    })
+
+    expect(result.cues).toHaveLength(5)
+    expect(result.totalDurationMs).toBe(15_000)
+    expect(fetcher).toHaveBeenCalledWith(
+      'https://project.supabase.co/functions/v1/subtitle-passages',
+      expect.objectContaining({
+        method: 'POST',
+        headers: {
+          apikey: 'publishable-key',
+          'x-subtitle-token': 'personal-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ theme: 'hope after confinement', sceneCount: 5 }),
+      }),
+    )
+  })
+
+  it('rejects malformed or non-continuous provider data with a controlled error', async () => {
+    const invalid = passage()
+    invalid.cues[2].cueIndex = 99
+    const fetcher = vi.fn(async () => Response.json({
+      passage: invalid,
+      providerUrl: 'https://private.example',
+    }))
+
+    await expect(requestSubtitlePassage({
+      supabaseUrl: environment.SUPABASE_URL,
+      publishableKey: environment.SUPABASE_PUBLISHABLE_KEY,
+      personalToken: environment.SUBTITLE_PERSONAL_TOKEN,
+      theme: 'hope',
+      sceneCount: 5,
+      fetcher,
+    })).rejects.toThrow('subtitle passage request failed')
+  })
+})
+
+describe('durable preview recovery', () => {
+  it('rehydrates one opaque preview lazily and caches the provider detail result', async () => {
+    const registry = new PreviewRegistry()
+    const previewId = '40000000-0000-4000-8000-000000000001'
+    const findResourceId = vi.fn(async () => 42)
+    const loadPreviewUrl = vi.fn(async () => 'https://cdn.vecteezy.com/recovered.mp4')
+    const resolver = createLazyPreviewResolver({ registry, findResourceId, loadPreviewUrl })
+
+    await expect(resolver.resolve(previewId)).resolves.toBe('https://cdn.vecteezy.com/recovered.mp4')
+    await expect(resolver.resolve(previewId)).resolves.toBe('https://cdn.vecteezy.com/recovered.mp4')
+
+    expect(findResourceId).toHaveBeenCalledOnce()
+    expect(loadPreviewUrl).toHaveBeenCalledOnce()
+  })
+})
+
+function passage() {
+  return {
+    movie: { id: 1, title: 'Classic', releaseYear: 1994 },
+    trackId: 7,
+    startCueIndex: 20,
+    endCueIndex: 24,
+    totalDurationMs: 15_000,
+    cues: Array.from({ length: 5 }, (_, index) => ({
+      trackId: 7,
+      cueIndex: 20 + index,
+      startMs: index * 3_000,
+      endMs: (index + 1) * 3_000,
+      timestamp: `00:00:${String(index * 3).padStart(2, '0')}.000 --> 00:00:${String((index + 1) * 3).padStart(2, '0')}.000`,
+      text: `Cue ${index + 1}`,
+    })),
+  }
+}

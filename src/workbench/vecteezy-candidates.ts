@@ -51,6 +51,24 @@ export class PreviewRegistry {
     throw new PreviewRegistryError('preview_id_collision')
   }
 
+  restore(previewId: string, url: string): void {
+    if (!UUID.test(previewId)) throw new PreviewRegistryError('preview_id_invalid')
+    let parsed: URL
+    try {
+      parsed = new URL(url)
+    } catch {
+      throw new PreviewRegistryError('preview_url_forbidden')
+    }
+    if (!this.allowUrl(parsed)) throw new PreviewRegistryError('preview_url_forbidden')
+    const normalizedId = previewId.toLowerCase()
+    const normalizedUrl = parsed.toString()
+    const existing = this.previews.get(normalizedId)
+    if (existing !== undefined && existing !== normalizedUrl) {
+      throw new PreviewRegistryError('preview_id_collision')
+    }
+    this.previews.set(normalizedId, normalizedUrl)
+  }
+
   resolve(previewId: string): string | undefined {
     if (!UUID.test(previewId)) return undefined
     return this.previews.get(previewId)

@@ -159,6 +159,7 @@ describe('dynamic silent FFmpeg argument builders', () => {
       finalPath: 'final.mp4',
       timeline,
       config,
+      fontFilePath: 'C:\\Windows\\Fonts\\msyh.ttc',
     })
     const graph = args[args.indexOf('-filter_complex') + 1]
     const maps = args.flatMap((arg, index) => arg === '-map' ? [args[index + 1]] : [])
@@ -167,6 +168,7 @@ describe('dynamic silent FFmpeg argument builders', () => {
     expect(graph).toContain('duration=0.35:offset=5.2')
     expect(graph).toContain('duration=0.35:offset=6.6')
     expect(graph).toContain('duration=0.4:offset=8.6')
+    expect(graph).toContain("fontsdir='C\\:/Windows/Fonts'")
     expect(maps).toEqual(['[vout]'])
     expect(args).toEqual(expect.arrayContaining(['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-r', '30', '-t', '13.6']))
     expect(args).not.toContain('-c:a')

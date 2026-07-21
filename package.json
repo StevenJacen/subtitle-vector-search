@@ -7,21 +7,36 @@
     "subtitle": "tsx src/cli.ts",
     "batch-classics": "tsx src/batch-classics.ts",
     "video": "tsx src/video-pipeline.ts",
+    "workbench:dev": "tsx src/workbench/server.ts --dev",
+    "workbench:build": "vite build",
+    "workbench:start": "tsx src/workbench/server.ts",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e": "playwright test",
     "typecheck": "tsc --noEmit",
     "supabase": "supabase"
   },
   "dependencies": {
     "commander": "15.0.0",
     "dotenv": "17.4.2",
+    "lucide-react": "1.25.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
     "subtitle": "4.2.2"
   },
   "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.1",
     "@types/node": "26.1.1",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.3",
+    "jsdom": "29.1.1",
     "supabase": "2.109.1",
     "tsx": "4.23.0",
     "typescript": "7.0.2",
+    "vite": "8.1.5",
     "vitest": "4.1.10"
   }
 }

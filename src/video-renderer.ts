@@ -74,6 +74,7 @@ export interface SilentWorkbenchRenderInput {
   finalPath: string
   timeline: readonly TimelineScene[]
   config: DynamicRenderConfiguration
+  fontFilePath?: string
   commands?: RenderCommands
 }
 
@@ -168,6 +169,7 @@ export function buildSilentRenderArgs(input: {
   finalPath: string
   timeline: readonly TimelineScene[]
   config: DynamicRenderConfiguration
+  fontFilePath?: string
 }): string[] {
   validateSilentRenderArguments(input)
   const filters: string[] = []
@@ -179,7 +181,11 @@ export function buildSilentRenderArgs(input: {
     filters.push(`${current}[${index + 1}:v]xfade=transition=fade:duration=${formatNumber(scene.transitionOutMs / 1_000)}:offset=${formatNumber(scene.xfadeOffsetMs / 1_000)}${output}`)
     current = output
   }
-  filters.push(`${current}ass=filename='${filterPath(input.assPath)}'[vout]`)
+  const fontDirectory = input.fontFilePath === undefined
+    ? undefined
+    : (win32.isAbsolute(input.fontFilePath) ? win32.dirname(input.fontFilePath) : dirname(input.fontFilePath))
+  const fonts = fontDirectory === undefined ? '' : `:fontsdir='${filterPath(fontDirectory)}'`
+  filters.push(`${current}ass=filename='${filterPath(input.assPath)}'${fonts}[vout]`)
   const totalDurationMs = input.timeline.at(-1)?.endMs
   if (totalDurationMs === undefined) throw new Error('invalid silent render timeline')
 
@@ -233,6 +239,7 @@ export async function renderSilentWorkbenchVideo(
     finalPath: input.finalPath,
     timeline: input.timeline,
     config: input.config,
+    ...(input.fontFilePath === undefined ? {} : { fontFilePath: input.fontFilePath }),
   }), 'final render')
 
   const totalDurationMs = input.timeline[input.timeline.length - 1].endMs
@@ -443,6 +450,7 @@ function validateSilentRenderArguments(input: {
   finalPath: string
   timeline: readonly TimelineScene[]
   config: DynamicRenderConfiguration
+  fontFilePath?: string
 }): void {
   if (typeof input.assPath !== 'string'
     || input.assPath.trim() === ''
@@ -450,6 +458,8 @@ function validateSilentRenderArguments(input: {
     || input.finalPath.trim() === ''
     || input.sourcePaths.length !== input.timeline.length
     || input.sourcePaths.some(path => typeof path !== 'string' || path.trim() === '')
+    || !(input.fontFilePath === undefined
+      || (typeof input.fontFilePath === 'string' && input.fontFilePath.trim() !== ''))
   ) {
     throw new Error('invalid silent render input')
   }
