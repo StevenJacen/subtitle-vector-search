@@ -13,3 +13,6 @@ downloads/
 *.vtt
 supabase/.temp/
 artifacts/
+playwright-report/
+test-results/.last-run.json
+test-results/e2e-workbench-*/

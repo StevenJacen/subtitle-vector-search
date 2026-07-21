@@ -209,6 +209,101 @@ migration to remove the five private matching tables and their RPCs only when
 their audit records are no longer needed. Do not call Vecteezy media or download
 routes as part of rollback.
 
+## Local Video Workbench
+
+The localhost workbench combines continuous subtitle retrieval, bilingual
+planning, incremental Vecteezy review, explicit selection confirmation, silent
+FFmpeg rendering, task history, and recovery in one operational interface. It
+binds only to `127.0.0.1`; provider credentials and temporary provider URLs stay
+inside the Node control service and are never returned to the browser.
+
+Set the existing Supabase, Vecteezy, and Ollama values plus these local values
+in `.env`:
+
+```dotenv
+AI_INFERENCE_API_HOST=http://<approved-internal-ollama-host>
+OLLAMA_MODEL=qwen3:30b
+WORKBENCH_PORT=4173
+WORKBENCH_ARTIFACT_ROOT=artifacts
+WORKBENCH_FONT_PATH=C:\Windows\Fonts\msyh.ttc
+WORKBENCH_FIXTURE_MODE=0
+```
+
+The approved internal Ollama endpoint uses plaintext HTTP and receives the
+exact ordered English cues selected for the video. The status bar keeps this
+warning visible. Use this exception only for the explicitly approved test
+endpoint; use authenticated HTTPS before sending sensitive dialogue anywhere
+else.
+
+Start the development interface or the built interface:
+
+```powershell
+npm run workbench:dev
+
+npm run workbench:build
+npm run workbench:start
+```
+
+The server prints the actual loopback URL and moves to the next available port
+if the configured port is occupied. Health checks verify Supabase, the selected
+Ollama model, Vecteezy account access, FFmpeg, ffprobe, the font, and disk space.
+The Vecteezy health check uses an ordinary search and never calls the formal
+download endpoint.
+
+Creating a task selects 5-10 consecutive cues from one ready subtitle track and
+loads exactly eight review candidates per scene. `Load more` appends up to eight
+deduplicated candidates and preserves prior pages and selections. Candidate
+search, preview, selection, and confirmation consume no formal download quota.
+Production remains disabled until every scene has one current explicit
+confirmation; there is no automatic confirmation.
+
+Starting production reserves and performs one formal Vecteezy download for each
+confirmed scene, so the initial set consumes 5-10 formal calls. A replacement
+after a deterministic source rejection can use only the task's remaining
+capacity, and no task can exceed ten formal calls; a 10-scene task therefore has
+no replacement capacity. Only one production run executes at a time in the
+local process. Other review tasks remain available in history. A retryable
+failure can be reopened from history and resumed; uncertain provider
+reservations fail closed rather than silently spending another formal call.
+
+Version-2 files remain local under:
+
+```text
+artifacts/video-runs/<task-id>/manifest-v2.json
+artifacts/video-runs/<task-id>/review-state.json
+artifacts/video-runs/<task-id>/sources/
+artifacts/video-runs/<task-id>/subtitles.ass
+artifacts/video-runs/<task-id>/final.mp4
+```
+
+The final MP4 is H.264, `yuv420p`, 30 fps, and has no audio stream. The workflow
+does not add music, ambience, narration, TTS, or a Storage upload.
+
+Before using the real workbench, apply the additive v2 migration and deploy the
+three changed Edge Functions in this order:
+
+```powershell
+npx supabase db push --linked
+npx supabase functions deploy subtitle-passages --no-verify-jwt
+npx supabase functions deploy match-video-assets --no-verify-jwt
+npx supabase functions deploy video-production-metadata --no-verify-jwt
+```
+
+The v2 schema, RPCs, API actions, manifests, and renderer are additive. Existing
+v1 `video plan`, `video produce`, and `video resume` commands and completed v1
+manifests remain unchanged.
+
+For browser verification, install Chromium once and run the test-only fixture:
+
+```powershell
+npx playwright install chromium
+npm run test:e2e
+```
+
+`WORKBENCH_FIXTURE_MODE=1` is accepted only with `NODE_ENV=test`; production
+startup rejects that combination before reading credentials. The fixture makes
+no Supabase, Ollama, or Vecteezy request.
+
 ## Local Video Production
 
 This resumable workflow keeps every source clip, review file, subtitle file,

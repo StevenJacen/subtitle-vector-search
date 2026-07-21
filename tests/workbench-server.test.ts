@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   createLazyPreviewResolver,
   parseWorkbenchServerConfiguration,
   requestSubtitlePassage,
+  runWorkbenchServer,
 } from '../src/workbench/server.js'
 import { PreviewRegistry } from '../src/workbench/vecteezy-candidates.js'
 
@@ -42,6 +46,30 @@ describe('workbench server configuration', () => {
     ['invalid port', { ...environment, WORKBENCH_PORT: '70000' }],
   ])('rejects %s without echoing configuration values', (_name, input) => {
     expect(() => parseWorkbenchServerConfiguration(input)).toThrow('invalid workbench configuration')
+  })
+
+  it('starts the full HTTP server in test-only fixture mode without provider credentials', async () => {
+    const artifactRoot = await mkdtemp(join(tmpdir(), 'workbench-fixture-'))
+    const started = await runWorkbenchServer({
+      NODE_ENV: 'test',
+      WORKBENCH_FIXTURE_MODE: '1',
+      WORKBENCH_PORT: '0',
+      WORKBENCH_ARTIFACT_ROOT: artifactRoot,
+    })
+    try {
+      const response = await fetch(`${started.url}/api/health`)
+      await expect(response.json()).resolves.toMatchObject({ status: 'ok' })
+    } finally {
+      await new Promise<void>((resolve, reject) => started.server.close(error => error === undefined ? resolve() : reject(error)))
+      await rm(artifactRoot, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  it('rejects fixture mode outside NODE_ENV=test before reading real credentials', async () => {
+    await expect(runWorkbenchServer({
+      NODE_ENV: 'production',
+      WORKBENCH_FIXTURE_MODE: '1',
+    })).rejects.toThrow('workbench fixture mode requires NODE_ENV=test')
   })
 })
 

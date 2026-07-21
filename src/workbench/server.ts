@@ -24,7 +24,12 @@ import {
 } from './artifacts-v2.js'
 import { downloadConfirmedScenes, preflightSelections } from './download-manager.js'
 import { runWorkbenchHealthChecks, type WorkbenchHealthDependencies } from './health.js'
-import { createWorkbenchHttpServer, listenWorkbenchServer } from './http-server.js'
+import {
+  createWorkbenchHttpServer,
+  listenWorkbenchServer,
+  type WorkbenchHttpTaskService,
+} from './http-server.js'
+import { assertWorkbenchFixtureMode, createWorkbenchFixtureRuntime } from './fixture-runtime.js'
 import { planPassageWithOllama } from './ollama.js'
 import type { SelectedPassage, SelectedPassageCue } from './passage-selection.js'
 import {
@@ -49,7 +54,7 @@ export interface WorkbenchServerConfiguration {
 }
 
 export interface WorkbenchRuntime {
-  taskService: WorkbenchTaskService
+  taskService: WorkbenchHttpTaskService
   previews: { resolve(previewId: string): Promise<string | undefined> | string | undefined }
   health(): ReturnType<typeof runWorkbenchHealthChecks>
   resolveFinalPath(taskId: string): Promise<string | null>
@@ -268,9 +273,28 @@ export async function runWorkbenchServer(
   environment: Record<string, string | undefined> = process.env,
   options: { dev?: boolean } = {},
 ): Promise<{ url: string; server: ReturnType<typeof createWorkbenchHttpServer> }> {
-  const configuration = parseWorkbenchServerConfiguration(environment)
-  await mkdir(resolve(configuration.artifactRoot), { recursive: true })
-  const runtime = createWorkbenchRuntime(configuration)
+  const fixtureMode = assertWorkbenchFixtureMode(environment)
+  let port: number
+  let artifactRoot: string
+  let runtime: WorkbenchRuntime
+  let previewTransport: Pick<Parameters<typeof createWorkbenchHttpServer>[0], 'fetcher' | 'lookupHost'> = {}
+  if (fixtureMode) {
+    port = optionalPort(environment.WORKBENCH_PORT)
+    artifactRoot = environment.WORKBENCH_ARTIFACT_ROOT?.trim() || 'artifacts'
+    if (artifactRoot.includes('\0')) throw new Error('invalid workbench configuration')
+    const fixture = await createWorkbenchFixtureRuntime(artifactRoot)
+    runtime = fixture
+    previewTransport = {
+      fetcher: fixture.previewFetcher,
+      lookupHost: fixture.lookupPreviewHost,
+    }
+  } else {
+    const configuration = parseWorkbenchServerConfiguration(environment)
+    port = configuration.port
+    artifactRoot = configuration.artifactRoot
+    runtime = createWorkbenchRuntime(configuration)
+  }
+  await mkdir(resolve(artifactRoot), { recursive: true })
   const workbenchRoot = resolve('workbench')
   let vite: Awaited<ReturnType<(typeof import('vite'))['createServer']>> | undefined
   const server = createWorkbenchHttpServer({
@@ -278,6 +302,7 @@ export async function runWorkbenchServer(
     health: runtime.health,
     previewRegistry: runtime.previews,
     resolveFinalPath: runtime.resolveFinalPath,
+    ...previewTransport,
     ...(options.dev === true ? {
       renderHtml: async () => {
         if (vite === undefined) throw new Error('Vite is unavailable')
@@ -302,7 +327,7 @@ export async function runWorkbenchServer(
     })
     server.once('close', () => { void vite?.close() })
   }
-  const address = await listenWorkbenchServer(server, { port: configuration.port })
+  const address = await listenWorkbenchServer(server, { port })
   const report = await runtime.health()
   console.log(address.url)
   console.log(`health=${report.status}`)
