@@ -13,7 +13,7 @@ const DEFAULT_FORMAL_DOWNLOADS = 4
 const MAX_FORMAL_DOWNLOADS = 10
 const API_ORIGIN = new URL(API_BASE_URL).origin
 
-let formalDownloadsUsed = 0
+const formalDownloadsUsed = new Map<string, number>()
 const formalReservationIds = new Set<string>()
 const startedFormalReservationIds = new Set<string>()
 
@@ -81,23 +81,28 @@ export class VecteezyDownloadError extends Error {
 
 export class FormalDownloadBudget {
   readonly maximum: number
+  readonly #scope: string
 
-  constructor(maximum = DEFAULT_FORMAL_DOWNLOADS) {
+  constructor(maximum = DEFAULT_FORMAL_DOWNLOADS, scope = 'process') {
     if (!Number.isSafeInteger(maximum) || maximum < 0) {
       throw new Error('formal download maximum must be a non-negative integer')
     }
     if (maximum > MAX_FORMAL_DOWNLOADS) {
       throw new Error('formal download maximum cannot exceed ten')
     }
+    if (typeof scope !== 'string' || scope.trim() === '' || scope.length > 200) {
+      throw new Error('formal download scope is invalid')
+    }
     this.maximum = maximum
+    this.#scope = scope
   }
 
   get used(): number {
-    return formalDownloadsUsed
+    return formalDownloadsUsed.get(this.#scope) ?? 0
   }
 
   get remaining(): number {
-    return Math.max(0, this.maximum - formalDownloadsUsed)
+    return Math.max(0, this.maximum - this.used)
   }
 
   reserve(requestId: string): void
@@ -105,11 +110,11 @@ export class FormalDownloadBudget {
   reserve(requestId?: string): void {
     const normalizedRequestId = requestId ?? randomUUID()
     if (formalReservationIds.has(normalizedRequestId)) return
-    if (formalDownloadsUsed >= this.maximum) {
+    if (this.used >= this.maximum) {
       throw new VecteezyDownloadError('download_budget_exhausted', 'formal download budget exhausted')
     }
     formalReservationIds.add(normalizedRequestId)
-    formalDownloadsUsed += 1
+    formalDownloadsUsed.set(this.#scope, this.used + 1)
   }
 }
 

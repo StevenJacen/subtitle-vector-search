@@ -492,7 +492,7 @@ export class WorkbenchTaskService {
         verifiedSources = await this.dependencies.downloadConfirmedScenes({
           taskId,
           scenes,
-          budget: new FormalDownloadBudget(scenes.length),
+          budget: new FormalDownloadBudget(scenes.length, taskId),
         })
         manifest = await this.dependencies.artifacts.updateTask(taskId, current => ({ ...current, stage: 'probing' }))
         this.events.publish(taskId, 'probing', 'Source downloads verified')
@@ -502,7 +502,7 @@ export class WorkbenchTaskService {
         verifiedSources = await this.dependencies.downloadConfirmedScenes({
           taskId,
           scenes,
-          budget: new FormalDownloadBudget(scenes.length),
+          budget: new FormalDownloadBudget(scenes.length, taskId),
         })
         manifest = await this.dependencies.artifacts.updateTask(taskId, current => ({ ...current, stage: 'probing' }))
         this.events.publish(taskId, 'probing', 'Source downloads verified')
@@ -512,7 +512,7 @@ export class WorkbenchTaskService {
         verifiedSources ??= await this.dependencies.downloadConfirmedScenes({
           taskId,
           scenes,
-          budget: new FormalDownloadBudget(scenes.length),
+          budget: new FormalDownloadBudget(scenes.length, taskId),
         })
         for (const verified of verifiedSources) {
           const current = await this.dependencies.artifacts.readTask(taskId)
@@ -655,7 +655,7 @@ export class WorkbenchTaskService {
     const verified = knownVerified ?? await this.dependencies.downloadConfirmedScenes({
         taskId: manifest.taskId,
         scenes,
-        budget: new FormalDownloadBudget(scenes.length),
+        budget: new FormalDownloadBudget(scenes.length, manifest.taskId),
       })
     for (const source of missing) {
       const metadata = verified.find(value => value.sceneIndex === source.sceneIndex)

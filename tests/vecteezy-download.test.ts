@@ -292,6 +292,25 @@ describe('Vecteezy formal downloads', () => {
     expect(secondBudget.remaining).toBe(3)
   })
 
+  it('isolates long-lived workbench budgets by task while sharing retries in one task', () => {
+    const firstTaskId = '10000000-0000-4000-8000-000000000001'
+    const secondTaskId = '10000000-0000-4000-8000-000000000002'
+    const first = new FormalDownloadBudget(5, firstTaskId)
+    const resumed = new FormalDownloadBudget(5, firstTaskId)
+    const second = new FormalDownloadBudget(5, secondTaskId)
+
+    for (let index = 0; index < 5; index += 1) {
+      first.reserve(`20000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`)
+    }
+    resumed.reserve('20000000-0000-4000-8000-000000000001')
+    second.reserve('30000000-0000-4000-8000-000000000001')
+
+    expect(first.used).toBe(5)
+    expect(resumed.remaining).toBe(0)
+    expect(second.used).toBe(1)
+    expect(second.remaining).toBe(4)
+  })
+
   it('cannot reuse an idempotent reservation to start a second formal provider call', async () => {
     const budget = new FormalDownloadBudget(5)
     const info = {
