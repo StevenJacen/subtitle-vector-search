@@ -106,6 +106,35 @@ describe('Ollama passage-plan parser', () => {
     ], cues, context), 'forbidden_content')
   })
 
+  it.each([
+    ['the full exact English cue', `这句话包含 ${cues[0].text}`],
+    ['the movie title', '这是 Hidden Path 中的一个场景。'],
+    ['a supplied character name', 'Morgan 在这里继续前行。'],
+    ['a provider name', '这段 Vecteezy 素材展现了希望。'],
+    ['an HTTP URL', '请查看 https://media.example/video 获取画面。'],
+  ])('rejects %s embedded in captionZh', (_label, captionZh) => {
+    expectPlanError(() => parsePassagePlan([
+      { ...validOutput[0], captionZh },
+      validOutput[1],
+    ], cues, context), 'forbidden_content')
+  })
+
+  it('allows ordinary incidental Latin abbreviations in captionZh', () => {
+    const result = parsePassagePlan([
+      { ...validOutput[0], captionZh: 'AI 也能帮助人们保持希望。' },
+      validOutput[1],
+    ], cues, context)
+
+    expect(result[0].captionZh).toBe('AI 也能帮助人们保持希望。')
+  })
+
+  it('requires a nonblank movie title in parser context', () => {
+    expectPlanError(() => parsePassagePlan(validOutput, cues, {
+      movieTitle: '   ',
+      characterNames: context.characterNames,
+    }), 'invalid_output')
+  })
+
   it('rejects the full Chinese translation in optional facets', () => {
     expectPlanError(() => parsePassagePlan([
       { ...validOutput[0], mood: `quiet ${validOutput[0].captionZh}` },
@@ -164,23 +193,47 @@ describe('Ollama passage-plan transport', () => {
     })).resolves.toHaveLength(2)
   })
 
-  it('does not require optional movie or character context for transport planning', async () => {
-    const fetchFn = vi.fn().mockResolvedValue(responseEnvelope(validOutput))
+  it('requires a nonblank movie title before transport work', async () => {
+    const fetchFn = vi.fn()
 
-    await expect(planPassageWithOllama({
-      endpoint: new URL('http://ollama.test'), model: 'gemma4:12b', cues, fetchFn,
-    })).resolves.toHaveLength(2)
+    await expectRejectedCode(planPassageWithOllama({
+      endpoint: new URL('http://ollama.test'),
+      model: 'gemma4:12b',
+      movieTitle: '   ',
+      cues,
+      fetchFn,
+    }), 'invalid_configuration')
+    expect(fetchFn).not.toHaveBeenCalled()
   })
 
   it.each([
     ['malformed envelope', JSON.stringify({ message: 'not an Ollama generate response' })],
     ['malformed model JSON', JSON.stringify({ response: '{not json}' })],
     ['provider error envelope', JSON.stringify({ error: 'SECRET PROVIDER FAILURE' })],
+    ['mixed response and error envelope', JSON.stringify({
+      response: JSON.stringify(validOutput),
+      error: 'SECRET PROVIDER FAILURE',
+    })],
   ])('rejects %s with a controlled error', async (_label, body) => {
     const fetchFn = vi.fn().mockResolvedValue(new Response(body))
     await expectRejectedCode(planPassageWithOllama({
       endpoint: new URL('http://ollama.test'), model: 'gemma4:12b', cues, ...context, fetchFn,
     }), 'invalid_response')
+  })
+
+  it.each([
+    ['invalid_output', [{ ...validOutput[0] }, { ...validOutput[1], index: 0 }]],
+    ['forbidden_content', [
+      { ...validOutput[0], visualConcept: `a scene containing ${cues[0].text}` },
+      validOutput[1],
+    ]],
+  ])('preserves the sanitized %s parser code', async (code, output) => {
+    const rawPayload = JSON.stringify(output)
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({ response: rawPayload })))
+
+    await expectSanitized(planPassageWithOllama({
+      endpoint: new URL('http://ollama.test'), model: 'gemma4:12b', cues, ...context, fetchFn,
+    }), code, [rawPayload, cues[0].text, 'http://ollama.test'])
   })
 
   it('uses a 60-second abort signal and maps an abort to timeout', async () => {
@@ -212,23 +265,26 @@ describe('Ollama passage-plan transport', () => {
   })
 
   it('rejects a cross-origin redirect without following it', async () => {
-    const fetchFn = vi.fn().mockResolvedValue(new Response(null, {
+    const redirected = cancellableResponse('redirect body', {
       status: 307,
       headers: { location: 'http://attacker.test/api/generate' },
-    }))
+    })
+    const fetchFn = vi.fn().mockResolvedValue(redirected.response)
 
     await expectRejectedCode(planPassageWithOllama({
       endpoint: new URL('http://ollama.test'), model: 'gemma4:12b', cues, ...context, fetchFn,
     }), 'redirect_rejected')
     expect(fetchFn).toHaveBeenCalledOnce()
+    expect(redirected.cancel).toHaveBeenCalledOnce()
   })
 
   it('follows a same-origin redirect manually while preserving the request contract', async () => {
+    const redirected = cancellableResponse('redirect body', {
+      status: 307,
+      headers: { location: '/api/generate/' },
+    })
     const fetchFn = vi.fn()
-      .mockResolvedValueOnce(new Response(null, {
-        status: 307,
-        headers: { location: '/api/generate/' },
-      }))
+      .mockResolvedValueOnce(redirected.response)
       .mockResolvedValueOnce(responseEnvelope(validOutput))
 
     await expect(planPassageWithOllama({
@@ -237,6 +293,26 @@ describe('Ollama passage-plan transport', () => {
     expect(fetchFn).toHaveBeenCalledTimes(2)
     expect((fetchFn.mock.calls[1][0] as URL).toString()).toBe('http://ollama.test/api/generate/')
     expect(fetchFn.mock.calls[1][1]).toMatchObject({ method: 'POST', redirect: 'manual' })
+    expect(redirected.cancel).toHaveBeenCalledOnce()
+  })
+
+  it('cancels every redirect body when the same-origin redirect limit is exceeded', async () => {
+    const cancellations: Array<ReturnType<typeof vi.fn>> = []
+    const fetchFn = vi.fn().mockImplementation(() => {
+      const redirected = cancellableResponse('redirect body', {
+        status: 307,
+        headers: { location: '/api/generate' },
+      })
+      cancellations.push(redirected.cancel)
+      return Promise.resolve(redirected.response)
+    })
+
+    await expectRejectedCode(planPassageWithOllama({
+      endpoint: new URL('http://ollama.test'), model: 'gemma4:12b', cues, ...context, fetchFn,
+    }), 'redirect_rejected')
+    expect(fetchFn).toHaveBeenCalledTimes(4)
+    expect(cancellations).toHaveLength(4)
+    expect(cancellations.every(cancel => cancel.mock.calls.length === 1)).toBe(true)
   })
 
   it('rejects an oversized response body before parsing it', async () => {
@@ -246,13 +322,55 @@ describe('Ollama passage-plan transport', () => {
     }), 'response_too_large')
   })
 
+  it('cancels a declared-oversized response without reading it', async () => {
+    const oversized = cancellableResponse('unread provider body', {
+      headers: { 'content-length': String(128 * 1024 + 1) },
+    })
+
+    await expectRejectedCode(planPassageWithOllama({
+      endpoint: new URL('http://ollama.test'),
+      model: 'gemma4:12b',
+      cues,
+      ...context,
+      fetchFn: vi.fn().mockResolvedValue(oversized.response),
+    }), 'response_too_large')
+    expect(oversized.cancel).toHaveBeenCalledOnce()
+  })
+
+  it('accepts an envelope exactly at the byte limit and counts multibyte excess by bytes', async () => {
+    const responseJson = JSON.stringify(validOutput)
+    const base = JSON.stringify({ response: responseJson, padding: '' })
+    const padding = 'x'.repeat(128 * 1024 - new TextEncoder().encode(base).byteLength)
+    const boundaryBody = JSON.stringify({ response: responseJson, padding })
+    expect(new TextEncoder().encode(boundaryBody)).toHaveLength(128 * 1024)
+
+    await expect(planPassageWithOllama({
+      endpoint: new URL('http://ollama.test'),
+      model: 'gemma4:12b',
+      cues,
+      ...context,
+      fetchFn: vi.fn().mockResolvedValue(streamingResponse(boundaryBody)),
+    })).resolves.toHaveLength(2)
+
+    const multibyteBody = '界'.repeat(Math.floor((128 * 1024) / 3) + 1)
+    await expectRejectedCode(planPassageWithOllama({
+      endpoint: new URL('http://ollama.test'),
+      model: 'gemma4:12b',
+      cues,
+      ...context,
+      fetchFn: vi.fn().mockResolvedValue(streamingResponse(multibyteBody)),
+    }), 'response_too_large')
+  })
+
   it('maps HTTP and network failures without exposing provider details', async () => {
     const endpoint = 'http://private-ollama.test/SECRET-ENDPOINT'
     const secrets = [endpoint, cues[0].text, 'SECRET PROVIDER BODY', 'SECRET NETWORK FAILURE']
-    const httpFetch = vi.fn().mockResolvedValue(new Response('SECRET PROVIDER BODY', { status: 503 }))
+    const unavailable = cancellableResponse('SECRET PROVIDER BODY', { status: 503 })
+    const httpFetch = vi.fn().mockResolvedValue(unavailable.response)
     await expectSanitized(planPassageWithOllama({
       endpoint: new URL(endpoint), model: 'gemma4:12b', cues, ...context, fetchFn: httpFetch,
     }), 'provider_unavailable', secrets)
+    expect(unavailable.cancel).toHaveBeenCalledOnce()
 
     const networkFetch = vi.fn().mockRejectedValue(new Error('SECRET NETWORK FAILURE'))
     await expectSanitized(planPassageWithOllama({
@@ -272,6 +390,31 @@ describe('Ollama passage-plan transport', () => {
 
 function responseEnvelope(output: unknown): Response {
   return new Response(JSON.stringify({ response: JSON.stringify(output) }))
+}
+
+function cancellableResponse(
+  body: string,
+  init: ResponseInit = {},
+): { response: Response; cancel: ReturnType<typeof vi.fn> } {
+  const cancel = vi.fn()
+  const bytes = new TextEncoder().encode(body)
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes)
+    },
+    cancel,
+  })
+  return { response: new Response(stream, init), cancel }
+}
+
+function streamingResponse(body: string): Response {
+  const bytes = new TextEncoder().encode(body)
+  return new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes)
+      controller.close()
+    },
+  }))
 }
 
 function expectPlanError(operation: () => unknown, code: string): void {

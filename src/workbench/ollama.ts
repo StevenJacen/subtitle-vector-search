@@ -35,7 +35,7 @@ export interface PlanPassageInput {
   endpoint: URL
   model: string
   cues: readonly PassageCue[]
-  movieTitle?: string
+  movieTitle: string
   characterNames?: readonly string[]
   fetchFn?: typeof fetch
 }
@@ -77,7 +77,10 @@ export function parsePassagePlan(
   cues: readonly PassageCue[],
   context: PassagePlanContext,
 ): PlannedCue[] {
-  if (!Array.isArray(value) || value.length !== cues.length) {
+  if (typeof context.movieTitle !== 'string'
+    || context.movieTitle.trim().length === 0
+    || !Array.isArray(value)
+    || value.length !== cues.length) {
     throw new OllamaPlanError('invalid_output')
   }
 
@@ -86,7 +89,10 @@ export function parsePassagePlan(
 
 export async function planPassageWithOllama(input: PlanPassageInput): Promise<PlannedCue[]> {
   const endpoint = configuredEndpoint(input.endpoint)
-  if (typeof input.model !== 'string' || input.model.trim().length === 0) {
+  if (typeof input.model !== 'string'
+    || input.model.trim().length === 0
+    || typeof input.movieTitle !== 'string'
+    || input.movieTitle.trim().length === 0) {
     throw new OllamaPlanError('invalid_configuration')
   }
 
@@ -107,6 +113,7 @@ export async function planPassageWithOllama(input: PlanPassageInput): Promise<Pl
 
   const response = await requestWithRedirects(request, endpoint, init, signal)
   if (!response.ok) {
+    await cancelResponseBody(response)
     throw new OllamaPlanError('provider_unavailable')
   }
 
@@ -117,7 +124,7 @@ export async function planPassageWithOllama(input: PlanPassageInput): Promise<Pl
   } catch {
     throw new OllamaPlanError('invalid_response')
   }
-  if (!record(envelope) || typeof envelope.response !== 'string') {
+  if (!record(envelope) || 'error' in envelope || typeof envelope.response !== 'string') {
     throw new OllamaPlanError('invalid_response')
   }
 
@@ -130,10 +137,14 @@ export async function planPassageWithOllama(input: PlanPassageInput): Promise<Pl
 
   try {
     return parsePassagePlan(output, input.cues, {
-      movieTitle: input.movieTitle ?? '',
+      movieTitle: input.movieTitle,
       ...(input.characterNames === undefined ? {} : { characterNames: input.characterNames }),
     })
-  } catch {
+  } catch (error) {
+    if (error instanceof OllamaPlanError
+      && (error.code === 'invalid_output' || error.code === 'forbidden_content')) {
+      throw error
+    }
     throw new OllamaPlanError('invalid_response')
   }
 }
@@ -156,6 +167,9 @@ function parsePlannedCue(
   const captionZh = value.captionZh.trim()
   if (!validChinese(captionZh)) {
     throw new OllamaPlanError('invalid_output')
+  }
+  if (containsExternalReference(captionZh, cues, context)) {
+    throw new OllamaPlanError('forbidden_content')
   }
 
   const visualValues = new Map<(typeof VISUAL_KEYS)[number], string>()
@@ -220,6 +234,17 @@ function containsForbiddenContent(
   cues: readonly PassageCue[],
   context: PassagePlanContext,
 ): boolean {
+  if (containsExternalReference(value, cues, context)) {
+    return true
+  }
+  return containsNormalizedPhrase(value, captionZh)
+}
+
+function containsExternalReference(
+  value: string,
+  cues: readonly PassageCue[],
+  context: PassagePlanContext,
+): boolean {
   if (/\b(?:https?:\/\/|www\.)/i.test(value)
     || /\bvecteezy\b/i.test(value)
     || /\b[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:\/[^\s]*)?/i.test(value)) {
@@ -227,13 +252,8 @@ function containsForbiddenContent(
   }
 
   const forbiddenTerms = [context.movieTitle, ...(context.characterNames ?? [])]
-  if (forbiddenTerms.some(term => containsNormalizedPhrase(value, term))) {
-    return true
-  }
-  if (cues.some(cue => containsNormalizedPhrase(value, cue.text))) {
-    return true
-  }
-  return containsNormalizedPhrase(value, captionZh)
+  return forbiddenTerms.some(term => containsNormalizedPhrase(value, term))
+    || cues.some(cue => containsNormalizedPhrase(value, cue.text))
 }
 
 function containsNormalizedPhrase(value: string, phrase: string): boolean {
@@ -277,6 +297,7 @@ async function requestWithRedirects(
     }
 
     if (response.redirected || (response.url.length > 0 && new URL(response.url).origin !== endpoint.origin)) {
+      await cancelResponseBody(response)
       throw new OllamaPlanError('redirect_rejected')
     }
     if (response.status < 300 || response.status >= 400) {
@@ -285,17 +306,21 @@ async function requestWithRedirects(
 
     const location = response.headers.get('location')
     if (location === null || redirects === MAX_REDIRECTS) {
+      await cancelResponseBody(response)
       throw new OllamaPlanError('redirect_rejected')
     }
     let redirected: URL
     try {
       redirected = new URL(location, current)
     } catch {
+      await cancelResponseBody(response)
       throw new OllamaPlanError('redirect_rejected')
     }
     if (redirected.origin !== endpoint.origin) {
+      await cancelResponseBody(response)
       throw new OllamaPlanError('redirect_rejected')
     }
+    await cancelResponseBody(response)
     current = redirected
   }
   throw new OllamaPlanError('redirect_rejected')
@@ -304,6 +329,7 @@ async function requestWithRedirects(
 async function readBoundedBody(response: Response, signal: AbortSignal): Promise<string> {
   const declaredLength = response.headers.get('content-length')
   if (declaredLength !== null && Number(declaredLength) > RESPONSE_BYTE_LIMIT) {
+    await cancelResponseBody(response)
     throw new OllamaPlanError('response_too_large')
   }
   if (response.body === null) {
@@ -333,6 +359,17 @@ async function readBoundedBody(response: Response, signal: AbortSignal): Promise
       throw error
     }
     throw new OllamaPlanError(signal.aborted ? 'timeout' : 'provider_unavailable')
+  }
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  if (response.body === null) {
+    return
+  }
+  try {
+    await response.body.cancel()
+  } catch {
+    // Cancellation is best-effort and must not replace the controlled planner error.
   }
 }
 
