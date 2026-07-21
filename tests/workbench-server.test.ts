@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  createWorkbenchRuntime,
   createLazyPreviewResolver,
   parseWorkbenchServerConfiguration,
   requestSubtitlePassage,
@@ -72,6 +73,13 @@ describe('workbench server configuration', () => {
       NODE_ENV: 'production',
       WORKBENCH_FIXTURE_MODE: '1',
     })).rejects.toThrow('workbench fixture mode requires NODE_ENV=test')
+  })
+
+  it('constructs the production subtitle library and sync controller without health downloads', () => {
+    const runtime = createWorkbenchRuntime(parseWorkbenchServerConfiguration(environment), vi.fn())
+
+    expect(runtime.subtitleLibrary).toBeDefined()
+    expect(runtime.subtitleSync).toBeDefined()
   })
 })
 

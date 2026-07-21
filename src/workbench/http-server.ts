@@ -12,6 +12,15 @@ import {
   type WorkbenchTaskService,
 } from './task-service.js'
 import type { WorkbenchEventBus } from './events.js'
+import type {
+  SubtitleLibraryClient,
+  SubtitleSearchRequest,
+} from './subtitle-library.js'
+import type {
+  SubtitleSyncController,
+  SubtitleSyncEventBus,
+  SubtitleSyncInput,
+} from './subtitle-sync.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const JSON_LIMIT = 32 * 1024
@@ -25,6 +34,10 @@ export interface WorkbenchHttpTaskService extends Pick<WorkbenchTaskService,
 
 export interface WorkbenchHttpServerOptions {
   taskService: WorkbenchHttpTaskService
+  subtitleLibrary?: Pick<SubtitleLibraryClient, 'search' | 'summary'>
+  subtitleSync?: Pick<SubtitleSyncController, 'start' | 'stop' | 'snapshot'> & {
+    events: Pick<SubtitleSyncEventBus, 'subscribe'>
+  }
   sessionToken?: string
   health(): Promise<unknown>
   previewRegistry: { resolve(previewId: string): string | undefined | Promise<string | undefined> }
@@ -134,6 +147,39 @@ async function routeRequest(
   if (path === '/api/health') {
     requireMethod(method, 'GET')
     sendJson(response, 200, await options.health())
+    return
+  }
+  if (path === '/api/subtitles/search') {
+    requireMethod(method, 'POST')
+    authorizeMutation(request, origin, sessionToken)
+    sendJson(response, 200, await subtitleLibrary(options).search(subtitleSearchInput(await readJson(request))))
+    return
+  }
+  if (path === '/api/subtitles/summary') {
+    requireMethod(method, 'GET')
+    sendJson(response, 200, await subtitleLibrary(options).summary())
+    return
+  }
+  if (path === '/api/subtitles/sync') {
+    if (method === 'GET') {
+      sendJson(response, 200, subtitleSync(options).snapshot())
+      return
+    }
+    requireMethod(method, 'POST')
+    authorizeMutation(request, origin, sessionToken)
+    sendJson(response, 202, await subtitleSync(options).start(subtitleSyncInput(await readJson(request))))
+    return
+  }
+  if (path === '/api/subtitles/sync/stop') {
+    requireMethod(method, 'POST')
+    authorizeMutation(request, origin, sessionToken)
+    emptyObject(await readJson(request))
+    sendJson(response, 202, subtitleSync(options).stop())
+    return
+  }
+  if (path === '/api/subtitles/sync/events') {
+    requireMethod(method, 'GET')
+    streamSubtitleSyncEvents(request, response, subtitleSync(options).events, options.heartbeatMs ?? 15_000)
     return
   }
   if (path === '/api/tasks') {
@@ -311,6 +357,60 @@ function selectionInput(value: unknown): { candidate: CandidateIdentity; confirm
   }
 }
 
+function subtitleSearchInput(value: unknown): SubtitleSearchRequest {
+  const input = exactObject(value, ['query', 'limit'])
+  if (typeof input.query !== 'string' || input.query.trim().length < 1 || input.query.trim().length > 500
+    || !Number.isSafeInteger(input.limit) || (input.limit as number) < 1 || (input.limit as number) > 50) {
+    throw httpError(400, 'invalid_subtitle_search', 'Invalid subtitle search')
+  }
+  return { query: input.query.trim(), limit: input.limit as number }
+}
+
+function subtitleSyncInput(value: unknown): SubtitleSyncInput {
+  const input = exactObject(value, hasKey(value, 'movie') ? ['mode', 'movie'] : ['mode'])
+  if (input.mode === 'automatic' && Object.keys(input).length === 1) return { mode: 'automatic' }
+  if (input.mode !== 'manual' || !isSubtitleMovie(input.movie)) invalidSubtitleSyncInput()
+  return {
+    mode: 'manual',
+    movie: {
+      imdbId: input.movie.imdbId,
+      title: input.movie.title.trim(),
+      releaseYear: input.movie.releaseYear,
+    },
+  }
+}
+
+function hasKey(value: unknown, key: string): boolean {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    && Object.prototype.hasOwnProperty.call(value, key)
+}
+
+function isSubtitleMovie(value: unknown): value is { imdbId: string; title: string; releaseYear: number } {
+  let movie: Record<string, unknown>
+  try {
+    movie = exactObject(value, ['imdbId', 'title', 'releaseYear'])
+  } catch {
+    return false
+  }
+  return typeof movie.imdbId === 'string' && /^tt\d+$/.test(movie.imdbId)
+    && typeof movie.title === 'string' && movie.title.trim().length >= 1 && movie.title.trim().length <= 200
+    && Number.isSafeInteger(movie.releaseYear) && (movie.releaseYear as number) >= 1888 && (movie.releaseYear as number) <= 3000
+}
+
+function invalidSubtitleSyncInput(): never {
+  throw httpError(400, 'invalid_subtitle_sync', 'Invalid subtitle synchronization request')
+}
+
+function subtitleLibrary(options: WorkbenchHttpServerOptions): Pick<SubtitleLibraryClient, 'search' | 'summary'> {
+  if (options.subtitleLibrary === undefined) throw httpError(404, 'not_found', 'Not found')
+  return options.subtitleLibrary
+}
+
+function subtitleSync(options: WorkbenchHttpServerOptions): NonNullable<WorkbenchHttpServerOptions['subtitleSync']> {
+  if (options.subtitleSync === undefined) throw httpError(404, 'not_found', 'Not found')
+  return options.subtitleSync
+}
+
 function emptyObject(value: unknown): void {
   exactObject(value, [])
 }
@@ -359,6 +459,38 @@ function streamEvents(
   })
   response.flushHeaders()
   const unsubscribe = events.subscribe(id, event => {
+    response.write(`id: ${event.sequence}\nevent: progress\ndata: ${JSON.stringify(event)}\n\n`)
+  }, after)
+  const heartbeat = setInterval(() => response.write(': heartbeat\n\n'), heartbeatMs)
+  heartbeat.unref()
+  const cleanup = () => {
+    clearInterval(heartbeat)
+    unsubscribe()
+  }
+  request.once('close', cleanup)
+  response.once('close', cleanup)
+}
+
+function streamSubtitleSyncEvents(
+  request: IncomingMessage,
+  response: ServerResponse,
+  events: Pick<SubtitleSyncEventBus, 'subscribe'>,
+  heartbeatMs: number,
+): void {
+  if (!Number.isSafeInteger(heartbeatMs) || heartbeatMs < 10 || heartbeatMs > 60_000) {
+    throw new Error('invalid heartbeat interval')
+  }
+  const lastEventId = request.headers['last-event-id']
+  const after = lastEventId === undefined ? 0 : Number(lastEventId)
+  if (!Number.isSafeInteger(after) || after < 0) throw httpError(400, 'invalid_event_cursor', 'Invalid event cursor')
+  response.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-store',
+    connection: 'keep-alive',
+    'x-accel-buffering': 'no',
+  })
+  response.flushHeaders()
+  const unsubscribe = events.subscribe(event => {
     response.write(`id: ${event.sequence}\nevent: progress\ndata: ${JSON.stringify(event)}\n\n`)
   }, after)
   const heartbeat = setInterval(() => response.write(': heartbeat\n\n'), heartbeatMs)
@@ -693,7 +825,21 @@ function publicHttpError(error: unknown): {
     const controlled = controlledTaskError(error.code)
     if (controlled !== null) return { ...controlled, headers: {} }
   }
+  if (error instanceof Error) {
+    const controlled = controlledSubtitleSyncError(error.message)
+    if (controlled !== null) return { ...controlled, headers: {} }
+  }
   return { status: 500, code: 'internal_error', message: 'Request failed', headers: {} }
+}
+
+function controlledSubtitleSyncError(message: string): { status: number; code: string; message: string } | null {
+  if (message === 'subtitle_sync_already_running') {
+    return { status: 409, code: message, message: 'Subtitle synchronization is already running' }
+  }
+  if (message === 'invalid_subtitle_sync_input') {
+    return { status: 400, code: message, message: 'Invalid subtitle synchronization request' }
+  }
+  return null
 }
 
 function controlledTaskError(code: string): { status: number; code: string; message: string } | null {

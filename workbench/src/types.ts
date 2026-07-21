@@ -157,6 +157,63 @@ export interface WorkbenchTaskEvent {
   sceneIndex?: number
 }
 
+export interface SubtitleSearchRequest {
+  query: string
+  limit: number
+}
+
+export interface SubtitleLibrarySummary {
+  readyTracks: number
+  readyMovies: number
+}
+
+export interface SubtitleSearchResult {
+  similarity: number
+  rrfScore: number
+  semanticRank: number | null
+  fullTextRank: number | null
+  movie: { id: number; title: string; releaseYear: number | null }
+  trackId: number
+  chunkIndex: number
+  startMs: number
+  endMs: number
+  timestamp: string
+  text: string
+  cues: Array<{ index: number; startMs: number; endMs: number; text: string }>
+}
+
+export interface SubtitleSearchResponse {
+  originalQuery: string
+  normalizedQuery: string
+  warning: 'query_normalization_failed' | null
+  results: SubtitleSearchResult[]
+}
+
+export type SubtitleSyncInput =
+  | { mode: 'automatic' }
+  | { mode: 'manual'; movie: { imdbId: string; title: string; releaseYear: number } }
+
+export type SubtitleSyncStatus = 'idle' | 'running' | 'completed' | 'quota_reached'
+  | 'candidate_exhausted' | 'stopped' | 'configuration_error' | 'failed'
+
+export interface SubtitleSyncSnapshot {
+  jobId: string | null
+  mode: 'automatic' | 'manual' | null
+  status: SubtitleSyncStatus
+  currentMovie: { imdbId: string; title: string; releaseYear: number } | null
+  attempted: number
+  succeeded: number
+  failed: number
+  message: string
+  startedAt: string | null
+  updatedAt: string
+}
+
+export interface SubtitleSyncEvent {
+  sequence: number
+  snapshot: SubtitleSyncSnapshot
+}
+
 export interface WorkbenchApi {
   health(): Promise<WorkbenchHealthReport>
   listTasks(): Promise<WorkbenchTask[]>
@@ -172,4 +229,10 @@ export interface WorkbenchApi {
   produce(taskId: string): Promise<void>
   resume(taskId: string): Promise<void>
   subscribe(taskId: string, listener: (event: WorkbenchTaskEvent) => void): () => void
+  searchSubtitles?(input: SubtitleSearchRequest): Promise<SubtitleSearchResponse>
+  subtitleLibrary?(): Promise<SubtitleLibrarySummary>
+  subtitleSync?(): Promise<SubtitleSyncSnapshot>
+  startSubtitleSync?(input: SubtitleSyncInput): Promise<SubtitleSyncSnapshot>
+  stopSubtitleSync?(): Promise<SubtitleSyncSnapshot>
+  subscribeSubtitleSync?(listener: (snapshot: SubtitleSyncSnapshot) => void): () => void
 }

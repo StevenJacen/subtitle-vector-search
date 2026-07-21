@@ -7,6 +7,7 @@ import { createServer as createNodeServer } from 'node:http'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WorkbenchEventBus } from '../src/workbench/events.js'
 import { SubtitleApiError } from '../src/supabase-api.js'
+import { SubtitleSyncEventBus, type SubtitleSyncSnapshot } from '../src/workbench/subtitle-sync.js'
 import {
   createWorkbenchHttpServer,
   listenWorkbenchServer,
@@ -78,6 +79,63 @@ function mutationHeaders(origin: string): Record<string, string> {
     'content-type': 'application/json',
     'x-workbench-session': SESSION_TOKEN,
   }
+}
+
+function subtitleSearchResult() {
+  return {
+    originalQuery: 'hope',
+    normalizedQuery: 'hope',
+    warning: null,
+    results: [{
+      similarity: 0.91,
+      rrfScore: 0.05,
+      semanticRank: 1,
+      fullTextRank: null,
+      movie: { id: 7, title: 'Classic', releaseYear: 1994 },
+      trackId: 12,
+      chunkIndex: 3,
+      startMs: 1_000,
+      endMs: 2_000,
+      timestamp: '00:00:01.000 --> 00:00:02.000',
+      text: 'Hope is a good thing.',
+      cues: [{ index: 4, startMs: 1_000, endMs: 2_000, text: 'Hope is a good thing.' }],
+    }],
+  }
+}
+
+function subtitleSyncSnapshot(overrides: Partial<SubtitleSyncSnapshot> = {}): SubtitleSyncSnapshot {
+  return {
+    jobId: null,
+    mode: null,
+    status: 'idle',
+    currentMovie: null,
+    attempted: 0,
+    succeeded: 0,
+    failed: 0,
+    message: 'Idle',
+    startedAt: null,
+    updatedAt: '2026-07-21T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function fakeSubtitleServices() {
+  const events = new SubtitleSyncEventBus()
+  const subtitleLibrary = {
+    search: vi.fn(async () => subtitleSearchResult()),
+    summary: vi.fn(async () => ({ readyTracks: 12, readyMovies: 5 })),
+  }
+  const subtitleSync = {
+    events,
+    start: vi.fn(async () => subtitleSyncSnapshot({
+      jobId: 'job-1', mode: 'automatic', status: 'running', message: 'Synchronizing subtitles', startedAt: '2026-07-21T00:00:00.000Z',
+    })),
+    stop: vi.fn(() => subtitleSyncSnapshot({
+      jobId: 'job-1', mode: 'automatic', status: 'running', message: 'Synchronizing subtitles', startedAt: '2026-07-21T00:00:00.000Z',
+    })),
+    snapshot: vi.fn(() => subtitleSyncSnapshot()),
+  }
+  return { subtitleLibrary, subtitleSync }
 }
 
 describe('workbench HTTP security boundary', () => {
@@ -301,6 +359,89 @@ describe('workbench HTTP security boundary', () => {
     expect(await conflict.json()).toEqual({
       error: { code: 'selection_required', message: 'Scene selection is required' },
     })
+  })
+})
+
+describe('subtitle library workbench API', () => {
+  it('keeps subtitle search protected, bounded, and provider-safe', async () => {
+    const { subtitleLibrary, subtitleSync } = fakeSubtitleServices()
+    const { origin } = await start({ subtitleLibrary, subtitleSync })
+
+    const unauthorized = await fetch(`${origin}/api/subtitles/search`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: 'hope', limit: 20 }),
+    })
+    const valid = await fetch(`${origin}/api/subtitles/search`, {
+      method: 'POST', headers: mutationHeaders(origin), body: JSON.stringify({ query: 'hope', limit: 20 }),
+    })
+    const invalid = await fetch(`${origin}/api/subtitles/search`, {
+      method: 'POST', headers: mutationHeaders(origin), body: JSON.stringify({ query: 'hope', limit: 20, providerUrl: 'https://private.example' }),
+    })
+    const queried = await fetch(`${origin}/api/subtitles/search?query=hope`, { method: 'POST', headers: mutationHeaders(origin), body: '{}' })
+    const wrongMethod = await fetch(`${origin}/api/subtitles/search`)
+    subtitleLibrary.search.mockRejectedValueOnce(new Error('provider token=secret https://private.example/path'))
+    const failed = await fetch(`${origin}/api/subtitles/search`, {
+      method: 'POST', headers: mutationHeaders(origin), body: JSON.stringify({ query: 'hope', limit: 20 }),
+    })
+
+    expect(unauthorized.status).toBe(403)
+    expect(valid.status).toBe(200)
+    expect(await valid.json()).toEqual(subtitleSearchResult())
+    expect(subtitleLibrary.search).toHaveBeenCalledWith({ query: 'hope', limit: 20 })
+    expect(invalid.status).toBe(400)
+    expect(queried.status).toBe(400)
+    expect(wrongMethod.status).toBe(405)
+    expect(failed.status).toBe(500)
+    expect(await failed.text()).not.toMatch(/secret|private|provider|https/i)
+  })
+
+  it('exposes sanitized subtitle reads and controlled synchronization mutations', async () => {
+    const { subtitleLibrary, subtitleSync } = fakeSubtitleServices()
+    const { origin } = await start({ subtitleLibrary, subtitleSync })
+
+    const summary = await fetch(`${origin}/api/subtitles/summary`)
+    const snapshot = await fetch(`${origin}/api/subtitles/sync`)
+    const summaryMutation = await fetch(`${origin}/api/subtitles/summary`, { method: 'POST', headers: mutationHeaders(origin), body: '{}' })
+    const unauthorized = await fetch(`${origin}/api/subtitles/sync`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode: 'automatic' }) })
+    const automatic = await fetch(`${origin}/api/subtitles/sync`, { method: 'POST', headers: mutationHeaders(origin), body: JSON.stringify({ mode: 'automatic' }) })
+    const manualInvalid = await fetch(`${origin}/api/subtitles/sync`, { method: 'POST', headers: mutationHeaders(origin), body: JSON.stringify({ mode: 'manual', movie: { imdbId: 'not-imdb', title: '', releaseYear: 1700 } }) })
+    const stop = await fetch(`${origin}/api/subtitles/sync/stop`, { method: 'POST', headers: mutationHeaders(origin), body: '{}' })
+    subtitleSync.start.mockImplementationOnce(() => { throw new Error('subtitle_sync_already_running') })
+    const conflict = await fetch(`${origin}/api/subtitles/sync`, { method: 'POST', headers: mutationHeaders(origin), body: JSON.stringify({ mode: 'automatic' }) })
+
+    expect(await summary.json()).toEqual({ readyTracks: 12, readyMovies: 5 })
+    expect(await snapshot.json()).toEqual(subtitleSyncSnapshot())
+    expect(summaryMutation.status).toBe(405)
+    expect(unauthorized.status).toBe(403)
+    expect(automatic.status).toBe(202)
+    expect(subtitleSync.start).toHaveBeenCalledWith({ mode: 'automatic' })
+    expect(manualInvalid.status).toBe(400)
+    expect(stop.status).toBe(202)
+    expect(subtitleSync.stop).toHaveBeenCalledOnce()
+    expect(conflict.status).toBe(409)
+    expect(await conflict.json()).toEqual({ error: { code: 'subtitle_sync_already_running', message: 'Subtitle synchronization is already running' } })
+  })
+
+  it('streams only sanitized subtitle snapshots with heartbeat cleanup', async () => {
+    const { subtitleLibrary, subtitleSync } = fakeSubtitleServices()
+    const unsubscribe = vi.spyOn(subtitleSync.events, 'subscribe')
+    const { origin } = await start({ subtitleLibrary, subtitleSync, heartbeatMs: 20 })
+    const controller = new AbortController()
+    const response = await fetch(`${origin}/api/subtitles/sync/events`, { signal: controller.signal })
+    const reader = response.body!.getReader()
+    subtitleSync.events.publish(subtitleSyncSnapshot({
+      jobId: 'job-1', mode: 'manual', status: 'running', message: 'Importing subtitle', startedAt: '2026-07-21T00:00:00.000Z',
+    }))
+    const first = new TextDecoder().decode((await reader.read()).value)
+    const heartbeat = new TextDecoder().decode((await reader.read()).value)
+    controller.abort()
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(response.headers.get('content-type')).toContain('text/event-stream')
+    expect(first).toContain('event: progress')
+    expect(first).toContain('"status":"running"')
+    expect(first).not.toMatch(/secret|provider|https|[A-Z]:\\/i)
+    expect(heartbeat).toContain(': heartbeat')
+    expect(unsubscribe).toHaveBeenCalledOnce()
   })
 })
 

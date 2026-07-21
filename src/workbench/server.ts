@@ -32,6 +32,7 @@ import {
 import { assertWorkbenchFixtureMode, createWorkbenchFixtureRuntime } from './fixture-runtime.js'
 import { planPassageWithOllama } from './ollama.js'
 import { SubtitleLibraryClient } from './subtitle-library.js'
+import { SubtitleSyncController } from './subtitle-sync.js'
 import type { PassageSourceAnchor, SelectedPassage, SelectedPassageCue } from './passage-selection.js'
 import {
   WorkbenchTaskService,
@@ -60,6 +61,7 @@ export interface WorkbenchRuntime {
   health(): ReturnType<typeof runWorkbenchHealthChecks>
   resolveFinalPath(taskId: string): Promise<string | null>
   subtitleLibrary?: SubtitleLibraryClient
+  subtitleSync?: SubtitleSyncController
 }
 
 export function parseWorkbenchServerConfiguration(
@@ -236,6 +238,13 @@ export function createWorkbenchRuntime(
       ollamaModel: configuration.ollamaModel,
       fetchFn: fetcher,
     }),
+    subtitleSync: new SubtitleSyncController({
+      candidatesPath: resolve('data', 'classic-movie-candidates.json'),
+      batchStatePath: resolve('.batch-state', 'classic-import-state.json'),
+      snapshotPath: resolve('.batch-state', 'subtitle-sync-snapshot.json'),
+      downloadsDir: resolve('downloads', 'classics'),
+      targetSuccessCount: 200,
+    }),
   }
 }
 
@@ -315,6 +324,8 @@ export async function runWorkbenchServer(
   let vite: Awaited<ReturnType<(typeof import('vite'))['createServer']>> | undefined
   const server = createWorkbenchHttpServer({
     taskService: runtime.taskService,
+    subtitleLibrary: runtime.subtitleLibrary,
+    subtitleSync: runtime.subtitleSync,
     health: runtime.health,
     previewRegistry: runtime.previews,
     resolveFinalPath: runtime.resolveFinalPath,
