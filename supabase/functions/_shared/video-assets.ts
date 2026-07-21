@@ -143,6 +143,7 @@ export function parseVideoAssetRequest(value: unknown): VideoAssetRequest {
     throw invalidRequest()
   }
   if ((sourceRunId !== undefined && (page === undefined || page === 1))
+    || (sourceRunId !== undefined && theme === undefined)
     || (page !== undefined && page > 1 && sourceRunId === undefined)
     || (page !== undefined && candidateCount !== 8)
     || (sourceRunId !== undefined && (subtitleChunkId !== undefined || text !== undefined))) {

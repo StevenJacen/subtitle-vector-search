@@ -55,9 +55,16 @@ function persistedRun(overrides: Partial<PersistedVideoAssetRun> = {}): Persiste
   return {
     runId,
     status: 'completed',
+    inputKind: 'theme',
+    theme: 'hope',
     planner: { model: 'gemma4:12b', promptVersion: 'visual-plan-v1', fallbackUsed: false },
     visualIntent: plan.visualIntent,
-    queries: plan.queries.map(query => ({ ...query, status: 'completed' as const })),
+    queries: plan.queries.map(query => ({
+      ...query,
+      status: 'completed' as const,
+      filters: { contentType: 'video' },
+      providerTotal: 5,
+    })),
     candidates: [1, 2].map(id => ({
       ...resource(id).stable,
       provider: 'vecteezy' as const,
@@ -67,6 +74,21 @@ function persistedRun(overrides: Partial<PersistedVideoAssetRun> = {}): Persiste
     })),
     ...overrides,
   }
+}
+
+function rootRun(sourceRunId: string, theme = 'hope'): PersistedVideoAssetRun {
+  return persistedRun({
+    runId: sourceRunId,
+    inputKind: 'theme',
+    theme,
+    candidates: [],
+    queries: plan.queries.map(query => ({
+      ...query,
+      status: 'completed' as const,
+      filters: { contentType: 'video', page: 1, hasNextPage: true },
+      providerTotal: 1_000,
+    })),
+  })
 }
 
 function repository(overrides: Partial<VideoAssetRepository> = {}): VideoAssetRepository {
@@ -121,7 +143,7 @@ describe('video asset matching orchestration', () => {
     const sourceRunId = '99999999-9999-4999-8999-999999999999'
     const repo = repository({
       loadRun: vi.fn().mockImplementation(async id => id === sourceRunId
-        ? persistedRun({ runId: sourceRunId, candidates: [] })
+        ? rootRun(sourceRunId)
         : persistedRun()),
     })
     const deps = dependencies(repo, { search: pagedSearch() })
@@ -136,6 +158,7 @@ describe('video asset matching orchestration', () => {
       version: 2,
       promptVersion: 'visual-plan-v1',
       sourceRunId,
+      theme: 'hope',
       page: 2,
       candidateCount: 8,
     }))
@@ -146,6 +169,66 @@ describe('video asset matching orchestration', () => {
     expect(deps.search).toHaveBeenCalledTimes(3)
     expect(vi.mocked(deps.search).mock.calls.map(call => call[2])).toEqual([2, 2, 2])
     expect(result).toEqual(expect.objectContaining({ runId, page: 2, hasNextPage: true }))
+    const finishInput = vi.mocked(repo.finishRun).mock.calls[0][0]
+    expect(finishInput.queries.map(query => query.filters.hasNextPage)).toEqual([true, true, true])
+  })
+
+  it.each([
+    ['mismatched theme', rootRun('99999999-9999-4999-8999-999999999999', 'courage')],
+    ['legacy unpaged run', persistedRun({ runId: '99999999-9999-4999-8999-999999999999' })],
+    ['later-page child', persistedRun({
+      runId: '99999999-9999-4999-8999-999999999999',
+      queries: plan.queries.map(query => ({
+        ...query, status: 'completed' as const,
+        filters: { page: 2, hasNextPage: true }, providerTotal: 1_000,
+      })),
+    })],
+    ['non-theme input', { ...rootRun('99999999-9999-4999-8999-999999999999'), inputKind: 'text' }],
+  ])('rejects %s as a workbench page root', async (_name, sourceRun) => {
+    const sourceRunId = '99999999-9999-4999-8999-999999999999'
+    const repo = repository({ loadRun: vi.fn().mockResolvedValue(sourceRun) })
+    const deps = dependencies(repo, { search: pagedSearch() })
+
+    await expect(matchVideoAssets({ theme: 'hope', candidateCount: 8, page: 2, sourceRunId }, deps))
+      .rejects.toMatchObject({ status: 422, code: 'source_run_unavailable' })
+    expect(deps.search).not.toHaveBeenCalled()
+  })
+
+  it('replays paged hasNextPage exactly from persisted query audit data', async () => {
+    const replayed = persistedRun({
+      queries: plan.queries.map((query, index) => ({
+        ...query,
+        status: 'completed' as const,
+        filters: { page: 2, hasNextPage: index === 1 },
+        providerTotal: index === 1 ? 100 : 20,
+      })),
+      candidates: [persistedRun().candidates[0]],
+    })
+    const repo = repository({
+      beginRun: vi.fn().mockResolvedValue({ runId, status: 'completed', isExisting: true }),
+      loadRun: vi.fn().mockResolvedValue(replayed),
+    })
+    const deps = dependencies(repo)
+
+    const result = await matchVideoAssets({
+      theme: 'hope', candidateCount: 8, page: 2,
+      sourceRunId: '99999999-9999-4999-8999-999999999999',
+    }, deps)
+
+    expect(result.hasNextPage).toBe(true)
+    expect(result.candidates).toHaveLength(1)
+    expect(deps.search).not.toHaveBeenCalled()
+  })
+
+  it('accepts a sparse later page but still requires all eight candidates on page one', async () => {
+    const sourceRunId = '99999999-9999-4999-8999-999999999999'
+    const sparseSearch = vi.fn().mockResolvedValue({ resources: [resource(1)], totalResources: 1 })
+    const laterRepo = repository({ loadRun: vi.fn().mockResolvedValue(rootRun(sourceRunId)) })
+
+    await expect(matchVideoAssets({ theme: 'hope', candidateCount: 8, page: 2, sourceRunId }, dependencies(laterRepo, { search: sparseSearch })))
+      .resolves.toEqual(expect.objectContaining({ candidates: [expect.objectContaining({ providerResourceId: 1 })] }))
+    await expect(matchVideoAssets({ theme: 'hope', candidateCount: 8, page: 1 }, dependencies(repository(), { search: sparseSearch })))
+      .rejects.toMatchObject({ code: 'provider_unavailable' })
   })
 
   it('includes explicit first-page pagination in the digest but still plans normally', async () => {
@@ -387,9 +470,9 @@ describe('video asset matching orchestration', () => {
       status: 'degraded',
       planner: { model: 'gemma4:12b', promptVersion: 'visual-plan-v1', fallbackUsed: true },
       queries: [
-        { ...plan.queries[0], status: 'completed' },
-        { ...plan.queries[1], status: 'completed' },
-        { ...plan.queries[2], status: 'failed' },
+        { ...plan.queries[0], status: 'completed', filters: {}, providerTotal: 5 },
+        { ...plan.queries[1], status: 'completed', filters: {}, providerTotal: 5 },
+        { ...plan.queries[2], status: 'failed', filters: {}, providerTotal: null },
       ],
     })
     const repo = repository({
@@ -779,15 +862,17 @@ describe('video asset repository', () => {
     const runQuery = query({ data: {
       id: runId,
       status: 'degraded',
+      input_kind: 'theme',
+      theme: 'hope',
       planner_model: 'gemma4:12b',
       prompt_version: 'visual-plan-v1',
       fallback_used: false,
       visual_intent: plan.visualIntent,
     }, error: null })
     const queriesQuery = query({ data: [
-      { kind: 'literal', term: plan.queries[0].term, status: 'completed' },
-      { kind: 'action', term: plan.queries[1].term, status: 'completed' },
-      { kind: 'metaphor', term: plan.queries[2].term, status: 'failed' },
+      { kind: 'literal', term: plan.queries[0].term, status: 'completed', filters: { page: 2, hasNextPage: true }, provider_total: 50 },
+      { kind: 'action', term: plan.queries[1].term, status: 'completed', filters: { page: 2, hasNextPage: false }, provider_total: 20 },
+      { kind: 'metaphor', term: plan.queries[2].term, status: 'failed', filters: { page: 2, hasNextPage: false }, provider_total: null },
     ], error: null })
     const candidatesQuery = query({ data: [{
       provider: 'vecteezy',
@@ -816,12 +901,14 @@ describe('video asset repository', () => {
     await expect(createVideoAssetRepository(client).loadRun(runId)).resolves.toEqual({
       runId,
       status: 'degraded',
+      inputKind: 'theme',
+      theme: 'hope',
       planner: { model: 'gemma4:12b', promptVersion: 'visual-plan-v1', fallbackUsed: false },
       visualIntent: plan.visualIntent,
       queries: [
-        { ...plan.queries[0], status: 'completed' },
-        { ...plan.queries[1], status: 'completed' },
-        { ...plan.queries[2], status: 'failed' },
+        { ...plan.queries[0], status: 'completed', filters: { page: 2, hasNextPage: true }, providerTotal: 50 },
+        { ...plan.queries[1], status: 'completed', filters: { page: 2, hasNextPage: false }, providerTotal: 20 },
+        { ...plan.queries[2], status: 'failed', filters: { page: 2, hasNextPage: false }, providerTotal: null },
       ],
       candidates: [{
         provider: 'vecteezy',
@@ -839,6 +926,10 @@ describe('video asset repository', () => {
         matchedBy: ['literal'],
       }],
     })
+    expect(runQuery.select).toHaveBeenCalledWith(
+      'id, status, input_kind, theme, planner_model, prompt_version, fallback_used, visual_intent',
+    )
+    expect(queriesQuery.select).toHaveBeenCalledWith('kind, term, status, filters, provider_total')
   })
 
   it('suppresses every raw PostgREST error', async () => {

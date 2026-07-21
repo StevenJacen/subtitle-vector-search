@@ -34,6 +34,8 @@ export interface PersistedVideoAssetQuery {
   kind: QueryKind
   term: string
   status: 'completed' | 'failed'
+  filters: Record<string, unknown>
+  providerTotal: number | null
 }
 
 export interface PersistedVideoAssetCandidate extends StableVecteezyResource {
@@ -46,6 +48,8 @@ export interface PersistedVideoAssetCandidate extends StableVecteezyResource {
 export interface PersistedVideoAssetRun {
   runId: string
   status: Exclude<VideoAssetRunStatus, 'planning' | 'failed'>
+  inputKind: 'chunk' | 'text' | 'theme'
+  theme: string | null
   planner: {
     model: string
     promptVersion: string
@@ -169,11 +173,11 @@ export function createVideoAssetRepository(client: SupabaseRepositoryClient): Vi
     async loadRun(runId) {
       const [runData, queryData, candidateData] = await Promise.all([
         database(client.from('video_search_runs')
-          .select('id, status, planner_model, prompt_version, fallback_used, visual_intent')
+          .select('id, status, input_kind, theme, planner_model, prompt_version, fallback_used, visual_intent')
           .eq('id', runId)
           .single()),
         database(client.from('video_search_queries')
-          .select('kind, term, status')
+          .select('kind, term, status, filters, provider_total')
           .eq('run_id', runId)
           .order('id', { ascending: true })),
         database(client.from('video_search_candidates')
@@ -190,6 +194,8 @@ export function createVideoAssetRepository(client: SupabaseRepositoryClient): Vi
       return {
         runId: string(run.id),
         status,
+        inputKind: inputKind(run.input_kind),
+        theme: nullableString(run.theme),
         planner: {
           model: string(run.planner_model),
           promptVersion: string(run.prompt_version),
@@ -200,6 +206,8 @@ export function createVideoAssetRepository(client: SupabaseRepositoryClient): Vi
           kind: queryKind(query.kind),
           term: string(query.term),
           status: queryStatus(query.status),
+          filters: jsonObject(query.filters),
+          providerTotal: nullableNonNegativeInteger(query.provider_total),
         })),
         candidates: rows(candidateData).map(candidate => ({
           provider: provider(candidate.provider),
@@ -391,6 +399,22 @@ function positiveInteger(value: unknown): number {
 function finiteNumber(value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) throw databaseFailure()
   return value
+}
+
+function nullableNonNegativeInteger(value: unknown): number | null {
+  if (value === null) return null
+  const result = integer(value)
+  if (result < 0) throw databaseFailure()
+  return result
+}
+
+function jsonObject(value: unknown): Record<string, unknown> {
+  return { ...record(value) }
+}
+
+function inputKind(value: unknown): 'chunk' | 'text' | 'theme' {
+  if (value === 'chunk' || value === 'text' || value === 'theme') return value
+  throw databaseFailure()
 }
 
 function runStatus(value: unknown): VideoAssetRunStatus {

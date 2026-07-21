@@ -17,7 +17,7 @@ function candidate(resourceId: number, runId = run1, page = 1, score = resourceI
   return {
     provider: 'vecteezy', resourceId, runId, page, title: `Candidate ${resourceId}`,
     previewId: null, orientation: 'landscape', licenseType: 'commercial',
-    aiGenerated: false, score,
+    aiGenerated: false, score, suitabilityScore: 0, providerRank: resourceId,
   }
 }
 
@@ -72,6 +72,18 @@ describe('incremental scene candidate pools', () => {
     expect(third.hasNextPage).toBe(false)
   })
 
+  it('accepts one to eight later candidates and may retain an empty deduplicated page', () => {
+    const first = appendCandidatePage(emptyState(), page(1, run1, 1), true)
+    const duplicateOnly = appendCandidatePage(first, [candidate(1, run2, 2)], true)
+    const final = appendCandidatePage(duplicateOnly, [candidate(20, run3, 3)], false)
+
+    expect(duplicateOnly.pages[1]).toEqual([])
+    expect(final.pages[2].map(item => item.resourceId)).toEqual([20])
+    expect(() => appendCandidatePage(first, [], false)).toThrowError(CandidatePoolError)
+    expect(() => appendCandidatePage(first, page(20, run2, 2).concat(candidate(28, run2, 2)), false))
+      .toThrowError(CandidatePoolError)
+  })
+
   it('allows the recommendation to move while preserving selection and confirmation', () => {
     const firstPage = page(1, run1, 1).map(item => ({ ...item, score: item.resourceId / 100 }))
     const initial = appendCandidatePage(emptyState(), firstPage, true)
@@ -114,5 +126,35 @@ describe('incremental scene candidate pools', () => {
     expect(allScenesConfirmed([confirmed, selected])).toBe(false)
     expect(allScenesConfirmed([confirmed, confirmSceneCandidate(selected)])).toBe(true)
     expect(allScenesConfirmed([])).toBe(false)
+  })
+
+  it('rejects forged or stale selected and confirmed keys that are absent from pages', () => {
+    const state = appendCandidatePage(emptyState(), page(1, run1, 1), false)
+    const forgedSelection = { ...state, selected: { runId: run2, resourceId: 99 } }
+    const forgedConfirmation = {
+      ...state,
+      selected: { runId: run2, resourceId: 99 },
+      confirmed: { runId: run2, resourceId: 99 },
+    }
+
+    expect(() => confirmSceneCandidate(forgedSelection))
+      .toThrowError(expect.objectContaining({ code: 'candidate_not_found' }))
+    expect(allScenesConfirmed([forgedConfirmation])).toBe(false)
+  })
+
+  it.each([
+    { previewId: 'not-a-uuid' },
+    { title: 42 },
+    { orientation: false },
+    { licenseType: [] },
+    { aiGenerated: 'false' },
+    { suitabilityScore: Number.NaN },
+    { providerRank: 0 },
+  ])('rejects malformed candidate field %#', override => {
+    const invalid = page(1, run1, 1)
+    invalid[0] = { ...invalid[0], ...override } as CandidateReference
+
+    expect(() => appendCandidatePage(emptyState(), invalid, false))
+      .toThrowError(expect.objectContaining({ code: 'invalid_candidate' }))
   })
 })

@@ -1,6 +1,10 @@
 import type { VideoAssetCandidate } from '../../supabase/functions/_shared/video-assets.js'
 import type { VideoProductionApi } from '../video-production-api.js'
-import type { CandidateKey, CandidateReference } from './candidate-pool.js'
+import {
+  compareRecommendation,
+  type CandidateKey,
+  type CandidateReference,
+} from './candidate-pool.js'
 
 export type WorkbenchAspectRatio = '9:16' | '16:9'
 
@@ -14,24 +18,49 @@ export interface CandidatePageResult {
 
 export class PreviewRegistry {
   private readonly previews = new Map<string, string>()
+  private readonly createId: () => string
+  private readonly allowUrl: (url: URL) => boolean
+  private readonly collisionRetries: number
 
-  constructor(private readonly createId: () => string = () => crypto.randomUUID()) {}
+  constructor(options: {
+    createId?: () => string
+    allowUrl?: (url: URL) => boolean
+  } = {}) {
+    this.createId = options.createId ?? (() => crypto.randomUUID())
+    this.allowUrl = options.allowUrl ?? defaultPreviewPolicy
+    this.collisionRetries = 4
+  }
 
   register(url: string | null): string | null {
     if (url === null) return null
-    const parsed = new URL(url)
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      throw new Error('invalid preview URL')
+    let parsed: URL
+    try {
+      parsed = new URL(url)
+    } catch {
+      throw new PreviewRegistryError('preview_url_forbidden')
     }
-    const id = this.createId()
-    if (!UUID.test(id)) throw new Error('invalid preview ID')
-    if (!this.previews.has(id)) this.previews.set(id, parsed.toString())
-    return id
+    if (!this.allowUrl(parsed)) throw new PreviewRegistryError('preview_url_forbidden')
+
+    for (let attempt = 0; attempt < this.collisionRetries; attempt += 1) {
+      const id = this.createId()
+      if (!UUID.test(id)) throw new PreviewRegistryError('preview_id_invalid')
+      if (this.previews.has(id)) continue
+      this.previews.set(id, parsed.toString())
+      return id
+    }
+    throw new PreviewRegistryError('preview_id_collision')
   }
 
   resolve(previewId: string): string | undefined {
     if (!UUID.test(previewId)) return undefined
     return this.previews.get(previewId)
+  }
+}
+
+export class PreviewRegistryError extends Error {
+  constructor(readonly code: string) {
+    super(code.replaceAll('_', ' '))
+    this.name = 'PreviewRegistryError'
   }
 }
 
@@ -55,8 +84,11 @@ export class VecteezyCandidateAdapter {
       page: input.page,
       ...(input.sourceRunId === undefined ? {} : { sourceRunId: input.sourceRunId }),
     })
+    const validCandidateCount = input.page === 1
+      ? response.candidates.length === 8
+      : response.candidates.length >= 1 && response.candidates.length <= 8
     if (response.page !== input.page || typeof response.hasNextPage !== 'boolean'
-      || response.candidates.length !== 8) {
+      || !validCandidateCount) {
       throw new Error('invalid paged candidate response')
     }
 
@@ -70,10 +102,12 @@ export class VecteezyCandidateAdapter {
       orientation: candidate.orientation,
       licenseType: candidate.licenseType,
       aiGenerated: candidate.aiGenerated,
-      score: recommendationScore(candidate, input.aspectRatio),
+      score: candidate.score,
+      suitabilityScore: suitabilityScore(candidate, input.aspectRatio),
+      providerRank: candidate.bestRank,
     }))
     const recommendedCandidate = candidates.reduce((best, candidate) => (
-      candidate.score > best.score ? candidate : best
+      compareRecommendation(candidate, best) < 0 ? candidate : best
     ))
 
     return {
@@ -97,21 +131,33 @@ export class VecteezyCandidateAdapter {
   }
 }
 
-function recommendationScore(candidate: VideoAssetCandidate, aspectRatio: WorkbenchAspectRatio): number {
+function suitabilityScore(candidate: VideoAssetCandidate, aspectRatio: WorkbenchAspectRatio): number {
   const orientation = candidate.orientation?.toLocaleLowerCase('en-US') ?? ''
   const orientationMatches = aspectRatio === '9:16'
     ? orientation === 'portrait' || orientation === 'vertical'
     : orientation === 'landscape' || orientation === 'horizontal'
   const usableMp4 = candidate.fileTypes.some(file => file.extension.toLocaleLowerCase('en-US') === 'mp4')
-  const commercial = candidate.licenseType?.toLocaleLowerCase('en-US').includes('commercial') ?? false
+  const commercial = COMMERCIAL_LICENSES.has(normalizeLicense(candidate.licenseType))
   const nonAi = candidate.aiGenerated === false
 
-  return candidate.score
-    + (orientationMatches ? 0.1 : 0)
-    + (usableMp4 ? 0.02 : 0)
-    + (commercial ? 0.01 : 0)
-    + (nonAi ? 0.005 : 0)
-    + (0.001 / candidate.bestRank)
+  return (orientationMatches ? 8 : 0)
+    + (usableMp4 ? 4 : 0)
+    + (commercial ? 2 : 0)
+    + (nonAi ? 1 : 0)
 }
+
+function normalizeLicense(value: string | null): string {
+  return value?.trim().toLocaleLowerCase('en-US').replace(/[\s_-]+/g, '-') ?? ''
+}
+
+function defaultPreviewPolicy(url: URL): boolean {
+  const hostname = url.hostname.toLocaleLowerCase('en-US')
+  return url.protocol === 'https:'
+    && url.username === ''
+    && url.password === ''
+    && (hostname === 'vecteezy.com' || hostname.endsWith('.vecteezy.com'))
+}
+
+const COMMERCIAL_LICENSES = new Set(['commercial', 'free', 'pro', 'pro-extended'])
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i

@@ -9,6 +9,8 @@ export interface CandidateReference {
   licenseType: string | null
   aiGenerated: boolean | null
   score: number
+  suitabilityScore: number
+  providerRank: number
 }
 
 export interface CandidateKey {
@@ -37,9 +39,12 @@ export function appendCandidatePage(
   hasNextPage = true,
 ): SceneCandidateState {
   const expectedPage = state.pages.length + 1
+  const validPageSize = expectedPage === 1
+    ? page.length === 8
+    : page.length >= 1 && page.length <= 8
   const owningRuns = new Set(page.map(candidate => candidate.runId))
   const pageResources = new Set(page.map(candidateKey))
-  if (page.length !== 8
+  if (!validPageSize
     || page.some(candidate => candidate.page !== expectedPage)
     || owningRuns.size !== 1
     || pageResources.size !== page.length) {
@@ -98,6 +103,9 @@ export function confirmSceneCandidate(state: SceneCandidateState): SceneCandidat
   if (state.selected === undefined) {
     throw new CandidatePoolError('selection_required')
   }
+  if (!hasCandidate(state, state.selected)) {
+    throw new CandidatePoolError('candidate_not_found')
+  }
   return {
     ...state,
     pages: state.pages.map(page => [...page]),
@@ -110,15 +118,27 @@ export function allScenesConfirmed(states: readonly SceneCandidateState[]): bool
     state.selected !== undefined
     && state.confirmed !== undefined
     && sameKey(state.selected, state.confirmed)
+    && hasCandidate(state, state.selected)
+    && hasCandidate(state, state.confirmed)
   ))
 }
 
 function recommendation(candidates: CandidateReference[]): CandidateKey | undefined {
   let best: CandidateReference | undefined
   for (const candidate of candidates) {
-    if (best === undefined || candidate.score > best.score) best = candidate
+    if (best === undefined || compareRecommendation(candidate, best) < 0) best = candidate
   }
   return best === undefined ? undefined : { runId: best.runId, resourceId: best.resourceId }
+}
+
+export function compareRecommendation(left: CandidateReference, right: CandidateReference): number {
+  if (left.score !== right.score) return right.score - left.score
+  if (left.suitabilityScore !== right.suitabilityScore) {
+    return right.suitabilityScore - left.suitabilityScore
+  }
+  if (left.providerRank !== right.providerRank) return left.providerRank - right.providerRank
+  if (left.resourceId !== right.resourceId) return left.resourceId - right.resourceId
+  return left.runId.localeCompare(right.runId, 'en-US')
 }
 
 function candidateKey(candidate: CandidateReference): string {
@@ -127,6 +147,10 @@ function candidateKey(candidate: CandidateReference): string {
 
 function sameKey(left: CandidateKey | undefined, right: CandidateKey): boolean {
   return left?.runId === right.runId && left.resourceId === right.resourceId
+}
+
+function hasCandidate(state: SceneCandidateState, key: CandidateKey): boolean {
+  return state.pages.some(page => page.some(candidate => sameKey(candidate, key)))
 }
 
 function validCandidate(candidate: CandidateReference): boolean {
@@ -138,6 +162,15 @@ function validCandidate(candidate: CandidateReference): boolean {
     && candidate.page >= 1
     && candidate.page <= 100
     && Number.isFinite(candidate.score)
+    && Number.isFinite(candidate.suitabilityScore)
+    && candidate.suitabilityScore >= 0
+    && Number.isSafeInteger(candidate.providerRank)
+    && candidate.providerRank > 0
+    && (candidate.previewId === null || UUID.test(candidate.previewId))
+    && (candidate.title === null || typeof candidate.title === 'string')
+    && (candidate.orientation === null || typeof candidate.orientation === 'string')
+    && (candidate.licenseType === null || typeof candidate.licenseType === 'string')
+    && (candidate.aiGenerated === null || typeof candidate.aiGenerated === 'boolean')
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i

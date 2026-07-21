@@ -74,11 +74,12 @@ export async function matchVideoAssets(
       )
     }
     if (begin.status === 'completed' || begin.status === 'degraded') {
-      const refreshed = await refreshPersistedRun(await dependencies.repository.loadRun(begin.runId), dependencies)
+      const persisted = await dependencies.repository.loadRun(begin.runId)
+      const refreshed = await refreshPersistedRun(persisted, dependencies)
       return withPagination(
         refreshed,
         request,
-        refreshed.candidates.length === request.candidateCount && (request.page ?? 100) < 100,
+        persistedHasNextPage(persisted, request.page),
       )
     }
   }
@@ -89,6 +90,9 @@ export async function matchVideoAssets(
   if (request.sourceRunId !== undefined) {
     try {
       const sourceRun = await dependencies.repository.loadRun(request.sourceRunId)
+      if (!isExplicitRootRun(sourceRun, request.theme)) {
+        throw new Error('invalid source run')
+      }
       planned = {
         plan: {
           visualIntent: sourceRun.visualIntent,
@@ -182,7 +186,10 @@ export async function matchVideoAssets(
       return {
         ...query,
         weight: lane.weight,
-        filters: queryFilters(request.page),
+        filters: queryFilters(
+          request.page,
+          providerHasNextPage(result.value.result, request.page),
+        ),
         providerTotal: result.value.result.totalResources,
         status: 'completed',
         elapsedMs: result.value.elapsedMs,
@@ -191,7 +198,7 @@ export async function matchVideoAssets(
     return {
       ...query,
       weight: lane.weight,
-      filters: queryFilters(request.page),
+      filters: queryFilters(request.page, false),
       providerTotal: null,
       status: 'failed',
       elapsedMs: result.reason instanceof LaneFailure ? result.reason.elapsedMs : 0,
@@ -222,7 +229,10 @@ export async function matchVideoAssets(
   }
 
   const fused = dependencies.fuse(successfulLanes, request.candidateCount)
-  if (fused.length !== request.candidateCount) {
+  const validCandidateCount = request.page !== undefined && request.page > 1
+    ? fused.length >= 1 && fused.length <= request.candidateCount
+    : fused.length === request.candidateCount
+  if (!validCandidateCount) {
     await dependencies.repository.finishRun({
       runId: begin.runId,
       status: 'failed',
@@ -264,7 +274,7 @@ export async function matchVideoAssets(
     queries: responseQueries(queryRows),
     candidates: candidates.map(candidate => responseCandidate(candidate.persisted, candidate.previewUrl)),
   }
-  return withPagination(response, request, hasNextProviderPage(laneResults, request.page))
+  return withPagination(response, request, queryAuditHasNextPage(queryRows, request.page))
 }
 
 async function planningSource(
@@ -313,6 +323,7 @@ async function requestDigest(
           version: 2,
           promptVersion: PROMPT_VERSION,
           sourceRunId: request.sourceRunId,
+          theme: request.theme,
           page: request.page,
           candidateCount: request.candidateCount,
         }
@@ -362,7 +373,9 @@ async function refreshPersistedRun(
     planner: run.planner,
     visualIntent: run.visualIntent,
     queries: run.queries.map(query => ({
-      ...query,
+      kind: query.kind,
+      term: query.term,
+      status: query.status,
       ...(query.status === 'failed' ? { errorCode: 'provider_unavailable' } : {}),
     })),
     candidates,
@@ -502,7 +515,7 @@ function failedQueries(errorCode: string, term: string, elapsedMs: number, page?
     kind: lane.kind,
     term,
     weight: lane.weight,
-    filters: queryFilters(page),
+    filters: queryFilters(page, false),
     providerTotal: null,
     status: 'failed',
     elapsedMs,
@@ -510,8 +523,8 @@ function failedQueries(errorCode: string, term: string, elapsedMs: number, page?
   }))
 }
 
-function queryFilters(page?: number): Record<string, unknown> {
-  return page === undefined ? QUERY_FILTERS : { ...QUERY_FILTERS, page }
+function queryFilters(page?: number, hasNextPage = false): Record<string, unknown> {
+  return page === undefined ? QUERY_FILTERS : { ...QUERY_FILTERS, page, hasNextPage }
 }
 
 function withPagination(
@@ -524,18 +537,36 @@ function withPagination(
     : { ...response, page: request.page, hasNextPage }
 }
 
-function hasNextProviderPage(
-  results: Array<PromiseSettledResult<{ result: ProviderSearchResult } & Record<string, unknown>>>,
+function providerHasNextPage(
+  provider: ProviderSearchResult,
   page?: number,
 ): boolean {
   if (page === undefined || page >= 100) return false
-  return results.some(result => {
-    if (result.status !== 'fulfilled') return false
-    const provider = result.value.result
-    return provider.totalResources === null
-      ? provider.resources.length >= QUERY_FILTERS.perPage
-      : page * QUERY_FILTERS.perPage < provider.totalResources
-  })
+  return provider.totalResources === null
+    ? provider.resources.length >= QUERY_FILTERS.perPage
+    : page * QUERY_FILTERS.perPage < provider.totalResources
+}
+
+function queryAuditHasNextPage(queries: readonly PersistedVideoAssetRun['queries'][number][], page?: number): boolean {
+  return page !== undefined && queries.some(query => (
+    query.filters.page === page && query.filters.hasNextPage === true
+  ))
+}
+
+function persistedHasNextPage(run: PersistedVideoAssetRun, page?: number): boolean {
+  return queryAuditHasNextPage(run.queries, page)
+}
+
+function isExplicitRootRun(run: PersistedVideoAssetRun, theme?: string): boolean {
+  return theme !== undefined
+    && run.inputKind === 'theme'
+    && run.theme === theme
+    && run.queries.length === LANE_DEFINITIONS.length
+    && LANE_DEFINITIONS.every(lane => run.queries.some(query => (
+      query.kind === lane.kind
+      && query.filters.page === 1
+      && typeof query.filters.hasNextPage === 'boolean'
+    )))
 }
 
 function plannerError(error: unknown): VideoAssetError {
