@@ -10,6 +10,7 @@ import type {
   WorkbenchHealthReport,
   WorkbenchTask,
   WorkbenchTaskEvent,
+  SubtitleSyncSnapshot,
 } from './types.js'
 
 const TASK_ID = '10000000-0000-4000-8000-000000000001'
@@ -91,6 +92,21 @@ function health(status: WorkbenchHealthReport['status'] = 'ok'): WorkbenchHealth
   }
 }
 
+function subtitleSyncSnapshot(): SubtitleSyncSnapshot {
+  return {
+    jobId: null,
+    mode: null,
+    status: 'idle',
+    currentMovie: null,
+    attempted: 0,
+    succeeded: 0,
+    failed: 0,
+    message: 'Idle',
+    startedAt: null,
+    updatedAt: '2026-07-21T00:00:00.000Z',
+  }
+}
+
 function apiFixture(initialTasks: WorkbenchTask[] = [task()], healthReport = health()) {
   let tasks = initialTasks
   let eventListener: ((event: WorkbenchTaskEvent) => void) | undefined
@@ -119,6 +135,12 @@ function apiFixture(initialTasks: WorkbenchTask[] = [task()], healthReport = hea
       eventListener = listener
       return () => { eventListener = undefined }
     }),
+    searchSubtitles: vi.fn(async () => ({ originalQuery: '', normalizedQuery: '', warning: null, results: [] })),
+    subtitleLibrary: vi.fn(async () => ({ readyTracks: 0, readyMovies: 0 })),
+    subtitleSync: vi.fn(async () => subtitleSyncSnapshot()),
+    startSubtitleSync: vi.fn(async () => subtitleSyncSnapshot()),
+    stopSubtitleSync: vi.fn(async () => subtitleSyncSnapshot()),
+    subscribeSubtitleSync: vi.fn(() => () => undefined),
   }
   return {
     api,

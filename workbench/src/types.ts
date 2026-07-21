@@ -229,10 +229,10 @@ export interface WorkbenchApi {
   produce(taskId: string): Promise<void>
   resume(taskId: string): Promise<void>
   subscribe(taskId: string, listener: (event: WorkbenchTaskEvent) => void): () => void
-  searchSubtitles?(input: SubtitleSearchRequest): Promise<SubtitleSearchResponse>
-  subtitleLibrary?(): Promise<SubtitleLibrarySummary>
-  subtitleSync?(): Promise<SubtitleSyncSnapshot>
-  startSubtitleSync?(input: SubtitleSyncInput): Promise<SubtitleSyncSnapshot>
-  stopSubtitleSync?(): Promise<SubtitleSyncSnapshot>
-  subscribeSubtitleSync?(listener: (snapshot: SubtitleSyncSnapshot) => void): () => void
+  searchSubtitles(input: SubtitleSearchRequest): Promise<SubtitleSearchResponse>
+  subtitleLibrary(): Promise<SubtitleLibrarySummary>
+  subtitleSync(): Promise<SubtitleSyncSnapshot>
+  startSubtitleSync(input: SubtitleSyncInput): Promise<SubtitleSyncSnapshot>
+  stopSubtitleSync(): Promise<SubtitleSyncSnapshot>
+  subscribeSubtitleSync(listener: (snapshot: SubtitleSyncSnapshot) => void): () => void
 }

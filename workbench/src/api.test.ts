@@ -120,7 +120,7 @@ describe('createWorkbenchApi', () => {
     expect(fetcher.mock.calls[4][1]).toMatchObject({ method: 'POST', body: '{}' })
   })
 
-  it('reconnects subtitle synchronization events and stops after unsubscribe', () => {
+  it('keeps subtitle synchronization events open after transient errors and closes on unsubscribe', () => {
     vi.useFakeTimers()
     const listener = vi.fn()
     const api = createWorkbenchApi({
@@ -137,7 +137,9 @@ describe('createWorkbenchApi', () => {
     first.onerror?.()
     vi.advanceTimersByTime(500)
 
+    expect(first.closed).toBe(false)
+    expect(FakeEventSource.instances).toHaveLength(1)
     unsubscribe()
-    expect(FakeEventSource.instances[1].closed).toBe(true)
+    expect(first.closed).toBe(true)
   })
 })

@@ -421,22 +421,27 @@ describe('subtitle library workbench API', () => {
     expect(await conflict.json()).toEqual({ error: { code: 'subtitle_sync_already_running', message: 'Subtitle synchronization is already running' } })
   })
 
-  it('streams only sanitized subtitle snapshots with heartbeat cleanup', async () => {
+  it('replays sanitized subtitle snapshots after Last-Event-ID with heartbeat cleanup', async () => {
     const { subtitleLibrary, subtitleSync } = fakeSubtitleServices()
     const unsubscribe = vi.spyOn(subtitleSync.events, 'subscribe')
     const { origin } = await start({ subtitleLibrary, subtitleSync, heartbeatMs: 20 })
-    const controller = new AbortController()
-    const response = await fetch(`${origin}/api/subtitles/sync/events`, { signal: controller.signal })
-    const reader = response.body!.getReader()
+    subtitleSync.events.publish(subtitleSyncSnapshot())
     subtitleSync.events.publish(subtitleSyncSnapshot({
       jobId: 'job-1', mode: 'manual', status: 'running', message: 'Importing subtitle', startedAt: '2026-07-21T00:00:00.000Z',
     }))
+    const controller = new AbortController()
+    const response = await fetch(`${origin}/api/subtitles/sync/events`, {
+      headers: { 'last-event-id': '1' },
+      signal: controller.signal,
+    })
+    const reader = response.body!.getReader()
     const first = new TextDecoder().decode((await reader.read()).value)
     const heartbeat = new TextDecoder().decode((await reader.read()).value)
     controller.abort()
     await new Promise(resolve => setTimeout(resolve, 0))
 
     expect(response.headers.get('content-type')).toContain('text/event-stream')
+    expect(first).toContain('id: 2')
     expect(first).toContain('event: progress')
     expect(first).toContain('"status":"running"')
     expect(first).not.toMatch(/secret|provider|https|[A-Z]:\\/i)

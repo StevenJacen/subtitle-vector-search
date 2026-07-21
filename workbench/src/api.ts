@@ -26,9 +26,6 @@ interface ApiErrorBody {
   }
 }
 
-type SubtitleWorkbenchApi = Required<Pick<WorkbenchApi,
-  'searchSubtitles' | 'subtitleLibrary' | 'subtitleSync' | 'startSubtitleSync' | 'stopSubtitleSync' | 'subscribeSubtitleSync'>>
-
 export class WorkbenchApiError extends Error {
   constructor(
     readonly code: string,
@@ -40,7 +37,7 @@ export class WorkbenchApiError extends Error {
   }
 }
 
-export function createWorkbenchApi(options: WorkbenchApiOptions = {}): WorkbenchApi & SubtitleWorkbenchApi {
+export function createWorkbenchApi(options: WorkbenchApiOptions = {}): WorkbenchApi {
   const fetcher = options.fetcher ?? fetch
   const eventSourceFactory = options.eventSourceFactory ?? (url => new EventSource(url))
   const reconnectMs = options.reconnectMs ?? 1_000
@@ -153,35 +150,16 @@ export function createWorkbenchApi(options: WorkbenchApiOptions = {}): Workbench
     },
     subscribeSubtitleSync(listener: (snapshot: SubtitleSyncSnapshot) => void) {
       let source: EventSource | undefined
-      let reconnect: ReturnType<typeof setTimeout> | undefined
-      let stopped = false
       let lastSequence = 0
 
-      const connect = () => {
-        if (stopped) return
-        source = eventSourceFactory('/api/subtitles/sync/events')
-        source.addEventListener('progress', rawEvent => {
-          const event = parseSubtitleSyncEvent(rawEvent)
-          if (event === null || event.sequence <= lastSequence) return
-          lastSequence = event.sequence
-          listener(event.snapshot)
-        })
-        source.onerror = () => {
-          source?.close()
-          source = undefined
-          if (!stopped && reconnect === undefined) {
-            reconnect = setTimeout(() => {
-              reconnect = undefined
-              connect()
-            }, reconnectMs)
-          }
-        }
-      }
-
-      connect()
+      source = eventSourceFactory('/api/subtitles/sync/events')
+      source.addEventListener('progress', rawEvent => {
+        const event = parseSubtitleSyncEvent(rawEvent)
+        if (event === null || event.sequence <= lastSequence) return
+        lastSequence = event.sequence
+        listener(event.snapshot)
+      })
       return () => {
-        stopped = true
-        if (reconnect !== undefined) clearTimeout(reconnect)
         source?.close()
       }
     },
