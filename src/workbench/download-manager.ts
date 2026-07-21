@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import type { SceneCandidateState } from './candidate-pool.js'
 import type {
+  WorkbenchDownloadReceipt,
   WorkbenchFormalReservation,
   WorkbenchManifest,
   WorkbenchSelection,
-  WorkbenchSource,
 } from './artifacts-v2.js'
 import {
   FormalDownloadBudget,
@@ -43,6 +43,9 @@ export interface VerifiedSceneSource {
   artifactKey: string
   sourceSizeBytes: number
   sourceSha256: string
+  requiresAttribution: boolean
+  requiredAttributionUrl: string | null
+  quota: VecteezyDownloadInfo['quota']
 }
 
 export interface WorkbenchArtifactStore {
@@ -51,12 +54,12 @@ export interface WorkbenchArtifactStore {
     taskId: string,
     updater: (manifest: WorkbenchManifest) => WorkbenchManifest | Promise<WorkbenchManifest>,
   ): Promise<WorkbenchManifest>
-  verifySource(source: WorkbenchSource): Promise<boolean>
+  verifyReceipt(receipt: WorkbenchDownloadReceipt): Promise<boolean>
 }
 
 type WorkbenchDownloadClient = ResourceInspector & Pick<
   VecteezyDownloadClient,
-  'requestDownloadWithInfo' | 'waitForDownload' | 'transferSignedUrl'
+  'seedAggregateSizeBytes' | 'requestDownloadWithInfo' | 'waitForDownload' | 'transferSignedUrl'
 >
 
 export class WorkbenchDownloadError extends Error {
@@ -72,12 +75,20 @@ export async function preflightSelections(input: {
   inspect: ResourceInspector
 }): Promise<PreflightResult[]> {
   validateTaskAndScenes(input.taskId, input.scenes)
-  const results = await Promise.all(input.scenes.map(async scene => ({
+  return inspectSelections(input.scenes, input.inspect, 0)
+}
+
+async function inspectSelections(
+  scenes: readonly ConfirmedScene[],
+  inspect: ResourceInspector,
+  accountedSizeBytes: number,
+): Promise<PreflightResult[]> {
+  const results = await Promise.all(scenes.map(async scene => ({
     sceneIndex: scene.index,
     selection: { ...scene.confirmed },
-    info: await input.inspect.getDownloadInfo(scene.confirmed.resourceId),
+    info: await inspect.getDownloadInfo(scene.confirmed.resourceId),
   })))
-  let aggregateSizeBytes = 0
+  let aggregateSizeBytes = accountedSizeBytes
   for (const result of results) {
     if (result.info.resourceId !== result.selection.resourceId) {
       throw new WorkbenchDownloadError('resource_changed')
@@ -107,8 +118,13 @@ export async function downloadConfirmedScenes(input: {
   const manifest = await input.artifacts.readTask(input.taskId)
   validateManifestOwnership(manifest, input.taskId, input.scenes)
 
-  const reusable = new Map<number, VerifiedSceneSource>()
+  const reusableReservations: Array<{
+    scene: ConfirmedScene
+    reservation: WorkbenchFormalReservation
+    receipt: WorkbenchDownloadReceipt
+  }> = []
   const pendingScenes: ConfirmedScene[] = []
+  let accountedSizeBytes = 0
   for (const scene of input.scenes) {
     const reservation = manifest.formalReservations.find(value => value.sceneIndex === scene.index)
     if (reservation === undefined) {
@@ -117,21 +133,39 @@ export async function downloadConfirmedScenes(input: {
     }
     if (!sameSelection(reservation, scene.confirmed)) throw new WorkbenchDownloadError('resource_changed')
     if (reservation.status !== 'completed') throw new WorkbenchDownloadError('formal_call_uncertain')
-    const source = manifest.sources.find(value => value.sceneIndex === scene.index)
-    if (source === undefined || source.reservationId !== reservation.reservationId) {
-      throw new WorkbenchDownloadError('formal_call_uncertain')
+    const receipt = reservation.receipt
+    if (receipt === undefined) throw new WorkbenchDownloadError('formal_call_uncertain')
+    if (receipt.taskId !== input.taskId
+      || receipt.sceneIndex !== scene.index
+      || receipt.reservationId !== reservation.reservationId) {
+      throw new WorkbenchDownloadError('resource_changed')
     }
-    if (!await input.artifacts.verifySource(source)) throw new WorkbenchDownloadError('verified_source_mismatch')
-    reusable.set(scene.index, verifiedFromExisting(scene, reservation, source))
+    if (!await input.artifacts.verifyReceipt(receipt)) throw new WorkbenchDownloadError('verified_source_mismatch')
+    accountedSizeBytes += receipt.sizeBytes
+    if (accountedSizeBytes > MAX_AGGREGATE_SIZE_BYTES) {
+      throw new VecteezyDownloadError('aggregate_size_limit_exceeded', 'Vecteezy downloads exceed the 2 GiB aggregate limit')
+    }
+    reusableReservations.push({ scene, reservation, receipt })
   }
 
   if (input.budget.remaining < pendingScenes.length) {
     throw new WorkbenchDownloadError('download_budget_exhausted')
   }
 
-  const preflight = pendingScenes.length === 0
-    ? []
-    : await preflightSelections({ taskId: input.taskId, scenes: pendingScenes, inspect: input.client })
+  const [reusableInfo, preflight] = await Promise.all([
+    Promise.all(reusableReservations.map(async value => {
+      const info = await input.client.getDownloadInfo(value.scene.confirmed.resourceId)
+      if (info.resourceId !== value.scene.confirmed.resourceId) throw new WorkbenchDownloadError('resource_changed')
+      return { ...value, info }
+    })),
+    inspectSelections(pendingScenes, input.client, accountedSizeBytes),
+  ])
+  input.client.seedAggregateSizeBytes(accountedSizeBytes)
+
+  const reusable = new Map(reusableInfo.map(value => [
+    value.scene.index,
+    verifiedFromReceipt(value.scene, value.reservation, value.receipt, value.info),
+  ]))
   const downloaded = new Map<number, VerifiedSceneSource>()
   for (const result of preflight) {
     const reservationId = randomUUID()
@@ -155,15 +189,23 @@ export async function downloadConfirmedScenes(input: {
       throw new WorkbenchDownloadError('formal_call_uncertain')
     }
 
-    await input.artifacts.updateTask(input.taskId, current => ({
-      ...current,
-      formalReservations: current.formalReservations.map(value => value.reservationId === reservationId
-        ? { ...value, status: 'completed' }
-        : value),
-    }))
     const ready = await input.client.waitForDownload(request)
     const destination = `video-runs/${input.taskId}/sources/scene-${result.sceneIndex}.mp4`
     const completed = await input.client.transferSignedUrl(ready as DownloadReady, destination)
+    const receipt: WorkbenchDownloadReceipt = {
+      taskId: input.taskId,
+      sceneIndex: result.sceneIndex,
+      reservationId,
+      artifactKey: completed.artifactKey,
+      sha256: completed.sourceSha256,
+      sizeBytes: completed.sourceSizeBytes,
+    }
+    await input.artifacts.updateTask(input.taskId, current => ({
+      ...current,
+      formalReservations: current.formalReservations.map(value => value.reservationId === reservationId
+        ? { ...value, status: 'completed', receipt }
+        : value),
+    }))
     downloaded.set(result.sceneIndex, verifiedFromDownload(result, reservationId, completed))
   }
 
@@ -262,21 +304,28 @@ function verifiedFromDownload(
     artifactKey: completed.artifactKey,
     sourceSizeBytes: completed.sourceSizeBytes,
     sourceSha256: completed.sourceSha256,
+    requiresAttribution: completed.requiresAttribution,
+    requiredAttributionUrl: completed.requiredAttributionUrl,
+    quota: { ...completed.quota },
   }
 }
 
-function verifiedFromExisting(
+function verifiedFromReceipt(
   scene: ConfirmedScene,
   reservation: WorkbenchFormalReservation,
-  source: WorkbenchSource,
+  receipt: WorkbenchDownloadReceipt,
+  info: VecteezyDownloadInfo,
 ): VerifiedSceneSource {
   return {
     sceneIndex: scene.index,
     reservationId: reservation.reservationId,
     selectionId: scene.confirmed.selectionId,
     resourceId: scene.confirmed.resourceId,
-    artifactKey: source.artifactKey,
-    sourceSizeBytes: source.sizeBytes,
-    sourceSha256: source.sha256,
+    artifactKey: receipt.artifactKey,
+    sourceSizeBytes: receipt.sizeBytes,
+    sourceSha256: receipt.sha256,
+    requiresAttribution: info.requiresAttribution,
+    requiredAttributionUrl: info.requiredAttributionUrl,
+    quota: { ...info.quota },
   }
 }

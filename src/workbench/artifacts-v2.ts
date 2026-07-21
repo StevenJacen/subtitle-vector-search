@@ -38,10 +38,20 @@ export interface WorkbenchScene {
 
 export type FormalReservationStatus = 'reserved' | 'uncertain' | 'completed'
 
+export interface WorkbenchDownloadReceipt {
+  taskId: string
+  sceneIndex: number
+  reservationId: string
+  artifactKey: string
+  sha256: string
+  sizeBytes: number
+}
+
 export interface WorkbenchFormalReservation extends WorkbenchSelection {
   sceneIndex: number
   reservationId: string
   status: FormalReservationStatus
+  receipt?: WorkbenchDownloadReceipt
 }
 
 export interface WorkbenchSource {
@@ -246,6 +256,9 @@ export async function updateWorkbenchReviewState(
 export function nextWorkbenchStage(manifestValue: WorkbenchManifest, localFiles: LocalFileState): WorkbenchStage {
   const manifest = parseWorkbenchManifest(manifestValue)
   if (manifest.formalReservations.some(reservation => reservation.status === 'uncertain')) return 'failed'
+  if (manifest.formalReservations.some(reservation => (
+    reservation.status === 'completed' && reservation.receipt === undefined
+  ))) return 'failed'
   if (manifest.stage === 'planning') return 'planning'
   if (!allScenesConfirmed(manifest.scenes)) return 'review'
   if (manifest.renderId === null) return 'starting'
@@ -283,7 +296,7 @@ export function parseWorkbenchManifest(value: unknown): WorkbenchManifest {
   const scenes = array(input.scenes, invalidManifest).map((scene, index) => parseScene(scene, index, passage.cues[index]))
   if (scenes.length !== input.sceneCount) throw invalidManifest()
   const formalReservations = array(input.formalReservations, invalidManifest)
-    .map(reservation => parseReservation(reservation, scenes))
+    .map(reservation => parseReservation(reservation, scenes, input.taskId as string))
   assertUnique(formalReservations.map(reservation => reservation.sceneIndex), invalidManifest)
   assertUnique(formalReservations.map(reservation => reservation.reservationId), invalidManifest)
   const sources = array(input.sources, invalidManifest)
@@ -422,11 +435,15 @@ function parseSelection(value: unknown): WorkbenchSelection {
   }
 }
 
-function parseReservation(value: unknown, scenes: readonly WorkbenchScene[]): WorkbenchFormalReservation {
+function parseReservation(
+  value: unknown,
+  scenes: readonly WorkbenchScene[],
+  taskId: string,
+): WorkbenchFormalReservation {
   const reservation = record(value, invalidManifest)
   exactKeys(reservation, [
     'sceneIndex', 'reservationId', 'runId', 'resourceId', 'selectionId', 'status',
-  ], [], invalidManifest)
+  ], ['receipt'], invalidManifest)
   if (!nonnegativeInteger(reservation.sceneIndex)
     || reservation.sceneIndex >= scenes.length
     || !isUuid(reservation.reservationId)
@@ -441,11 +458,46 @@ function parseReservation(value: unknown, scenes: readonly WorkbenchScene[]): Wo
   })
   const confirmed = scenes[reservation.sceneIndex]?.confirmed
   if (confirmed === null || confirmed === undefined || !sameSelection(selection, confirmed)) throw invalidManifest()
+  const receipt = reservation.receipt === undefined
+    ? undefined
+    : parseDownloadReceipt(reservation.receipt, taskId, reservation.sceneIndex, reservation.reservationId)
+  if (receipt !== undefined && reservation.status !== 'completed') throw invalidManifest()
   return {
     sceneIndex: reservation.sceneIndex,
     reservationId: reservation.reservationId.toLowerCase(),
     ...selection,
     status: reservation.status as FormalReservationStatus,
+    ...(receipt === undefined ? {} : { receipt }),
+  }
+}
+
+function parseDownloadReceipt(
+  value: unknown,
+  taskId: string,
+  sceneIndex: unknown,
+  reservationId: unknown,
+): WorkbenchDownloadReceipt {
+  const receipt = record(value, invalidManifest)
+  exactKeys(receipt, [
+    'taskId', 'sceneIndex', 'reservationId', 'artifactKey', 'sha256', 'sizeBytes',
+  ], [], invalidManifest)
+  if (!isUuid(receipt.taskId)
+    || receipt.taskId.toLowerCase() !== taskId.toLowerCase()
+    || receipt.sceneIndex !== sceneIndex
+    || !isUuid(receipt.reservationId)
+    || receipt.reservationId.toLowerCase() !== String(reservationId).toLowerCase()
+    || !ownedArtifactKey(receipt.artifactKey, taskId)
+    || !isSha256(receipt.sha256)
+    || !positiveInteger(receipt.sizeBytes)) {
+    throw invalidManifest()
+  }
+  return {
+    taskId: receipt.taskId.toLowerCase(),
+    sceneIndex: receipt.sceneIndex as number,
+    reservationId: receipt.reservationId.toLowerCase(),
+    artifactKey: receipt.artifactKey as string,
+    sha256: receipt.sha256,
+    sizeBytes: receipt.sizeBytes,
   }
 }
 
@@ -476,6 +528,12 @@ function parseSource(
     || !positiveNumber(source.frameRate)
     || !text(source.videoCodec, 100)
     || !(source.audioCodec === null || text(source.audioCodec, 100))) {
+    throw invalidManifest()
+  }
+  if (reservation.receipt !== undefined
+    && (reservation.receipt.artifactKey !== source.artifactKey
+      || reservation.receipt.sha256 !== source.sha256
+      || reservation.receipt.sizeBytes !== source.sizeBytes)) {
     throw invalidManifest()
   }
   return source as unknown as WorkbenchSource

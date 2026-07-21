@@ -169,6 +169,16 @@ export class VecteezyDownloadClient {
     }
   }
 
+  seedAggregateSizeBytes(accountedSizeBytes: number): void {
+    if (!Number.isSafeInteger(accountedSizeBytes) || accountedSizeBytes < 0) {
+      throw new Error('accounted download size must be a non-negative integer')
+    }
+    if (accountedSizeBytes > this.#options.maxAggregateSizeBytes) {
+      throw new VecteezyDownloadError('aggregate_size_limit_exceeded', 'Vecteezy downloads exceed the 2 GiB aggregate limit')
+    }
+    this.#aggregateSizeBytes = Math.max(this.#aggregateSizeBytes, accountedSizeBytes)
+  }
+
   async requestDownload(
     resourceId: number,
     budget: FormalDownloadBudget,

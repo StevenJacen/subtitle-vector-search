@@ -313,6 +313,27 @@ describe('Vecteezy formal downloads', () => {
     expect(budget.used).toBe(1)
   })
 
+  it('seeds verified resume bytes into a new client aggregate before a formal request', async () => {
+    const fetcher = vi.fn().mockResolvedValue(formalDownload())
+    const downloadClient = client(fetcher)
+    downloadClient.seedAggregateSizeBytes(2 * 1024 * MiB)
+    const info = {
+      resourceId: 42,
+      sourceSizeBytes: 1,
+      requiresAttribution: false,
+      requiredAttributionUrl: null,
+      quota: { limit: null, remaining: null },
+    }
+
+    await expect(downloadClient.requestDownloadWithInfo(
+      info,
+      new FormalDownloadBudget(5),
+      '10000000-0000-4000-8000-000000000001',
+    )).rejects.toMatchObject({ code: 'aggregate_size_limit_exceeded' })
+
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+
   it('reserves synchronously under concurrent scheduling without exceeding the process limit', async () => {
     const budget = new FormalDownloadBudget(5)
     const attempts = Array.from({ length: 6 }, (_, index) => Promise.resolve().then(() => {

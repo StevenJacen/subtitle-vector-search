@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SceneCandidateState } from '../src/workbench/candidate-pool.js'
 import type {
   WorkbenchFormalReservation,
+  WorkbenchDownloadReceipt,
   WorkbenchManifest,
   WorkbenchSelection,
   WorkbenchSource,
@@ -90,7 +91,7 @@ function artifactStore(initial: WorkbenchManifest) {
       events.push('persist')
       return structuredClone(current)
     }),
-    verifySource: vi.fn(async () => false),
+    verifyReceipt: vi.fn(async () => false),
   }
   return { store, events, current: () => current }
 }
@@ -98,10 +99,10 @@ function artifactStore(initial: WorkbenchManifest) {
 function downloadClient(events: string[] = []) {
   let nextRequestId = 1
   return {
+    seedAggregateSizeBytes: vi.fn(),
     getDownloadInfo: vi.fn(async (resourceId: number) => downloadInfo(resourceId)),
-    requestDownloadWithInfo: vi.fn(async (info: ReturnType<typeof downloadInfo>, budget: FormalDownloadBudget, reservationId: string) => {
+    requestDownloadWithInfo: vi.fn(async (info: ReturnType<typeof downloadInfo>, _budget: FormalDownloadBudget, _reservationId: string) => {
       events.push('formal')
-      budget.reserve(reservationId)
       return { ...info, requestId: nextRequestId++ }
     }),
     waitForDownload: vi.fn(async (request: { requestId: number; resourceId: number }) => request),
@@ -218,6 +219,11 @@ describe('workbench formal downloads', () => {
     expect(result).toHaveLength(5)
     expect(client.getDownloadInfo).toHaveBeenCalledTimes(5)
     expect(client.requestDownloadWithInfo).toHaveBeenCalledTimes(5)
+    expect(client.seedAggregateSizeBytes).toHaveBeenCalledWith(0)
+    expect(artifacts.current().formalReservations.every(reservation => (
+      reservation.status === 'completed' && reservation.receipt !== undefined
+    ))).toBe(true)
+    expect(JSON.stringify(artifacts.current().formalReservations)).not.toMatch(/url/i)
     expect(artifacts.events).toEqual([
       'persist', 'formal', 'persist', 'persist', 'formal', 'persist', 'persist', 'formal', 'persist',
       'persist', 'formal', 'persist', 'persist', 'formal', 'persist',
@@ -271,8 +277,19 @@ describe('workbench formal downloads', () => {
       videoCodec: 'h264',
       audioCodec: null,
     }))
+    manifest.formalReservations = manifest.formalReservations.map((reservation, index) => ({
+      ...reservation,
+      receipt: {
+        taskId: TASK_ID,
+        sceneIndex: index,
+        reservationId: reservation.reservationId,
+        artifactKey: manifest.sources[index].artifactKey,
+        sha256: manifest.sources[index].sha256,
+        sizeBytes: manifest.sources[index].sizeBytes,
+      },
+    }))
     const artifacts = artifactStore(manifest)
-    vi.mocked(artifacts.store.verifySource).mockResolvedValue(true)
+    vi.mocked(artifacts.store.verifyReceipt).mockResolvedValue(true)
     const client = downloadClient()
 
     const result = await downloadConfirmedScenes({
@@ -284,7 +301,71 @@ describe('workbench formal downloads', () => {
     })
 
     expect(result.map(value => value.sourceSha256)).toEqual(Array(5).fill(SHA256))
+    expect(result[0]).toMatchObject({
+      requiresAttribution: false,
+      requiredAttributionUrl: null,
+      quota: { limit: 100, remaining: 99 },
+    })
+    expect(client.getDownloadInfo).toHaveBeenCalledTimes(5)
+    expect(client.requestDownloadWithInfo).not.toHaveBeenCalled()
+  })
+
+  it('treats a completed legacy reservation without a receipt as uncertain', async () => {
+    const inputScenes = scenes(5)
+    const manifest = manifestFor(inputScenes)
+    manifest.formalReservations = [{
+      sceneIndex: 0,
+      reservationId: '30000000-0000-4000-8000-000000000001',
+      ...inputScenes[0].confirmed,
+      status: 'completed',
+    }]
+    const artifacts = artifactStore(manifest)
+    const client = downloadClient()
+
+    await expect(downloadConfirmedScenes({
+      taskId: TASK_ID,
+      scenes: inputScenes,
+      budget: new FormalDownloadBudget(5),
+      artifacts: artifacts.store,
+      client,
+    })).rejects.toMatchObject({ code: 'formal_call_uncertain' })
+
+    expect(artifacts.store.verifyReceipt).not.toHaveBeenCalled()
     expect(client.getDownloadInfo).not.toHaveBeenCalled()
     expect(client.requestDownloadWithInfo).not.toHaveBeenCalled()
+  })
+
+  it('counts reusable receipts before pending preflight and rejects over 2 GiB with zero formal calls', async () => {
+    const inputScenes = scenes(5)
+    const manifest = manifestFor(inputScenes)
+    const existingSize = 500 * MiB
+    manifest.formalReservations = inputScenes.slice(0, 4).map((value, index): WorkbenchFormalReservation => {
+      const reservationId = `30000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`
+      const receipt: WorkbenchDownloadReceipt = {
+        taskId: TASK_ID,
+        sceneIndex: index,
+        reservationId,
+        artifactKey: `video-runs/${TASK_ID}/sources/scene-${index}.mp4`,
+        sha256: SHA256,
+        sizeBytes: existingSize,
+      }
+      return { sceneIndex: index, reservationId, ...value.confirmed, status: 'completed', receipt }
+    })
+    const artifacts = artifactStore(manifest)
+    vi.mocked(artifacts.store.verifyReceipt).mockResolvedValue(true)
+    const client = downloadClient()
+    client.getDownloadInfo.mockImplementation(async (resourceId: number) => downloadInfo(resourceId, 100 * MiB))
+
+    await expect(downloadConfirmedScenes({
+      taskId: TASK_ID,
+      scenes: inputScenes,
+      budget: new FormalDownloadBudget(5),
+      artifacts: artifacts.store,
+      client,
+    })).rejects.toMatchObject({ code: 'aggregate_size_limit_exceeded' })
+
+    expect(client.getDownloadInfo).toHaveBeenCalledTimes(5)
+    expect(client.requestDownloadWithInfo).not.toHaveBeenCalled()
+    expect(artifacts.store.updateTask).not.toHaveBeenCalled()
   })
 })

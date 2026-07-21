@@ -10,6 +10,7 @@ import {
   updateWorkbenchReviewState,
   updateWorkbenchTask,
   writeWorkbenchReviewState,
+  type WorkbenchDownloadReceipt,
   type WorkbenchManifest,
   type WorkbenchReviewState,
 } from '../src/workbench/artifacts-v2.js'
@@ -120,7 +121,32 @@ function productionManifest(sceneCount = 5): WorkbenchManifest {
     videoCodec: 'h264',
     audioCodec: null,
   }))
-  return { ...manifest, formalReservations, sources, stage: 'rendering' }
+  const reservationsWithReceipts = formalReservations.map((reservation, index) => ({
+    ...reservation,
+    receipt: {
+      taskId,
+      sceneIndex: reservation.sceneIndex,
+      reservationId: reservation.reservationId,
+      artifactKey: sources[index].artifactKey,
+      sha256: sources[index].sha256,
+      sizeBytes: sources[index].sizeBytes,
+    },
+  }))
+  return { ...manifest, formalReservations: reservationsWithReceipts, sources, stage: 'rendering' }
+}
+
+function receiptFor(
+  reservation: WorkbenchManifest['formalReservations'][number],
+  source: WorkbenchManifest['sources'][number],
+): WorkbenchDownloadReceipt {
+  return {
+    taskId,
+    sceneIndex: reservation.sceneIndex,
+    reservationId: reservation.reservationId,
+    artifactKey: source.artifactKey,
+    sha256: source.sha256,
+    sizeBytes: source.sizeBytes,
+  }
 }
 
 function completedManifest(sceneCount = 5): WorkbenchManifest {
@@ -241,6 +267,58 @@ describe('workbench v2 manifest contract', () => {
     }
     await expect(createWorkbenchTask(await temporaryRoot(), mismatchedReservation))
       .rejects.toThrow('invalid workbench manifest')
+  })
+
+  it('accepts an optional URL-free receipt while keeping legacy v2 reservations readable', async () => {
+    const legacyRoot = await temporaryRoot()
+    const legacy = productionManifest()
+    legacy.formalReservations = legacy.formalReservations.map(({ receipt: _receipt, ...reservation }) => reservation)
+    await createWorkbenchTask(legacyRoot, legacy)
+    expect((await readWorkbenchTask(legacyRoot, taskId)).formalReservations[0]).not.toHaveProperty('receipt')
+
+    const root = await temporaryRoot()
+    const withReceipts = productionManifest()
+    withReceipts.formalReservations = withReceipts.formalReservations.map((reservation, index) => ({
+      ...reservation,
+      receipt: receiptFor(reservation, withReceipts.sources[index]),
+    }))
+    await createWorkbenchTask(root, withReceipts)
+
+    const stored = await readWorkbenchTask(root, taskId)
+    expect(stored.formalReservations[0].receipt).toEqual(receiptFor(
+      withReceipts.formalReservations[0],
+      withReceipts.sources[0],
+    ))
+    expect(JSON.stringify(stored.formalReservations[0].receipt)).not.toMatch(/url/i)
+  })
+
+  it('requires a receipt to be completed, task-owned, reservation-owned, and source-consistent', async () => {
+    const base = productionManifest()
+    const receipt = receiptFor(base.formalReservations[0], base.sources[0])
+    const mutations: WorkbenchDownloadReceipt[] = [
+      { ...receipt, taskId: renderId },
+      { ...receipt, sceneIndex: 1 },
+      { ...receipt, reservationId: renderId },
+      { ...receipt, artifactKey: `video-runs/${renderId}/sources/scene-0.mp4` },
+      { ...receipt, sha256: 'f'.repeat(64) },
+      { ...receipt, sizeBytes: receipt.sizeBytes + 1 },
+    ]
+
+    for (const invalidReceipt of mutations) {
+      const invalid = productionManifest()
+      invalid.formalReservations[0] = { ...invalid.formalReservations[0], receipt: invalidReceipt }
+      await expect(createWorkbenchTask(await temporaryRoot(), invalid)).rejects.toThrow('invalid workbench manifest')
+    }
+
+    const reserved = productionManifest()
+    reserved.formalReservations[0] = {
+      ...reserved.formalReservations[0],
+      status: 'reserved',
+      receipt,
+    }
+    reserved.sources = reserved.sources.slice(1)
+    reserved.stage = 'downloading'
+    await expect(createWorkbenchTask(await temporaryRoot(), reserved)).rejects.toThrow('invalid workbench manifest')
   })
 
   it('requires stage-specific render, reservation, source, output, and failure state', async () => {
@@ -423,6 +501,16 @@ describe('workbench v2 storage and history', () => {
 })
 
 describe('workbench resume stage', () => {
+  it('treats a completed legacy reservation without a receipt as uncertain', () => {
+    const manifest = productionManifest()
+    const { receipt: _receipt, ...legacyReservation } = manifest.formalReservations[0]
+    manifest.formalReservations[0] = legacyReservation
+
+    expect(nextWorkbenchStage(manifest, {
+      hashes: Object.fromEntries(manifest.sources.map(source => [source.artifactKey, source.sha256])),
+    })).toBe('failed')
+  })
+
   it('reuses only verified source and output hashes', () => {
     const manifest = productionManifest()
     const hashes = Object.fromEntries(manifest.sources.map(source => [source.artifactKey, source.sha256]))
@@ -440,7 +528,8 @@ describe('workbench resume stage', () => {
 
   it('never re-spends an uncertain formal reservation', () => {
     const manifest = productionManifest()
-    manifest.formalReservations[0] = { ...manifest.formalReservations[0], status: 'uncertain' }
+    const { receipt: _receipt, ...reservation } = manifest.formalReservations[0]
+    manifest.formalReservations[0] = { ...reservation, status: 'uncertain' }
     manifest.sources = manifest.sources.slice(1)
     manifest.stage = 'failed'
     manifest.failure = { code: 'formal_call_uncertain', message: 'Formal download outcome is uncertain', retryable: false }
