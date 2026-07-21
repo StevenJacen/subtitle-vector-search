@@ -210,6 +210,22 @@ describe('workbench v2 manifest contract', () => {
       .resolves.toContain('"version": 2')
   })
 
+  it('round-trips durable download IDs while accepting older sources without them', async () => {
+    const legacyRoot = await temporaryRoot()
+    const legacy = productionManifest()
+    await createWorkbenchTask(legacyRoot, legacy)
+    expect((await readWorkbenchTask(legacyRoot, taskId)).sources[0].downloadId).toBeUndefined()
+
+    const durableRoot = await temporaryRoot()
+    const durable: WorkbenchManifest = {
+      ...productionManifest(),
+      sources: productionManifest().sources.map((source, index) => ({ ...source, downloadId: 900 + index })),
+    }
+    await createWorkbenchTask(durableRoot, durable)
+    expect((await readWorkbenchTask(durableRoot, taskId)).sources.map(source => source.downloadId))
+      .toEqual([900, 901, 902, 903, 904])
+  })
+
   it('accepts only the canonical portrait and landscape dimensions', async () => {
     const root = await temporaryRoot()
     const portrait = { ...manifestFor(), aspectRatio: '9:16' as const, width: 1080, height: 1920 }

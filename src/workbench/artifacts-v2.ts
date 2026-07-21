@@ -58,6 +58,7 @@ export interface WorkbenchSource {
   sceneIndex: number
   reservationId: string
   selectionId: number
+  downloadId?: number
   artifactKey: string
   sha256: string
   sizeBytes: number
@@ -510,11 +511,12 @@ function parseSource(
   exactKeys(source, [
     'sceneIndex', 'reservationId', 'selectionId', 'artifactKey', 'sha256', 'sizeBytes',
     'width', 'height', 'durationMs', 'frameRate', 'videoCodec', 'audioCodec',
-  ], [], invalidManifest)
+  ], ['downloadId'], invalidManifest)
   const reservation = reservations.find(candidate => candidate.sceneIndex === source.sceneIndex)
   if (!nonnegativeInteger(source.sceneIndex)
     || !isUuid(source.reservationId)
     || !positiveInteger(source.selectionId)
+    || !(source.downloadId === undefined || positiveInteger(source.downloadId))
     || reservation === undefined
     || reservation.status !== 'completed'
     || reservation.reservationId !== source.reservationId.toLowerCase()
