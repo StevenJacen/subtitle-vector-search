@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -8,6 +9,7 @@ import {
   requestSubtitlePassage,
   runWorkbenchServer,
 } from '../src/workbench/server.js'
+import * as workbenchServer from '../src/workbench/server.js'
 import { PreviewRegistry } from '../src/workbench/vecteezy-candidates.js'
 
 const environment = {
@@ -70,6 +72,38 @@ describe('workbench server configuration', () => {
       NODE_ENV: 'production',
       WORKBENCH_FIXTURE_MODE: '1',
     })).rejects.toThrow('workbench fixture mode requires NODE_ENV=test')
+  })
+})
+
+describe('workbench request digests', () => {
+  it('canonicalizes source anchors without changing theme-only digest input', () => {
+    const requestDigest = (workbenchServer as typeof workbenchServer & {
+      requestDigest?: (input: {
+        theme: string
+        aspectRatio: '9:16' | '16:9'
+        sceneCount: number
+        sourceAnchor?: { trackId: number; firstCueIndex: number; lastCueIndex: number }
+      }) => string
+    }).requestDigest
+    expect(requestDigest).toBeTypeOf('function')
+
+    const input = { theme: ' hope ', aspectRatio: '16:9' as const, sceneCount: 5 }
+    const first = requestDigest!({
+      ...input,
+      sourceAnchor: { trackId: 12, firstCueIndex: 40, lastCueIndex: 47 },
+    })
+    const reordered = requestDigest!({
+      ...input,
+      sourceAnchor: { lastCueIndex: 47, trackId: 12, firstCueIndex: 40 },
+    })
+
+    expect(first).toBe(reordered)
+    expect(requestDigest!(input)).toBe(createHash('sha256').update(JSON.stringify({
+      version: 2,
+      theme: 'hope',
+      aspectRatio: '16:9',
+      sceneCount: 5,
+    })).digest('hex'))
   })
 })
 

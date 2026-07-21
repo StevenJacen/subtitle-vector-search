@@ -580,13 +580,19 @@ async function executableVersion(command: string): Promise<string> {
   })
 }
 
-function requestDigest(input: CreateTaskInput): string {
+export function requestDigest(input: CreateTaskInput): string {
   return createHash('sha256').update(JSON.stringify({
     version: 2,
     theme: input.theme.trim(),
     aspectRatio: input.aspectRatio,
     sceneCount: input.sceneCount,
-    ...(input.sourceAnchor === undefined ? {} : { sourceAnchor: input.sourceAnchor }),
+    ...(input.sourceAnchor === undefined ? {} : {
+      sourceAnchor: {
+        trackId: input.sourceAnchor.trackId,
+        firstCueIndex: input.sourceAnchor.firstCueIndex,
+        lastCueIndex: input.sourceAnchor.lastCueIndex,
+      },
+    }),
   })).digest('hex')
 }
 
