@@ -5,8 +5,10 @@ import {
 } from '../supabase/functions/_shared/video-production-repository.js'
 import { handleVideoProductionRequest } from '../supabase/functions/_shared/video-production-handler.js'
 import { VideoProductionError, type VideoProductionRequest } from '../supabase/functions/_shared/video-production.js'
+import type { VideoProductionV2Request } from '../supabase/functions/_shared/video-production-v2.js'
 
 const renderId = 'd62a53a1-08fb-4bee-a1ed-d8ba13de85f2'
+const taskId = '8a291fbb-a9e1-42c2-a8d9-fc0817508b7f'
 const sha256 = 'a'.repeat(64)
 const environment = { get: (name: string) => name === 'SUBTITLE_PERSONAL_TOKEN' ? 'correct-token' : undefined }
 
@@ -42,6 +44,31 @@ function repository(): VideoProductionRepository {
     complete: vi.fn().mockResolvedValue({ status: 'completed' }),
     fail: vi.fn().mockResolvedValue({ status: 'failed' }),
     retry: vi.fn().mockResolvedValue({ status: 'planned' }),
+    startV2: vi.fn().mockResolvedValue({ renderId, status: 'planned', isExisting: false }),
+    recordDownloadV2: vi.fn().mockResolvedValue({ downloadId: 1 }),
+    beginRenderV2: vi.fn().mockResolvedValue({ status: 'rendering' }),
+    completeV2: vi.fn().mockResolvedValue({ status: 'completed' }),
+    failV2: vi.fn().mockResolvedValue({ status: 'failed' }),
+    retryV2: vi.fn().mockResolvedValue({ status: 'planned' }),
+  }
+}
+
+function v2Input(action: 'startV2'): Extract<VideoProductionV2Request, { action: 'startV2' }>
+function v2Input(action: 'recordDownloadV2'): Extract<VideoProductionV2Request, { action: 'recordDownloadV2' }>
+function v2Input(action: 'beginRenderV2'): Extract<VideoProductionV2Request, { action: 'beginRenderV2' }>
+function v2Input(action: 'completeV2'): Extract<VideoProductionV2Request, { action: 'completeV2' }>
+function v2Input(action: 'failV2'): Extract<VideoProductionV2Request, { action: 'failV2' }>
+function v2Input(action: 'retryV2'): Extract<VideoProductionV2Request, { action: 'retryV2' }>
+function v2Input(action: VideoProductionV2Request['action']): VideoProductionV2Request
+function v2Input(action: VideoProductionV2Request['action']): VideoProductionV2Request {
+  const reservationId = '4f6bfa4b-5d5a-41f5-9084-c9889bba03fd'
+  switch (action) {
+    case 'startV2': return { action, requestDigest: sha256, theme: 'hope', aspectRatio: '16:9', width: 1920, height: 1080, sceneCount: 5, sourceTrackId: 7, sourceStartCueIndex: 20, sourceEndCueIndex: 24, expectedDurationMs: 15_000 }
+    case 'recordDownloadV2': return { action, renderId, selectionId: 1, reservationId, artifactKey: `video-runs/${taskId}/source.mp4`, fileType: 'mp4', sourceSizeBytes: 1, sourceSha256: sha256, width: 1920, height: 1080, durationMs: 3_000, frameRate: 30, videoCodec: 'h264', audioCodec: null, requiresAttribution: false, requiredAttributionUrl: null, quotaLimit: null, quotaRemaining: null }
+    case 'beginRenderV2': return { action, renderId }
+    case 'completeV2': return { action, renderId, segments: Array.from({ length: 5 }, (_, index) => ({ segmentIndex: index, downloadId: index + 1, timelineStartMs: index * 3_000, timelineEndMs: (index + 1) * 3_000, sourceInMs: 0, sourceOutMs: 3_000, captionEn: `cue ${index}`, captionZh: `字幕 ${index}`, sourceTrackId: 7, sourceCueIndex: 20 + index })), output: { artifactKey: `video-runs/${taskId}/output.mp4`, outputSha256: sha256, outputSizeBytes: 1, outputDurationMs: 15_000, width: 1920, height: 1080, videoCodec: 'h264', audioCodec: null, pixelFormat: 'yuv420p', ffmpegVersion: '7.1', manifestSha256: sha256 } }
+    case 'failV2': return { action, renderId, failureCode: 'render_failure', failureMessage: 'local detail' }
+    case 'retryV2': return { action, renderId }
   }
 }
 
@@ -190,5 +217,59 @@ describe('video production repository', () => {
     await expect(repo.retry(renderId)).rejects.toStrictEqual(
       new VideoProductionError(500, 'production_metadata_failed', 'production metadata failed'),
     )
+  })
+})
+
+describe('video production v2 metadata path', () => {
+  it.each(['startV2', 'recordDownloadV2', 'beginRenderV2', 'completeV2', 'failV2', 'retryV2'] as const)(
+    'dispatches %s without changing the response envelope',
+    async action => {
+      const repo = repository()
+      const response = await handleVideoProductionRequest(request(v2Input(action)), environment, () => repo)
+
+      expect(response.status).toBe(200)
+      expect(repo[action]).toHaveBeenCalledTimes(1)
+      await expect(response.json()).resolves.toEqual(action === 'startV2'
+        ? { renderId, status: 'planned', isExisting: false }
+        : action === 'recordDownloadV2' ? { downloadId: 1 }
+        : { status: action === 'beginRenderV2' ? 'rendering' : action === 'completeV2' ? 'completed' : action === 'failV2' ? 'failed' : 'planned' })
+    },
+  )
+
+  it('maps v2 calls to exact versioned RPC names and snake_case payloads', async () => {
+    const rpc = vi.fn()
+      .mockResolvedValueOnce({ data: [{ render_id: renderId, status: 'planned', is_existing: false }], error: null })
+      .mockResolvedValueOnce({ data: [{ render_id: renderId, download_id: 4 }], error: null })
+      .mockResolvedValueOnce({ data: [{ status: 'rendering' }], error: null })
+      .mockResolvedValueOnce({ data: [{ status: 'completed' }], error: null })
+      .mockResolvedValueOnce({ data: [{ status: 'failed' }], error: null })
+      .mockResolvedValueOnce({ data: [{ status: 'downloading' }], error: null })
+    const repo = createVideoProductionRepository({ rpc })
+
+    await repo.startV2(v2Input('startV2'))
+    await repo.recordDownloadV2(v2Input('recordDownloadV2'))
+    await repo.beginRenderV2(renderId)
+    await repo.completeV2(v2Input('completeV2'))
+    await repo.failV2(v2Input('failV2'))
+    await repo.retryV2(renderId)
+
+    expect(rpc.mock.calls.map(call => call[0])).toEqual([
+      'start_video_render_v2', 'record_video_asset_download_v2', 'begin_video_render_v2',
+      'complete_video_render_v2', 'fail_video_render_v2', 'retry_video_render_v2',
+    ])
+    expect(rpc.mock.calls[0][1]).toEqual({
+      p_request_digest: sha256, p_theme: 'hope', p_aspect_ratio: '16:9', p_width: 1920,
+      p_height: 1080, p_scene_count: 5, p_source_track_id: 7,
+      p_source_start_cue_index: 20, p_source_end_cue_index: 24, p_expected_duration_ms: 15_000,
+    })
+    expect(rpc.mock.calls[1][1]).toMatchObject({
+      p_render_id: renderId, p_selection_id: 1,
+      p_reservation_id: '4f6bfa4b-5d5a-41f5-9084-c9889bba03fd', p_audio_codec: null,
+    })
+    expect(rpc.mock.calls[3][1]).toMatchObject({
+      p_render_id: renderId,
+      p_segments: expect.arrayContaining([expect.objectContaining({ segment_index: 0, source_track_id: 7, source_cue_index: 20 })]),
+      p_output: expect.objectContaining({ width: 1920, height: 1080, audio_codec: null }),
+    })
   })
 })

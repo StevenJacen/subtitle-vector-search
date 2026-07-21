@@ -2,6 +2,7 @@ import {
   VideoProductionError,
   type VideoProductionRequest,
 } from './video-production.ts'
+import type { VideoProductionV2Request } from './video-production-v2.ts'
 
 export interface VideoProductionRepository {
   start(input: Extract<VideoProductionRequest, { action: 'start' }>): Promise<{ renderId: string; status: string; isExisting: boolean }>
@@ -10,6 +11,12 @@ export interface VideoProductionRepository {
   complete(input: Extract<VideoProductionRequest, { action: 'complete' }>): Promise<{ status: 'completed' }>
   fail(input: Extract<VideoProductionRequest, { action: 'fail' }>): Promise<{ status: 'failed' }>
   retry(renderId: string): Promise<{ status: 'planned' | 'downloading' }>
+  startV2(input: Extract<VideoProductionV2Request, { action: 'startV2' }>): Promise<{ renderId: string; status: string; isExisting: boolean }>
+  recordDownloadV2(input: Extract<VideoProductionV2Request, { action: 'recordDownloadV2' }>): Promise<{ downloadId: number }>
+  beginRenderV2(renderId: string): Promise<{ status: 'rendering' }>
+  completeV2(input: Extract<VideoProductionV2Request, { action: 'completeV2' }>): Promise<{ status: 'completed' }>
+  failV2(input: Extract<VideoProductionV2Request, { action: 'failV2' }>): Promise<{ status: 'failed' }>
+  retryV2(renderId: string): Promise<{ status: 'planned' | 'downloading' }>
 }
 
 interface DatabaseResult {
@@ -108,6 +115,105 @@ export function createVideoProductionRepository(client: SupabaseRepositoryClient
 
     async retry(renderId) {
       const result = firstRow(await database(client.rpc('retry_video_render', { p_render_id: renderId })))
+      if (result.status !== 'planned' && result.status !== 'downloading') throw productionFailure()
+      return { status: result.status }
+    },
+
+    async startV2(input) {
+      const result = firstRow(await database(client.rpc('start_video_render_v2', {
+        p_request_digest: input.requestDigest,
+        p_theme: input.theme,
+        p_aspect_ratio: input.aspectRatio,
+        p_width: input.width,
+        p_height: input.height,
+        p_scene_count: input.sceneCount,
+        p_source_track_id: input.sourceTrackId,
+        p_source_start_cue_index: input.sourceStartCueIndex,
+        p_source_end_cue_index: input.sourceEndCueIndex,
+        p_expected_duration_ms: input.expectedDurationMs,
+      })))
+      return {
+        renderId: uuid(result.render_id),
+        status: text(result.status),
+        isExisting: boolean(result.is_existing),
+      }
+    },
+
+    async recordDownloadV2(input) {
+      const result = firstRow(await database(client.rpc('record_video_asset_download_v2', {
+        p_render_id: input.renderId,
+        p_selection_id: input.selectionId,
+        p_reservation_id: input.reservationId,
+        p_artifact_key: input.artifactKey,
+        p_file_type: input.fileType,
+        p_source_size_bytes: input.sourceSizeBytes,
+        p_source_sha256: input.sourceSha256,
+        p_width: input.width,
+        p_height: input.height,
+        p_duration_ms: input.durationMs,
+        p_frame_rate: input.frameRate,
+        p_video_codec: input.videoCodec,
+        p_audio_codec: input.audioCodec,
+        p_requires_attribution: input.requiresAttribution,
+        p_required_attribution_url: input.requiredAttributionUrl,
+        p_quota_limit: input.quotaLimit,
+        p_quota_remaining: input.quotaRemaining,
+      })))
+      uuid(result.render_id)
+      return { downloadId: positiveInteger(result.download_id) }
+    },
+
+    async beginRenderV2(renderId) {
+      const result = firstRow(await database(client.rpc('begin_video_render_v2', { p_render_id: renderId })))
+      if (result.status !== 'rendering') throw productionFailure()
+      return { status: 'rendering' }
+    },
+
+    async completeV2(input) {
+      const result = firstRow(await database(client.rpc('complete_video_render_v2', {
+        p_render_id: input.renderId,
+        p_segments: input.segments.map(segment => ({
+          segment_index: segment.segmentIndex,
+          download_id: segment.downloadId,
+          timeline_start_ms: segment.timelineStartMs,
+          timeline_end_ms: segment.timelineEndMs,
+          source_in_ms: segment.sourceInMs,
+          source_out_ms: segment.sourceOutMs,
+          caption_en: segment.captionEn,
+          caption_zh: segment.captionZh,
+          source_track_id: segment.sourceTrackId,
+          source_cue_index: segment.sourceCueIndex,
+        })),
+        p_output: {
+          artifact_key: input.output.artifactKey,
+          output_sha256: input.output.outputSha256,
+          output_size_bytes: input.output.outputSizeBytes,
+          output_duration_ms: input.output.outputDurationMs,
+          width: input.output.width,
+          height: input.output.height,
+          video_codec: input.output.videoCodec,
+          audio_codec: input.output.audioCodec,
+          pixel_format: input.output.pixelFormat,
+          ffmpeg_version: input.output.ffmpegVersion,
+          manifest_sha256: input.output.manifestSha256,
+        },
+      })))
+      if (result.status !== 'completed') throw productionFailure()
+      return { status: 'completed' }
+    },
+
+    async failV2(input) {
+      const result = firstRow(await database(client.rpc('fail_video_render_v2', {
+        p_render_id: input.renderId,
+        p_failure_code: input.failureCode,
+        p_failure_message: input.failureMessage,
+      })))
+      if (result.status !== 'failed') throw productionFailure()
+      return { status: 'failed' }
+    },
+
+    async retryV2(renderId) {
+      const result = firstRow(await database(client.rpc('retry_video_render_v2', { p_render_id: renderId })))
       if (result.status !== 'planned' && result.status !== 'downloading') throw productionFailure()
       return { status: result.status }
     },

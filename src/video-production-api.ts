@@ -4,6 +4,11 @@ import type {
   RenderOutputInput,
   RenderSegmentInput,
 } from '../supabase/functions/_shared/video-production.js'
+import type {
+  RenderOutputInputV2,
+  RenderSegmentInputV2,
+  VideoProductionV2Request,
+} from '../supabase/functions/_shared/video-production-v2.js'
 import { SubtitleApiError, SubtitleApiTransportError } from './supabase-api.js'
 
 export interface VideoProductionApiConfig {
@@ -36,6 +41,15 @@ export interface FailRenderRequest {
   renderId: string
   failureCode: string
   failureMessage: string
+}
+
+export type StartRenderV2Request = Omit<Extract<VideoProductionV2Request, { action: 'startV2' }>, 'action'>
+export type RecordDownloadV2Request = Omit<Extract<VideoProductionV2Request, { action: 'recordDownloadV2' }>, 'action'>
+
+export interface CompleteRenderV2Request {
+  renderId: string
+  segments: RenderSegmentInputV2[]
+  output: RenderOutputInputV2
 }
 
 type Status = RenderStatusResponse['status']
@@ -205,6 +219,129 @@ export class VideoProductionApi {
       { action: 'retry', renderId },
       value => isExpectedStatusResponse(value, 'planned') || isExpectedStatusResponse(value, 'downloading'),
       'video production retry',
+    )
+    return { renderId, status: response.status }
+  }
+
+  startV2(input: StartRenderV2Request): Promise<StartRenderResponse> {
+    return this.request(
+      this.metadataUrl,
+      {
+        action: 'startV2',
+        requestDigest: input.requestDigest,
+        theme: input.theme,
+        aspectRatio: input.aspectRatio,
+        width: input.width,
+        height: input.height,
+        sceneCount: input.sceneCount,
+        sourceTrackId: input.sourceTrackId,
+        sourceStartCueIndex: input.sourceStartCueIndex,
+        sourceEndCueIndex: input.sourceEndCueIndex,
+        expectedDurationMs: input.expectedDurationMs,
+      },
+      isStartStatusResponse,
+      'video production v2 start',
+    )
+  }
+
+  async recordDownloadV2(input: RecordDownloadV2Request): Promise<{ renderId: string; downloadId: number }> {
+    const response = await this.request(
+      this.metadataUrl,
+      {
+        action: 'recordDownloadV2',
+        renderId: input.renderId,
+        selectionId: input.selectionId,
+        reservationId: input.reservationId,
+        artifactKey: input.artifactKey,
+        fileType: input.fileType,
+        sourceSizeBytes: input.sourceSizeBytes,
+        sourceSha256: input.sourceSha256,
+        width: input.width,
+        height: input.height,
+        durationMs: input.durationMs,
+        frameRate: input.frameRate,
+        videoCodec: input.videoCodec,
+        audioCodec: input.audioCodec,
+        requiresAttribution: input.requiresAttribution,
+        requiredAttributionUrl: input.requiredAttributionUrl,
+        quotaLimit: input.quotaLimit,
+        quotaRemaining: input.quotaRemaining,
+      },
+      isRecordDownloadResponse,
+      'video production v2 download recording',
+    )
+    return { renderId: input.renderId, downloadId: response.downloadId }
+  }
+
+  async beginRenderV2(renderId: string): Promise<RenderStatusResponse> {
+    const response = await this.request(
+      this.metadataUrl,
+      { action: 'beginRenderV2', renderId },
+      value => isExpectedStatusResponse(value, 'rendering'),
+      'video production v2 begin render',
+    )
+    return { renderId, status: response.status }
+  }
+
+  async completeV2(input: CompleteRenderV2Request): Promise<RenderStatusResponse> {
+    const response = await this.request(
+      this.metadataUrl,
+      {
+        action: 'completeV2',
+        renderId: input.renderId,
+        segments: input.segments.map(segment => ({
+          segmentIndex: segment.segmentIndex,
+          downloadId: segment.downloadId,
+          timelineStartMs: segment.timelineStartMs,
+          timelineEndMs: segment.timelineEndMs,
+          sourceInMs: segment.sourceInMs,
+          sourceOutMs: segment.sourceOutMs,
+          captionEn: segment.captionEn,
+          captionZh: segment.captionZh,
+          sourceTrackId: segment.sourceTrackId,
+          sourceCueIndex: segment.sourceCueIndex,
+        })),
+        output: {
+          artifactKey: input.output.artifactKey,
+          outputSha256: input.output.outputSha256,
+          outputSizeBytes: input.output.outputSizeBytes,
+          outputDurationMs: input.output.outputDurationMs,
+          width: input.output.width,
+          height: input.output.height,
+          videoCodec: input.output.videoCodec,
+          audioCodec: input.output.audioCodec,
+          pixelFormat: input.output.pixelFormat,
+          ffmpegVersion: input.output.ffmpegVersion,
+          manifestSha256: input.output.manifestSha256,
+        },
+      },
+      value => isExpectedStatusResponse(value, 'completed'),
+      'video production v2 completion',
+    )
+    return { renderId: input.renderId, status: response.status }
+  }
+
+  async failV2(input: FailRenderRequest): Promise<RenderStatusResponse> {
+    const response = await this.request(
+      this.metadataUrl,
+      {
+        action: 'failV2',
+        renderId: input.renderId,
+        failureCode: input.failureCode,
+        failureMessage: input.failureMessage,
+      },
+      value => isExpectedStatusResponse(value, 'failed'),
+      'video production v2 failure',
+    )
+    return { renderId: input.renderId, status: response.status }
+  }
+
+  async retryV2(renderId: string): Promise<RenderStatusResponse> {
+    const response = await this.request(
+      this.metadataUrl,
+      { action: 'retryV2', renderId },
+      value => isExpectedStatusResponse(value, 'planned') || isExpectedStatusResponse(value, 'downloading'),
+      'video production v2 retry',
     )
     return { renderId, status: response.status }
   }

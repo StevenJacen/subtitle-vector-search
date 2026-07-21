@@ -6,7 +6,10 @@ import {
 import {
   VideoProductionApi,
   type CompleteRenderRequest,
+  type CompleteRenderV2Request,
   type RecordDownloadRequest,
+  type RecordDownloadV2Request,
+  type StartRenderV2Request,
 } from '../src/video-production-api.js'
 
 const config = {
@@ -16,6 +19,7 @@ const config = {
 }
 
 const renderId = 'd62a53a1-08fb-4bee-a1ed-d8ba13de85f2'
+const taskId = '8a291fbb-a9e1-42c2-a8d9-fc0817508b7f'
 const runId = 'a62a53a1-08fb-4bee-a1ed-d8ba13de85f2'
 const sha256 = 'a'.repeat(64)
 
@@ -94,6 +98,35 @@ const complete: CompleteRenderRequest = {
     pixelFormat: 'yuv420p',
     ffmpegVersion: '7.1',
     manifestSha256: sha256,
+  },
+}
+
+const startV2: StartRenderV2Request = {
+  requestDigest: sha256, theme: 'hope', aspectRatio: '16:9', width: 1920, height: 1080,
+  sceneCount: 5, sourceTrackId: 7, sourceStartCueIndex: 20, sourceEndCueIndex: 24,
+  expectedDurationMs: 15_000,
+}
+
+const downloadV2: RecordDownloadV2Request = {
+  ...metadata,
+  artifactKey: `video-runs/${taskId}/source.mp4`,
+  reservationId: '4f6bfa4b-5d5a-41f5-9084-c9889bba03fd',
+  audioCodec: null,
+}
+
+const completeV2: CompleteRenderV2Request = {
+  renderId,
+  segments: Array.from({ length: 5 }, (_, index) => ({
+    segmentIndex: index, downloadId: index + 1, timelineStartMs: index * 3_000,
+    timelineEndMs: (index + 1) * 3_000, sourceInMs: 0, sourceOutMs: 3_000,
+    captionEn: `Exact cue ${index}`, captionZh: `字幕 ${index}`,
+    sourceTrackId: 7, sourceCueIndex: 20 + index,
+  })),
+  output: {
+    artifactKey: `video-runs/${taskId}/output/final.mp4`, outputSha256: sha256,
+    outputSizeBytes: 2048, outputDurationMs: 15_000, width: 1920, height: 1080,
+    videoCodec: 'h264', audioCodec: null, pixelFormat: 'yuv420p',
+    ffmpegVersion: '7.1', manifestSha256: sha256,
   },
 }
 
@@ -522,5 +555,48 @@ describe('VideoProductionApi', () => {
     expect(String(error)).not.toContain(config.personalToken)
     expect(fetchFn).toHaveBeenCalledTimes(3)
     expect(delayFn).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('VideoProductionApi v2', () => {
+  it('serializes all six v2 actions with explicit allowlists', async () => {
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(response(publicStatusResponse('planned', false)))
+      .mockResolvedValueOnce(response({ downloadId: 11 }))
+      .mockResolvedValueOnce(response({ status: 'rendering' }))
+      .mockResolvedValueOnce(response({ status: 'completed' }))
+      .mockResolvedValueOnce(response({ status: 'failed' }))
+      .mockResolvedValueOnce(response({ status: 'downloading' }))
+    const api = createApi(fetchFn)
+
+    await expect(api.startV2({ ...startV2, previewUrl: 'https://private.test' } as StartRenderV2Request)).resolves.toEqual(publicStatusResponse('planned', false))
+    await expect(api.recordDownloadV2({ ...downloadV2, downloadUrl: 'https://private.test' } as RecordDownloadV2Request)).resolves.toEqual({ renderId, downloadId: 11 })
+    await expect(api.beginRenderV2(renderId)).resolves.toEqual(publicStatusResponse('rendering'))
+    await expect(api.completeV2({ ...completeV2, statusUrl: 'https://private.test' } as CompleteRenderV2Request)).resolves.toEqual(publicStatusResponse('completed'))
+    await expect(api.failV2({ renderId, failureCode: 'render_failure', failureMessage: 'local detail' })).resolves.toEqual(publicStatusResponse('failed'))
+    await expect(api.retryV2(renderId)).resolves.toEqual(publicStatusResponse('downloading'))
+
+    const payloads = fetchFn.mock.calls.map(([, init]) => JSON.parse((init as RequestInit).body as string))
+    expect(payloads.map(payload => payload.action)).toEqual([
+      'startV2', 'recordDownloadV2', 'beginRenderV2', 'completeV2', 'failV2', 'retryV2',
+    ])
+    expect(payloads[0]).toEqual({ action: 'startV2', ...startV2 })
+    expect(payloads[1]).toEqual({ action: 'recordDownloadV2', ...downloadV2 })
+    expect(payloads[3]).toEqual({ action: 'completeV2', ...completeV2 })
+    expect(JSON.stringify(payloads)).not.toContain('private.test')
+  })
+
+  it('applies strict existing v1 response validators to v2 responses', async () => {
+    const malformed = [
+      [response({ renderId, status: 'planned' }), (api: VideoProductionApi) => api.startV2(startV2)],
+      [response({ downloadId: 0 }), (api: VideoProductionApi) => api.recordDownloadV2(downloadV2)],
+      [response({ status: 'completed', extra: true }), (api: VideoProductionApi) => api.completeV2(completeV2)],
+      [response({ status: 'rendering' }), (api: VideoProductionApi) => api.retryV2(renderId)],
+    ] as const
+
+    for (const [wireResponse, invoke] of malformed) {
+      await expect(invoke(createApi(vi.fn().mockResolvedValue(wireResponse))))
+        .rejects.toMatchObject({ status: 502, code: 'invalid_response' })
+    }
   })
 })

@@ -2,6 +2,7 @@ import type { TokenEnvironment } from './auth.ts'
 import { errorResponse, handleAuthenticatedRequest, jsonResponse } from './http.ts'
 import type { VideoProductionRepository } from './video-production-repository.ts'
 import { parseVideoProductionRequest, VideoProductionError } from './video-production.ts'
+import { parseVideoProductionV2Request } from './video-production-v2.ts'
 
 export async function handleVideoProductionRequest(
   request: Request,
@@ -14,7 +15,13 @@ export async function handleVideoProductionRequest(
 
   return await handleAuthenticatedRequest(request, environment, async () => {
     try {
-      const input = parseVideoProductionRequest(await request.json())
+      const value: unknown = await request.json()
+      const action = typeof value === 'object' && value !== null && !Array.isArray(value)
+        ? (value as Record<string, unknown>).action
+        : undefined
+      const input = typeof action === 'string' && action.endsWith('V2')
+        ? parseVideoProductionV2Request(value)
+        : parseVideoProductionRequest(value)
       const repository = createRepository()
       switch (input.action) {
         case 'start': return jsonResponse(await repository.start(input))
@@ -23,6 +30,12 @@ export async function handleVideoProductionRequest(
         case 'complete': return jsonResponse(await repository.complete(input))
         case 'fail': return jsonResponse(await repository.fail(input))
         case 'retry': return jsonResponse(await repository.retry(input.renderId))
+        case 'startV2': return jsonResponse(await repository.startV2(input))
+        case 'recordDownloadV2': return jsonResponse(await repository.recordDownloadV2(input))
+        case 'beginRenderV2': return jsonResponse(await repository.beginRenderV2(input.renderId))
+        case 'completeV2': return jsonResponse(await repository.completeV2(input))
+        case 'failV2': return jsonResponse(await repository.failV2(input))
+        case 'retryV2': return jsonResponse(await repository.retryV2(input.renderId))
       }
     } catch (error) {
       if (error instanceof VideoProductionError) {
