@@ -348,7 +348,11 @@ async function readBoundedBody(response: Response, signal: AbortSignal): Promise
       }
       bytes += chunk.value.byteLength
       if (bytes > RESPONSE_BYTE_LIMIT) {
-        await reader.cancel()
+        try {
+          await reader.cancel()
+        } catch {
+          // Preserve the controlled size error when stream cleanup fails.
+        }
         throw new OllamaPlanError('response_too_large')
       }
       result += decoder.decode(chunk.value, { stream: true })

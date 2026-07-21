@@ -362,6 +362,25 @@ describe('Ollama passage-plan transport', () => {
     }), 'response_too_large')
   })
 
+  it('keeps the response-too-large code when streaming cancellation fails', async () => {
+    const cancel = vi.fn().mockRejectedValue(new Error('SECRET CANCEL FAILURE'))
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(128 * 1024 + 1))
+      },
+      cancel,
+    })
+
+    await expectRejectedCode(planPassageWithOllama({
+      endpoint: new URL('http://ollama.test'),
+      model: 'gemma4:12b',
+      cues,
+      ...context,
+      fetchFn: vi.fn().mockResolvedValue(new Response(body)),
+    }), 'response_too_large')
+    expect(cancel).toHaveBeenCalledOnce()
+  })
+
   it('maps HTTP and network failures without exposing provider details', async () => {
     const endpoint = 'http://private-ollama.test/SECRET-ENDPOINT'
     const secrets = [endpoint, cues[0].text, 'SECRET PROVIDER BODY', 'SECRET NETWORK FAILURE']
