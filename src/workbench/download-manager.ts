@@ -112,7 +112,7 @@ export async function downloadConfirmedScenes(input: {
   client: WorkbenchDownloadClient
 }): Promise<VerifiedSceneSource[]> {
   validateTaskAndScenes(input.taskId, input.scenes)
-  if (input.budget.maximum !== input.scenes.length) {
+  if (input.budget.maximum < input.scenes.length || input.budget.maximum > 10) {
     throw new WorkbenchDownloadError('invalid_download_budget')
   }
   const manifest = await input.artifacts.readTask(input.taskId)

@@ -114,13 +114,14 @@ async function routeRequest(
   if (origin === null || request.headers.host !== origin.slice('http://'.length)) throw httpError(403, 'forbidden', 'Request rejected')
   const method = request.method ?? ''
   const parsedUrl = new URL(request.url ?? '/', origin)
-  if (parsedUrl.origin !== origin || parsedUrl.search !== '') throw httpError(400, 'invalid_request', 'Invalid request')
+  if (parsedUrl.origin !== origin) throw httpError(400, 'invalid_request', 'Invalid request')
   if (request.headers.origin !== undefined && request.headers.origin !== origin) {
     throw httpError(403, 'forbidden', 'Request rejected')
   }
   const path = parsedUrl.pathname
+  if (path.startsWith('/api/') && parsedUrl.search !== '') throw httpError(400, 'invalid_request', 'Invalid request')
 
-  if (path === '/' && method === 'GET') {
+  if (path === '/' && parsedUrl.search === '' && method === 'GET') {
     const html = options.renderHtml === undefined
       ? options.staticRoot === undefined
         ? options.html ?? defaultHtml()

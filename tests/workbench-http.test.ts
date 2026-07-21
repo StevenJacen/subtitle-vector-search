@@ -149,7 +149,7 @@ describe('workbench HTTP security boundary', () => {
     })
 
     const html = await fetch(`${origin}/`).then(response => response.text())
-    const module = await fetch(`${origin}/workbench/src/main.tsx`)
+    const module = await fetch(`${origin}/workbench/src/main.tsx?v=abc123`)
 
     expect(html).toContain(`content="${SESSION_TOKEN}"`)
     expect(await module.text()).toContain('ready')

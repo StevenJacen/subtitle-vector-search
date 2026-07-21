@@ -910,8 +910,8 @@ describe('workbench production and recovery', () => {
     const view = await service.select(TASK_ID, 2, replacement, false)
     expect(view.stage).toBe('review')
     expect(fake.manifest()?.renderId).toBeNull()
-    expect(fake.manifest()?.formalReservations).toEqual([])
-    expect(fake.manifest()?.sources).toEqual([])
+    expect(fake.manifest()?.formalReservations.map(value => value.sceneIndex)).toEqual([0, 1, 3, 4])
+    expect(fake.manifest()?.sources.map(value => value.sceneIndex)).toEqual([0, 1])
   })
 
   it('discards a rejected output and renders again instead of validating the same file forever', async () => {

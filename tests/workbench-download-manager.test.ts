@@ -219,6 +219,22 @@ describe('workbench download preflight', () => {
 })
 
 describe('workbench formal downloads', () => {
+  it('accepts a ten-call task ceiling while normal five-scene production still requests only five', async () => {
+    const inputScenes = scenes(5)
+    const artifacts = artifactStore(manifestFor(inputScenes))
+    const client = downloadClient()
+
+    await downloadConfirmedScenes({
+      taskId: TASK_ID,
+      scenes: inputScenes,
+      budget: new FormalDownloadBudget(10, TASK_ID),
+      artifacts: artifacts.store,
+      client,
+    })
+
+    expect(client.requestDownloadWithInfo).toHaveBeenCalledTimes(5)
+  })
+
   it('rejects a v1-sized budget before v2 preflight or persistence', async () => {
     const inputScenes = scenes(5)
     const artifacts = artifactStore(manifestFor(inputScenes))
