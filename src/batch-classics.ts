@@ -20,6 +20,12 @@ export interface MovieCandidate {
   score: number
 }
 
+export interface SubtitleMovieInput {
+  imdbId: string
+  title: string
+  year: number
+}
+
 export interface BatchImportState {
   successes: BatchImportSuccess[]
   failures: BatchImportFailure[]
@@ -56,11 +62,32 @@ export interface BatchImportDependencies {
   writeText: (path: string, text: string) => Promise<void>
   ensureDirectory: (path: string) => Promise<void>
   exists: (path: string) => boolean
-  downloadMovie: (candidate: MovieCandidate, file: string) => Promise<void>
-  importMovie: (candidate: MovieCandidate, file: string) => Promise<void>
+  downloadMovie: (candidate: SubtitleMovieInput, file: string) => Promise<void>
+  importMovie: (candidate: SubtitleMovieInput, file: string) => Promise<void>
   now: () => string
   output: (text: string) => void
 }
+
+export type BatchImportProgress =
+  | { type: 'movie_started'; movie: SubtitleMovieInput }
+  | { type: 'movie_succeeded'; movie: SubtitleMovieInput }
+  | { type: 'movie_failed'; movie: SubtitleMovieInput }
+  | { type: 'quota_reached'; movie: SubtitleMovieInput }
+  | { type: 'configuration_error'; movie: SubtitleMovieInput }
+  | { type: 'stopped' }
+  | { type: 'completed' }
+  | { type: 'candidate_exhausted' }
+
+export interface BatchImportHooks {
+  shouldStop?: () => boolean
+  onProgress?: (event: BatchImportProgress) => void | Promise<void>
+}
+
+export type SyncMovieResult =
+  | { status: 'succeeded' }
+  | { status: 'failed'; stage: BatchImportFailure['stage']; message: string }
+  | { status: 'quota_reached' }
+  | { status: 'configuration_error' }
 
 const defaultOptions: BatchImportOptions = {
   candidatesPath: 'data/classic-movie-candidates.json',
@@ -74,9 +101,10 @@ const defaultOptions: BatchImportOptions = {
 export async function runBatchImport(
   options: Partial<BatchImportOptions> = {},
   dependencies: Partial<BatchImportDependencies> = {},
+  hooks: BatchImportHooks = {},
 ): Promise<BatchImportState> {
   const resolved = { ...defaultOptions, ...options }
-  const deps = createDependencies(dependencies)
+  const deps = createBatchImportDependencies(dependencies)
   const candidates = parseCandidates(await deps.readText(resolved.candidatesPath))
   const state = await readState(resolved.statePath, deps)
   const alreadySucceeded = new Set(state.successes.map(success => success.imdbId))
@@ -87,6 +115,10 @@ export async function runBatchImport(
   await deps.ensureDirectory(dirname(resolved.statePath))
 
   for (const candidate of candidates) {
+    if (hooks.shouldStop?.()) {
+      await reportProgress(hooks, { type: 'stopped' })
+      return state
+    }
     if (state.successes.length >= resolved.targetSuccessCount || attempts >= resolved.maxAttempts) break
     if (alreadySucceeded.has(candidate.imdbId) || alreadyFailed.has(candidate.imdbId)) continue
     attempts += 1
@@ -96,31 +128,19 @@ export async function runBatchImport(
     deps.output(`[${displayIndex}/${resolved.targetSuccessCount}] ${candidate.title} (${candidate.year})\n`)
     if (resolved.dryRun) continue
 
-    if (!deps.exists(file)) {
-      try {
-        await deps.downloadMovie(candidate, file)
-      } catch (error) {
-        if (isQuotaLimitError(error) || isConfigurationStopError(error)) {
-          deps.output(`${stopMessage(error)} Rerun later to resume.\n`)
-          return state
-        }
-        recordFailure(state, candidate, 'download', summarizeError(error), deps.now())
-        await writeState(resolved.statePath, state, deps)
-        deps.output(`Skipped after download failure: ${candidate.title}\n`)
-        continue
-      }
+    await reportProgress(hooks, { type: 'movie_started', movie: subtitleMovie(candidate) })
+    const result = await syncMovie(candidate, file, deps)
+    if (result.status === 'quota_reached' || result.status === 'configuration_error') {
+      await reportProgress(hooks, { type: result.status, movie: subtitleMovie(candidate) })
+      deps.output(`${stopMessageFor(result.status)} Rerun later to resume.\n`)
+      return state
     }
-
-    try {
-      await deps.importMovie(candidate, file)
-    } catch (error) {
-      if (isQuotaLimitError(error) || isConfigurationStopError(error)) {
-        deps.output(`${stopMessage(error)} Rerun later to resume.\n`)
-        return state
-      }
-      recordFailure(state, candidate, 'import', summarizeError(error), deps.now())
+    if (result.status === 'failed') {
+      recordFailure(state, candidate, result.stage, result.message, deps.now())
+      alreadyFailed.add(candidate.imdbId)
       await writeState(resolved.statePath, state, deps)
-      deps.output(`Skipped after import failure: ${candidate.title}\n`)
+      await reportProgress(hooks, { type: 'movie_failed', movie: subtitleMovie(candidate) })
+      deps.output(`Skipped after ${result.stage} failure: ${candidate.title}\n`)
       continue
     }
 
@@ -133,13 +153,44 @@ export async function runBatchImport(
     })
     alreadySucceeded.add(candidate.imdbId)
     await writeState(resolved.statePath, state, deps)
+    await reportProgress(hooks, { type: 'movie_succeeded', movie: subtitleMovie(candidate) })
+    if (hooks.shouldStop?.()) {
+      await reportProgress(hooks, { type: 'stopped' })
+      return state
+    }
   }
 
+  await reportProgress(hooks, state.successes.length >= resolved.targetSuccessCount ? { type: 'completed' } : { type: 'candidate_exhausted' })
   deps.output(`Batch progress: ${state.successes.length}/${resolved.targetSuccessCount} imported, ${state.failures.length} failed.\n`)
   return state
 }
 
-function createDependencies(overrides: Partial<BatchImportDependencies>): BatchImportDependencies {
+export async function syncMovie(
+  movie: SubtitleMovieInput,
+  file: string,
+  dependencies: Pick<BatchImportDependencies, 'exists' | 'downloadMovie' | 'importMovie'>,
+): Promise<SyncMovieResult> {
+  if (!dependencies.exists(file)) {
+    try {
+      await dependencies.downloadMovie(movie, file)
+    } catch (error) {
+      return resultForError(error, 'download')
+    }
+  }
+
+  try {
+    await dependencies.importMovie(movie, file)
+    return { status: 'succeeded' }
+  } catch (error) {
+    return resultForError(error, 'import')
+  }
+}
+
+function subtitleMovie(candidate: MovieCandidate): SubtitleMovieInput {
+  return { imdbId: candidate.imdbId, title: candidate.title, year: candidate.year }
+}
+
+export function createBatchImportDependencies(overrides: Partial<BatchImportDependencies> = {}): BatchImportDependencies {
   return {
     readText: path => readFile(path, 'utf8'),
     writeText: async (path, text) => {
@@ -212,20 +263,48 @@ function recordFailure(
   })
 }
 
+async function reportProgress(hooks: BatchImportHooks, event: BatchImportProgress): Promise<void> {
+  await hooks.onProgress?.(event)
+}
+
+function resultForError(error: unknown, stage: BatchImportFailure['stage']): SyncMovieResult {
+  const terminal = classifyBatchImportError(error)
+  if (terminal !== null) return { status: terminal }
+  return { status: 'failed', stage, message: summarizeError(error) }
+}
+
 function summarizeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
 function isQuotaLimitError(error: unknown): boolean {
-  return /429|rate.?limited|quota|download limit|daily limit/i.test(summarizeError(error))
+  return errorStatus(error) === 429 || errorCode(error) === 'rate_limited'
+    || /429|rate.?limited|quota|download limit|daily limit/i.test(summarizeError(error))
 }
 
 function isConfigurationStopError(error: unknown): boolean {
-  return /invalid subtitle token|unauthorized|forbidden|missing environment variable/i.test(summarizeError(error))
+  return errorStatus(error) === 401 || errorStatus(error) === 403
+    || errorCode(error) === 'unauthorized' || errorCode(error) === 'forbidden'
+    || /invalid subtitle token|unauthorized|forbidden|missing environment variable/i.test(summarizeError(error))
 }
 
-function stopMessage(error: unknown): string {
-  if (isQuotaLimitError(error)) {
+function errorStatus(error: unknown): number | null {
+  if (!isRecord(error) || typeof error.status !== 'number' || !Number.isInteger(error.status)) return null
+  return error.status
+}
+
+function errorCode(error: unknown): string | null {
+  return isRecord(error) && typeof error.code === 'string' ? error.code : null
+}
+
+export function classifyBatchImportError(error: unknown): 'quota_reached' | 'configuration_error' | null {
+  if (isQuotaLimitError(error)) return 'quota_reached'
+  if (isConfigurationStopError(error)) return 'configuration_error'
+  return null
+}
+
+function stopMessageFor(status: 'quota_reached' | 'configuration_error'): string {
+  if (status === 'quota_reached') {
     return 'Provider quota limit reached; stop cleanly.'
   }
   return 'Configuration or authentication error reached; stop cleanly.'
@@ -240,7 +319,7 @@ function slugify(title: string): string {
     .slice(0, 80)
 }
 
-async function downloadMovie(candidate: MovieCandidate, file: string): Promise<void> {
+async function downloadMovie(candidate: SubtitleMovieInput, file: string): Promise<void> {
   const client = new OpenSubtitlesClient({
     apiKey: requireEnvironment('OPENSUBTITLES_API_KEY'),
     token: requireEnvironment('OPENSUBTITLES_TOKEN'),
@@ -255,7 +334,7 @@ async function downloadMovie(candidate: MovieCandidate, file: string): Promise<v
   await writeFile(file, download.bytes)
 }
 
-async function importMovie(candidate: MovieCandidate, file: string): Promise<void> {
+async function importMovie(candidate: SubtitleMovieInput, file: string): Promise<void> {
   const bytes = await readFile(file)
   const cues = parseSubtitle(bytes.toString('utf8'), extname(file))
   const chunks = buildChunks(cues)

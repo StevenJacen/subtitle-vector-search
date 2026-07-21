@@ -119,4 +119,29 @@ describe('batch classics importer', () => {
     expect(context.dependencies.downloadMovie).not.toHaveBeenCalled()
     expect(context.dependencies.importMovie).toHaveBeenCalledTimes(1)
   })
+
+  it('emits structured progress and cooperatively stops before the next movie', async () => {
+    const context = deps()
+    const events: unknown[] = []
+
+    await runBatchImport({
+      candidatesPath: 'candidates.json',
+      statePath: '.batch-state/state.json',
+      downloadsDir: 'downloads/classics',
+      targetSuccessCount: 2,
+      maxAttempts: 2,
+      dryRun: false,
+    }, context.dependencies, {
+      shouldStop: () => events.some(event => (event as { type?: string }).type === 'movie_succeeded'),
+      onProgress: event => { events.push(event) },
+    })
+
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'movie_started', movie: { imdbId: 'tt0468569', title: 'The Dark Knight', year: 2008 } }),
+      expect.objectContaining({ type: 'movie_succeeded', movie: expect.objectContaining({ imdbId: 'tt0468569' }) }),
+      expect.objectContaining({ type: 'stopped' }),
+    ]))
+    expect(context.dependencies.downloadMovie).toHaveBeenCalledTimes(1)
+    expect(context.dependencies.importMovie).toHaveBeenCalledTimes(1)
+  })
 })
