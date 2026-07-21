@@ -331,6 +331,53 @@ describe('workbench v2 storage and history', () => {
     expect(await fs.readdir(external)).toEqual(['sentinel.txt'])
   })
 
+  it('rejects symlinked manifest and review files', async context => {
+    const root = await temporaryRoot()
+    const external = await temporaryRoot()
+    await createWorkbenchTask(root, manifestFor(), reviewState())
+
+    for (const [filename, read] of [
+      ['manifest-v2.json', () => readWorkbenchTask(root, taskId)],
+      ['review-state.json', () => readWorkbenchReviewState(root, taskId)],
+    ] as const) {
+      const destination = join(root, 'video-runs', taskId, filename)
+      const target = join(external, filename)
+      await fs.writeFile(target, await fs.readFile(destination))
+      await fs.rm(destination)
+      try {
+        await fs.symlink(target, destination, 'file')
+      } catch (error) {
+        if (isNodeError(error) && error.code === 'EPERM') {
+          context.skip('file symlink creation is not permitted on this host')
+          return
+        }
+        throw error
+      }
+
+      await expect(read()).rejects.toThrow('unsafe workbench path')
+      await fs.rm(destination)
+    }
+  })
+
+  it('checks each durable JSON file before reading it', async () => {
+    const root = await temporaryRoot()
+    await createWorkbenchTask(root, manifestFor(), reviewState())
+    const realFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
+    vi.mocked(fs.lstat).mockImplementation(async path => {
+      const stats = await realFs.lstat(path)
+      if (String(path).endsWith('manifest-v2.json')) {
+        return { ...stats, isFile: () => false, isSymbolicLink: () => true } as typeof stats
+      }
+      return stats
+    })
+
+    try {
+      await expect(readWorkbenchTask(root, taskId)).rejects.toThrow('unsafe workbench path')
+    } finally {
+      vi.mocked(fs.lstat).mockRestore()
+    }
+  })
+
   it('isolates corrupt history entries and orders valid tasks by updatedAt then taskId', async () => {
     const root = await temporaryRoot()
     const laterId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'

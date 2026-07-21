@@ -141,7 +141,7 @@ export async function readWorkbenchTask(root: string, taskId: string): Promise<W
   assertUuid(taskId, 'invalid workbench task id')
   await ensureTaskDirectory(root, taskId, false)
   try {
-    return parseWorkbenchManifest(JSON.parse(await readFile(manifestPath(root, taskId), 'utf8')))
+    return parseWorkbenchManifest(await readJsonFile(manifestPath(root, taskId)))
   } catch (error) {
     if (error instanceof Error && error.message === 'unsafe workbench path') throw error
     throw invalidManifest()
@@ -220,7 +220,7 @@ export async function readWorkbenchReviewState(root: string, taskId: string): Pr
   assertUuid(taskId, 'invalid workbench task id')
   const manifest = await readWorkbenchTask(root, taskId)
   try {
-    return parseReviewState(JSON.parse(await readFile(reviewPath(root, taskId), 'utf8')), manifest)
+    return parseReviewState(await readJsonFile(reviewPath(root, taskId)), manifest)
   } catch (error) {
     if (error instanceof Error && error.message === 'unsafe workbench path') throw error
     throw invalidReview()
@@ -874,6 +874,12 @@ async function fileExists(path: string): Promise<boolean> {
     if (isNodeError(error) && error.code === 'ENOENT') return false
     throw error
   }
+}
+
+async function readJsonFile(path: string): Promise<unknown> {
+  const stats = await lstat(path)
+  if (stats.isSymbolicLink() || !stats.isFile()) throw new Error('unsafe workbench path')
+  return JSON.parse(await readFile(path, 'utf8'))
 }
 
 function isNodeError(value: unknown): value is NodeJS.ErrnoException {
