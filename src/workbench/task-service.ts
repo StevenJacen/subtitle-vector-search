@@ -157,6 +157,7 @@ export interface WorkbenchTaskView {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const SHA256 = /^[0-9a-f]{64}$/
 let productionTail: Promise<void> = Promise.resolve()
+const processTaskLocks = new Map<string, Promise<void>>()
 
 export class WorkbenchTaskError extends Error {
   constructor(
@@ -171,7 +172,6 @@ export class WorkbenchTaskError extends Error {
 
 export class WorkbenchTaskService {
   readonly events: WorkbenchEventBus
-  private readonly taskLocks = new Map<string, Promise<void>>()
 
   constructor(private readonly dependencies: WorkbenchTaskDependencies) {
     this.events = dependencies.events ?? new WorkbenchEventBus()
@@ -356,7 +356,7 @@ export class WorkbenchTaskService {
         failure: undefined,
       }))
       this.events.publish(taskId, 'starting', 'Starting video production')
-      await this.runProduction(taskId, scenes, false)
+      await this.runProduction(taskId, scenes)
     }))
   }
 
@@ -369,8 +369,7 @@ export class WorkbenchTaskService {
     }
     await withProductionLock(() => this.withTaskLock(taskId, async () => {
       let manifest = await this.dependencies.artifacts.readTask(taskId)
-      let checkRemoteCompletion = false
-      let restoreRemoteRendering = false
+      let skipRecoveredOutput = false
       if (manifest.stage === 'failed') {
         if (manifest.failure?.retryable !== true) {
           throw new WorkbenchTaskError(
@@ -380,17 +379,30 @@ export class WorkbenchTaskService {
           )
         }
         const recoveredStage = recoverStage(manifest)
-        checkRemoteCompletion = recoveredStage === 'completing' && manifest.failure.code === 'metadata_failure'
-        if (manifest.renderId !== null && !checkRemoteCompletion) {
-          await this.dependencies.production.retryV2(manifest.renderId)
-          restoreRemoteRendering = recoveredStage === 'validating'
-        }
+        skipRecoveredOutput = manifest.failure.code === 'output_validation_failed'
         manifest = await this.dependencies.artifacts.updateTask(taskId, current => ({
           ...current,
           stage: recoveredStage,
           failure: undefined,
+          ...(skipRecoveredOutput ? { output: undefined } : {}),
         }))
         this.events.publish(taskId, recoveredStage, 'Resuming video production')
+      }
+
+      let remoteStatus: RemoteRenderStatus | null = null
+      if (manifest.renderId !== null) {
+        const remote = await this.dependencies.production.startV2(startRequest(manifest))
+        if (remote.renderId !== manifest.renderId) throw new WorkbenchTaskError('metadata_failure', 'Video production metadata failed', true)
+        remoteStatus = remote.status
+        if (remoteStatus === 'completed') {
+          if (manifest.output === undefined) throw new WorkbenchTaskError('metadata_failure', 'Completed output is unavailable', false)
+          await this.dependencies.artifacts.updateTask(taskId, current => ({ ...current, stage: 'completed' }))
+          this.events.publish(taskId, 'completed', 'Video completed')
+          return
+        }
+        if (remoteStatus === 'failed') {
+          remoteStatus = (await this.dependencies.production.retryV2(manifest.renderId)).status
+        }
       }
       const scenes = await this.confirmedScenes(manifest)
       if (scenes === null) {
@@ -401,12 +413,14 @@ export class WorkbenchTaskService {
         }))
         throw new WorkbenchTaskError('selection_required', 'Scene selection is required', true)
       }
-      if (restoreRemoteRendering) {
+      let remoteRendering = remoteStatus === 'rendering'
+      if ((manifest.stage === 'validating' || manifest.stage === 'completing') && !remoteRendering) {
         const downloadIds = new Map<number, number>()
         await this.ensureDownloadIds(manifest, scenes, downloadIds)
         await this.dependencies.production.beginRenderV2(requiredRenderId(manifest))
+        remoteRendering = true
       }
-      await this.runProduction(taskId, scenes, checkRemoteCompletion)
+      await this.runProduction(taskId, scenes, { remoteRendering, skipRecoveredOutput })
     }))
   }
 
@@ -446,10 +460,11 @@ export class WorkbenchTaskService {
   private async runProduction(
     taskId: string,
     scenes: readonly ConfirmedScene[],
-    checkRemoteCompletion: boolean,
+    options: { remoteRendering?: boolean; skipRecoveredOutput?: boolean } = {},
   ): Promise<void> {
     const downloadIds = new Map<number, number>()
     let verifiedSources: VerifiedSceneSource[] | undefined
+    let remoteRendering = options.remoteRendering ?? false
     try {
       let manifest = await this.dependencies.artifacts.readTask(taskId)
       for (const source of manifest.sources) {
@@ -502,8 +517,17 @@ export class WorkbenchTaskService {
         for (const verified of verifiedSources) {
           const current = await this.dependencies.artifacts.readTask(taskId)
           if (current.sources.some(source => source.sceneIndex === verified.sceneIndex)) continue
-          const probe = await this.dependencies.probeSource({ taskId, source: verified })
-          const source = sourceFromProbe(verified, probe)
+          let probe: MediaProbe
+          let source: WorkbenchSource
+          try {
+            probe = await this.dependencies.probeSource({ taskId, source: verified })
+            source = sourceFromProbe(verified, probe)
+          } catch (error) {
+            if (DETERMINISTIC_SOURCE_ERRORS.has(errorCode(error) ?? '')) {
+              throw new WorkbenchTaskError('selection_required', 'Selected source must be replaced', true)
+            }
+            throw error
+          }
           manifest = await this.dependencies.artifacts.updateTask(taskId, latest => ({
             ...latest,
             sources: [...latest.sources, source].sort((left, right) => left.sceneIndex - right.sceneIndex),
@@ -528,8 +552,14 @@ export class WorkbenchTaskService {
       }
 
       if (manifest.stage === 'rendering') {
-        const recovered = await this.dependencies.recoverOutput(taskId)
-        const output = recovered ?? await this.render(manifest)
+        const recovered = options.skipRecoveredOutput ? null : await this.dependencies.recoverOutput(taskId)
+        if (recovered !== null && !remoteRendering) {
+          await this.ensureDownloadIds(manifest, scenes, downloadIds)
+          await this.dependencies.production.beginRenderV2(requiredRenderId(manifest))
+          remoteRendering = true
+        }
+        const output = recovered ?? await this.render(manifest, remoteRendering)
+        remoteRendering = true
         manifest = await this.dependencies.artifacts.updateTask(taskId, current => ({
           ...current,
           output,
@@ -540,27 +570,21 @@ export class WorkbenchTaskService {
 
       if (manifest.stage === 'validating') {
         if (manifest.output === undefined) throw new Error('rendered output is unavailable')
-        await this.dependencies.validateOutput({ taskId, output: manifest.output })
+        try {
+          await this.dependencies.validateOutput({ taskId, output: manifest.output })
+        } catch (error) {
+          if (DETERMINISTIC_OUTPUT_ERRORS.has(errorCode(error) ?? '')) {
+            throw new WorkbenchTaskError('output_validation_failed', 'Rendered video validation failed', true)
+          }
+          throw error
+        }
         manifest = await this.dependencies.artifacts.updateTask(taskId, current => ({ ...current, stage: 'completing' }))
         this.events.publish(taskId, 'completing', 'Recording completion metadata')
       }
 
       if (manifest.stage === 'completing') {
         if (manifest.output === undefined) throw new Error('rendered output is unavailable')
-        let downloadIdsReady = false
-        if (checkRemoteCompletion) {
-          const status = await this.dependencies.production.startV2(startRequest(manifest))
-          if (status.status === 'completed') {
-            await this.dependencies.artifacts.updateTask(taskId, current => ({ ...current, stage: 'completed' }))
-            this.events.publish(taskId, 'completed', 'Video completed')
-            return
-          }
-          await this.dependencies.production.retryV2(requiredRenderId(manifest))
-          await this.ensureDownloadIds(manifest, scenes, downloadIds)
-          downloadIdsReady = true
-          await this.dependencies.production.beginRenderV2(requiredRenderId(manifest))
-        }
-        if (!downloadIdsReady) await this.ensureDownloadIds(manifest, scenes, downloadIds)
+        await this.ensureDownloadIds(manifest, scenes, downloadIds)
         const timeline = timelineFor(manifest)
         await this.dependencies.production.completeV2({
           renderId: requiredRenderId(manifest),
@@ -576,6 +600,8 @@ export class WorkbenchTaskService {
             sourceTrackId: manifest.passage.trackId,
             sourceCueIndex: manifest.scenes[index].cueIndex,
           })),
+          // This is the hash of the persisted, pre-request `completing` manifest. The remote
+          // transaction stores it atomically with completion; hashing a later local state would race it.
           output: completionOutput(manifest.output, await this.dependencies.manifestSha256(taskId)),
         })
         await this.dependencies.artifacts.updateTask(taskId, current => ({ ...current, stage: 'completed' }))
@@ -587,7 +613,7 @@ export class WorkbenchTaskService {
     }
   }
 
-  private async render(manifest: WorkbenchManifest): Promise<WorkbenchOutput> {
+  private async render(manifest: WorkbenchManifest, remoteRendering = false): Promise<WorkbenchOutput> {
     const timeline = timelineFor(manifest)
     const releaseYear = manifest.passage.movie.releaseYear
     if (!Number.isSafeInteger(releaseYear)) throw new Error('movie release year is unavailable')
@@ -602,7 +628,7 @@ export class WorkbenchTaskService {
       },
     )
     const renderId = requiredRenderId(manifest)
-    await this.dependencies.production.beginRenderV2(renderId)
+    if (!remoteRendering) await this.dependencies.production.beginRenderV2(renderId)
     return this.dependencies.renderVideo({
       taskId: manifest.taskId,
       renderId,
@@ -740,12 +766,13 @@ export class WorkbenchTaskService {
 
   private withTaskLock<T>(taskId: string, operation: () => Promise<T>): Promise<T> {
     if (!UUID.test(taskId)) return Promise.reject(new Error('invalid_workbench_task_id'))
-    const previous = this.taskLocks.get(taskId) ?? Promise.resolve()
+    const lockKey = taskId.toLowerCase()
+    const previous = processTaskLocks.get(lockKey) ?? Promise.resolve()
     const result = previous.catch(() => undefined).then(operation)
     const settled = result.then(() => undefined, () => undefined)
-    this.taskLocks.set(taskId, settled)
+    processTaskLocks.set(lockKey, settled)
     return result.finally(() => {
-      if (this.taskLocks.get(taskId) === settled) this.taskLocks.delete(taskId)
+      if (processTaskLocks.get(lockKey) === settled) processTaskLocks.delete(lockKey)
     })
   }
 }
@@ -801,7 +828,9 @@ function startRequest(manifest: WorkbenchManifest) {
 }
 
 function sourceFromProbe(source: VerifiedSceneSource, probe: MediaProbe): WorkbenchSource {
-  if (probe.sizeBytes !== source.sourceSizeBytes) throw new Error('source size changed after download')
+  if (probe.sizeBytes !== source.sourceSizeBytes) {
+    throw Object.assign(new Error('source size changed after download'), { code: 'source_size_mismatch' })
+  }
   return {
     sceneIndex: source.sceneIndex,
     reservationId: source.reservationId,
@@ -922,6 +951,7 @@ function recoverStage(manifest: WorkbenchManifest): WorkbenchStage {
     return manifest.formalReservations.length === 0 ? 'preflight' : 'downloading'
   }
   if (manifest.sources.length < manifest.sceneCount) return 'probing'
+  if (manifest.failure?.code === 'output_validation_failed') return 'rendering'
   if (manifest.output === undefined) return 'rendering'
   return manifest.failure?.code === 'render_failure' ? 'validating' : 'completing'
 }
@@ -975,3 +1005,17 @@ const SELECTION_REQUIRED_CODES = new Set([
   'aggregate_size_limit_exceeded',
   'resource_changed',
 ])
+
+const DETERMINISTIC_SOURCE_ERRORS = new Set([
+  'invalid_media_probe',
+  'source_size_mismatch',
+  'unsupported_source_media',
+])
+
+const DETERMINISTIC_OUTPUT_ERRORS = new Set([
+  'invalid_final_media',
+  'output_hash_mismatch',
+  'output_file_mismatch',
+])
+
+type RemoteRenderStatus = 'planned' | 'downloading' | 'rendering' | 'completed' | 'failed'

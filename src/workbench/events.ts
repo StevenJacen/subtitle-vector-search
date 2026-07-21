@@ -57,15 +57,30 @@ export class WorkbenchEventBus {
     assertTaskId(taskId)
     assertSequence(afterSequence)
     let cursor = afterSequence
-    const guarded: Listener = event => {
+    let replaying = true
+    const pending: WorkbenchEvent[] = []
+    const deliver: Listener = event => {
       if (event.sequence <= cursor) return
       cursor = event.sequence
-      listener({ ...event })
+      try {
+        listener({ ...event })
+      } catch {
+        // Replay and live listeners are observational and isolated alike.
+      }
     }
-    for (const event of this.replay(taskId, cursor)) guarded(event)
+    const guarded: Listener = event => {
+      if (replaying) {
+        pending.push({ ...event })
+        return
+      }
+      deliver(event)
+    }
     const listeners = this.listeners.get(taskId) ?? new Set<Listener>()
     listeners.add(guarded)
     this.listeners.set(taskId, listeners)
+    for (const event of this.replay(taskId, cursor)) deliver(event)
+    replaying = false
+    for (const event of pending) deliver(event)
     return () => {
       listeners.delete(guarded)
       if (listeners.size === 0) this.listeners.delete(taskId)

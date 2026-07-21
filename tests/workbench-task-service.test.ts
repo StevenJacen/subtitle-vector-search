@@ -309,6 +309,35 @@ describe('workbench events', () => {
     expect(received).toEqual([1])
     expect(bus.replay(TASK_ID)).toHaveLength(1)
   })
+
+  it('isolates replay listener failures and keeps the subscription active', () => {
+    const bus = new WorkbenchEventBus()
+    const received: number[] = []
+    bus.publish(TASK_ID, 'planning', 'Planning passage')
+
+    expect(() => bus.subscribe(TASK_ID, event => {
+      received.push(event.sequence)
+      throw new Error('replay listener failed')
+    })).not.toThrow()
+    expect(() => bus.publish(TASK_ID, 'review', 'Review ready')).not.toThrow()
+
+    expect(received).toEqual([1, 2])
+  })
+
+  it('does not lose a reentrant publication while replaying history', () => {
+    const bus = new WorkbenchEventBus()
+    const received: number[] = []
+    bus.publish(TASK_ID, 'planning', 'Planning passage')
+    bus.publish(TASK_ID, 'planning', 'Planning scenes')
+
+    bus.subscribe(TASK_ID, event => {
+      received.push(event.sequence)
+      if (event.sequence === 1) bus.publish(TASK_ID, 'review', 'Published during replay')
+    })
+
+    expect(received).toEqual([1, 2, 3])
+    expect(bus.replay(TASK_ID).map(event => event.sequence)).toEqual([1, 2, 3])
+  })
 })
 
 describe('workbench task creation and review', () => {
@@ -478,6 +507,40 @@ describe('workbench production and recovery', () => {
     expect(maximum).toBe(1)
   })
 
+  it('serializes select and produce for the same task across service instances', async () => {
+    const fake = fakeDependencies()
+    const first = new WorkbenchTaskService(fake.dependencies)
+    const second = new WorkbenchTaskService(fake.dependencies)
+    await createConfirmedTask(first)
+    vi.mocked(fake.dependencies.selectCandidate).mockClear()
+    let releaseRead!: () => void
+    let reportBlocked!: () => void
+    const blocked = new Promise<void>(resolve => { reportBlocked = resolve })
+    const release = new Promise<void>(resolve => { releaseRead = resolve })
+    let shouldBlock = true
+    vi.mocked(fake.dependencies.artifacts.readReview).mockImplementation(async taskId => {
+      if (shouldBlock) {
+        shouldBlock = false
+        reportBlocked()
+        await release
+      }
+      expect(taskId).toBe(TASK_ID)
+      return structuredClone(fake.review()!)
+    })
+
+    const producing = first.produce(TASK_ID)
+    await blocked
+    const selecting = second.select(TASK_ID, 0, candidatePage(0).candidates[1], false)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    releaseRead()
+    const [productionResult, selectionResult] = await Promise.allSettled([producing, selecting])
+
+    expect(productionResult.status).toBe('fulfilled')
+    expect(selectionResult).toMatchObject({ status: 'rejected', reason: expect.objectContaining({ message: 'workbench_task_not_reviewable' }) })
+    expect(fake.dependencies.selectCandidate).not.toHaveBeenCalled()
+    expect(fake.manifest()?.stage).toBe('completed')
+  })
+
   it('resumes validation without repeating verified downloads, probes, or render', async () => {
     const fake = fakeDependencies()
     let failOnce = true
@@ -528,6 +591,14 @@ describe('workbench production and recovery', () => {
       remoteStatus = 'failed'
       return { renderId: input.renderId, status: 'failed' }
     })
+    vi.mocked(fake.dependencies.production.startV2).mockImplementation(async () => {
+      resumeOperations.push(`start:${remoteStatus}`)
+      return {
+        renderId: '50000000-0000-4000-8000-000000000001',
+        status: remoteStatus,
+        isExisting: remoteStatus !== 'planned',
+      }
+    })
     vi.mocked(fake.dependencies.production.retryV2).mockImplementation(async renderId => {
       resumeOperations.push('retry')
       remoteStatus = 'planned'
@@ -546,7 +617,86 @@ describe('workbench production and recovery', () => {
     resumeOperations.length = 0
     await service.resume(TASK_ID)
 
-    expect(resumeOperations).toEqual(['retry', 'begin', 'complete'])
+    expect(resumeOperations).toEqual(['start:failed', 'retry', 'begin', 'complete'])
+    expect(fake.manifest()?.stage).toBe('completed')
+  })
+
+  it('reconciles remote rendering when failV2 transport failed instead of retrying forever', async () => {
+    const fake = fakeDependencies()
+    let failCompletion = true
+    let remoteStatus: 'planned' | 'downloading' | 'rendering' | 'completed' = 'planned'
+    const resumeOperations: string[] = []
+    vi.mocked(fake.dependencies.production.startV2).mockImplementation(async () => {
+      resumeOperations.push(`start:${remoteStatus}`)
+      return {
+        renderId: '50000000-0000-4000-8000-000000000001',
+        status: remoteStatus,
+        isExisting: remoteStatus !== 'planned',
+      }
+    })
+    vi.mocked(fake.dependencies.production.recordDownloadV2).mockImplementation(async input => {
+      remoteStatus = 'downloading'
+      return { renderId: input.renderId, downloadId: 900 + input.selectionId }
+    })
+    vi.mocked(fake.dependencies.production.beginRenderV2).mockImplementation(async renderId => {
+      resumeOperations.push('begin')
+      if (remoteStatus !== 'downloading') throw new Error('render is not ready to begin')
+      remoteStatus = 'rendering'
+      return { renderId, status: 'rendering' }
+    })
+    vi.mocked(fake.dependencies.production.retryV2).mockImplementation(async renderId => {
+      resumeOperations.push('retry')
+      if (remoteStatus !== 'completed') throw new Error('only failed renders can retry')
+      return { renderId, status: 'planned' }
+    })
+    vi.mocked(fake.dependencies.production.failV2).mockRejectedValue(new Error('fail transport unavailable'))
+    vi.mocked(fake.dependencies.production.completeV2).mockImplementation(async input => {
+      resumeOperations.push('complete')
+      if (remoteStatus !== 'rendering') throw new Error('render is not rendering')
+      if (failCompletion) {
+        failCompletion = false
+        throw new Error('completion transport unavailable')
+      }
+      remoteStatus = 'completed'
+      return { renderId: input.renderId, status: 'completed' }
+    })
+    const service = new WorkbenchTaskService(fake.dependencies)
+    await createConfirmedTask(service)
+    await expect(service.produce(TASK_ID)).rejects.toMatchObject({ code: 'metadata_failure' })
+    expect(remoteStatus).toBe('rendering')
+    resumeOperations.length = 0
+
+    await service.resume(TASK_ID)
+
+    expect(resumeOperations).toEqual(['start:rendering', 'complete'])
+    expect(fake.dependencies.production.retryV2).not.toHaveBeenCalled()
+    expect(fake.manifest()?.stage).toBe('completed')
+  })
+
+  it('resumes a rendering stage after beginRenderV2 committed without beginning twice', async () => {
+    const fake = fakeDependencies()
+    const service = new WorkbenchTaskService(fake.dependencies)
+    await createConfirmedTask(service)
+    await seedStage(fake, 'rendering')
+    vi.mocked(fake.dependencies.production.startV2).mockResolvedValue({
+      renderId: '50000000-0000-4000-8000-000000000001',
+      status: 'rendering',
+      isExisting: true,
+    })
+    vi.mocked(fake.dependencies.production.beginRenderV2).mockRejectedValue(new Error('render is not ready to begin'))
+    vi.clearAllMocks()
+    vi.mocked(fake.dependencies.production.startV2).mockResolvedValue({
+      renderId: '50000000-0000-4000-8000-000000000001',
+      status: 'rendering',
+      isExisting: true,
+    })
+    vi.mocked(fake.dependencies.production.beginRenderV2).mockRejectedValue(new Error('render is not ready to begin'))
+
+    await service.resume(TASK_ID)
+
+    expect(fake.dependencies.production.startV2).toHaveBeenCalledOnce()
+    expect(fake.dependencies.production.beginRenderV2).not.toHaveBeenCalled()
+    expect(fake.dependencies.renderVideo).toHaveBeenCalledOnce()
     expect(fake.manifest()?.stage).toBe('completed')
   })
 
@@ -726,6 +876,93 @@ describe('workbench production and recovery', () => {
     expect(fake.dependencies.probeSource).toHaveBeenCalledTimes(5)
     expect(fake.manifest()?.sources.every(source => source.downloadId !== undefined)).toBe(true)
     expect(fake.manifest()?.stage).toBe('completed')
+  })
+
+  it('routes a deterministic source probe failure to replaceable selection state', async () => {
+    const fake = fakeDependencies()
+    vi.mocked(fake.dependencies.probeSource).mockImplementation(async input => {
+      if (input.source.sceneIndex === 2) {
+        throw Object.assign(new Error('invalid media probe'), { code: 'invalid_media_probe' })
+      }
+      return {
+        durationMs: 30_000,
+        sizeBytes: input.source.sourceSizeBytes,
+        width: 1920,
+        height: 1080,
+        frameRate: 30,
+        videoCodec: 'h264',
+        audioCodec: null,
+        pixelFormat: 'yuv420p',
+        audioSampleRate: null,
+        audioChannels: null,
+      }
+    })
+    const service = new WorkbenchTaskService(fake.dependencies)
+    await createConfirmedTask(service)
+
+    await expect(service.produce(TASK_ID)).rejects.toMatchObject({ code: 'selection_required', retryable: true })
+    expect(fake.manifest()?.failure).toEqual({
+      code: 'selection_required',
+      message: 'Selected source must be replaced',
+      retryable: true,
+    })
+    const replacement = candidatePage(2).candidates[1]
+    const view = await service.select(TASK_ID, 2, replacement, false)
+    expect(view.stage).toBe('review')
+    expect(fake.manifest()?.renderId).toBeNull()
+    expect(fake.manifest()?.formalReservations).toEqual([])
+    expect(fake.manifest()?.sources).toEqual([])
+  })
+
+  it('discards a rejected output and renders again instead of validating the same file forever', async () => {
+    const fake = fakeDependencies()
+    const replacementOutput = { ...fake.output, sha256: '9'.repeat(64) }
+    vi.mocked(fake.dependencies.renderVideo)
+      .mockResolvedValueOnce(fake.output)
+      .mockResolvedValueOnce(replacementOutput)
+    vi.mocked(fake.dependencies.recoverOutput).mockResolvedValue(null)
+    vi.mocked(fake.dependencies.validateOutput).mockImplementation(async input => {
+      if (input.output.sha256 === fake.output.sha256) {
+        throw Object.assign(new Error('invalid final media'), { code: 'invalid_final_media' })
+      }
+    })
+    const service = new WorkbenchTaskService(fake.dependencies)
+    await createConfirmedTask(service)
+
+    await expect(service.produce(TASK_ID)).rejects.toMatchObject({ code: 'output_validation_failed', retryable: true })
+    expect(fake.manifest()?.output?.sha256).toBe(fake.output.sha256)
+    vi.mocked(fake.dependencies.recoverOutput).mockClear()
+    vi.mocked(fake.dependencies.recoverOutput).mockResolvedValue(fake.output)
+    const resumeError = await service.resume(TASK_ID).catch(error => error)
+
+    expect(fake.dependencies.recoverOutput).not.toHaveBeenCalled()
+    expect(fake.dependencies.renderVideo).toHaveBeenCalledTimes(2)
+    expect(fake.dependencies.validateOutput).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(fake.dependencies.validateOutput).mock.calls.map(call => call[0].output.sha256))
+      .toEqual([fake.output.sha256, replacementOutput.sha256])
+    expect(resumeError).toBeUndefined()
+    expect(fake.manifest()?.output?.sha256).toBe(replacementOutput.sha256)
+    expect(fake.manifest()?.stage).toBe('completed')
+  })
+
+  it('hashes the persisted completing manifest immediately before the atomic remote completion call', async () => {
+    const fake = fakeDependencies()
+    const order: string[] = []
+    vi.mocked(fake.dependencies.manifestSha256).mockImplementation(async () => {
+      order.push(`hash:${fake.manifest()?.stage}`)
+      return 'e'.repeat(64)
+    })
+    vi.mocked(fake.dependencies.production.completeV2).mockImplementation(async input => {
+      order.push(`complete:${fake.manifest()?.stage}`)
+      expect(input.output.manifestSha256).toBe('e'.repeat(64))
+      return { renderId: input.renderId, status: 'completed' }
+    })
+    const service = new WorkbenchTaskService(fake.dependencies)
+    await createConfirmedTask(service)
+
+    await service.produce(TASK_ID)
+
+    expect(order).toEqual(['hash:completing', 'complete:completing'])
   })
 
   it('returns a read-only preflight rejection to replaceable review state', async () => {
