@@ -57,8 +57,10 @@ function createDependencies(environment: TokenEnvironment): VideoAssetMatchingDe
         await fallbackVisualPlan(fallbackInput, { session, client })
       ),
     }),
-    search: async term => {
-      const page = await searchVecteezy(term, providerOptions)
+    search: async (term, _kind, pageNumber) => {
+      const page = pageNumber === undefined
+        ? await searchVecteezy(term, providerOptions)
+        : await searchVecteezy(term, { ...providerOptions, page: pageNumber })
       return {
         resources: page.resources,
         totalResources: page.totalResources,

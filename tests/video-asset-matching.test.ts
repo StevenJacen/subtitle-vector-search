@@ -105,7 +105,77 @@ function dependencies(
   }
 }
 
+function pagedSearch() {
+  return vi.fn().mockImplementation(async (_term: string, kind: string) => ({
+    resources: kind === 'literal'
+      ? Array.from({ length: 10 }, (_, index) => resource(index + 1))
+      : kind === 'action'
+        ? Array.from({ length: 10 }, (_, index) => resource(index + 6))
+        : Array.from({ length: 10 }, (_, index) => resource(index + 11)),
+    totalResources: 1_000,
+  }))
+}
+
 describe('video asset matching orchestration', () => {
+  it('reuses a completed source plan for later pages and creates a distinct owning run', async () => {
+    const sourceRunId = '99999999-9999-4999-8999-999999999999'
+    const repo = repository({
+      loadRun: vi.fn().mockImplementation(async id => id === sourceRunId
+        ? persistedRun({ runId: sourceRunId, candidates: [] })
+        : persistedRun()),
+    })
+    const deps = dependencies(repo, { search: pagedSearch() })
+
+    const result = await matchVideoAssets({
+      theme: 'hope', candidateCount: 8, page: 2, sourceRunId,
+    }, deps)
+
+    expect(deps.plan).not.toHaveBeenCalled()
+    expect(repo.loadRun).toHaveBeenCalledWith(sourceRunId)
+    expect(deps.sha256).toHaveBeenCalledWith(JSON.stringify({
+      version: 2,
+      promptVersion: 'visual-plan-v1',
+      sourceRunId,
+      page: 2,
+      candidateCount: 8,
+    }))
+    expect(repo.beginRun).toHaveBeenCalledWith(expect.objectContaining({
+      inputDigest: digest,
+      candidateCount: 8,
+    }))
+    expect(deps.search).toHaveBeenCalledTimes(3)
+    expect(vi.mocked(deps.search).mock.calls.map(call => call[2])).toEqual([2, 2, 2])
+    expect(result).toEqual(expect.objectContaining({ runId, page: 2, hasNextPage: true }))
+  })
+
+  it('includes explicit first-page pagination in the digest but still plans normally', async () => {
+    const repo = repository()
+    const deps = dependencies(repo, { search: pagedSearch() })
+
+    const result = await matchVideoAssets({ theme: 'hope', candidateCount: 8, page: 1 }, deps)
+
+    expect(deps.plan).toHaveBeenCalledOnce()
+    expect(deps.sha256).toHaveBeenCalledWith(JSON.stringify({
+      version: 2,
+      promptVersion: 'visual-plan-v1',
+      sourceKind: 'theme',
+      theme: 'hope',
+      candidateCount: 8,
+      page: 1,
+    }))
+    expect(vi.mocked(deps.search).mock.calls.map(call => call[2])).toEqual([1, 1, 1])
+    expect(result).toEqual(expect.objectContaining({ page: 1, hasNextPage: true }))
+  })
+
+  it('keeps unpaged response fields and search calls unchanged', async () => {
+    const repo = repository()
+    const deps = dependencies(repo, { search: pagedSearch() })
+
+    const result = await matchVideoAssets({ theme: 'hope', candidateCount: 8 }, deps)
+
+    expect(Object.keys(result)).toEqual(['runId', 'status', 'planner', 'visualIntent', 'queries', 'candidates'])
+    expect(vi.mocked(deps.search).mock.calls.every(call => call.length === 2)).toBe(true)
+  })
   it('completes a fresh three-lane run and persists only stable candidate data', async () => {
     const repo = repository()
     const deps = dependencies(repo)

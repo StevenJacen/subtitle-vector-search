@@ -30,12 +30,17 @@ export interface VecteezyClientOptions {
   accountId: string
   apiKey: string
   fetcher: typeof fetch
+  page?: number
 }
 
 export async function searchVecteezy(
   term: string,
   options: VecteezyClientOptions,
 ): Promise<VecteezyPage> {
+  if (options.page !== undefined
+    && (!Number.isSafeInteger(options.page) || options.page < 1 || options.page > 100)) {
+    throw new Error('invalid Vecteezy page')
+  }
   const url = resourceUrl(options.accountId, {
     term,
     content_type: 'video',
@@ -44,6 +49,7 @@ export async function searchVecteezy(
     sort_by: 'relevance',
     family_friendly: 'true',
     per_page: '10',
+    ...(options.page === undefined ? {} : { page: String(options.page) }),
   })
   const payload = await request(url, options)
   const input = record(payload)

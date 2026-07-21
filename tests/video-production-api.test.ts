@@ -188,6 +188,31 @@ describe('VideoProductionApi', () => {
     )
   })
 
+  it('sends and validates workbench pagination without changing legacy match bodies', async () => {
+    const paged = { ...sceneMatch, page: 2, hasNextPage: true }
+    const fetchFn = vi.fn().mockResolvedValue(response(paged))
+    const api = createApi(fetchFn)
+
+    await expect(api.matchScene({
+      theme: 'Classic cinema', candidateCount: 8, page: 2, sourceRunId: runId,
+    })).resolves.toEqual(paged)
+    expect(JSON.parse((fetchFn.mock.calls[0][1] as RequestInit).body as string)).toEqual({
+      theme: 'Classic cinema', candidateCount: 8, page: 2, sourceRunId: runId,
+    })
+  })
+
+  it.each([
+    { ...sceneMatch, page: 1 },
+    { ...sceneMatch, hasNextPage: true },
+    { ...sceneMatch, page: 3, hasNextPage: true },
+    { ...sceneMatch, page: 2, hasNextPage: 'yes' },
+  ])('rejects malformed or mismatched paged match responses %#', async payload => {
+    const api = createApi(vi.fn().mockResolvedValue(response(payload)))
+
+    await expect(api.matchScene({ theme: 'hope', candidateCount: 8, page: 2, sourceRunId: runId }))
+      .rejects.toMatchObject({ status: 502, code: 'invalid_response' })
+  })
+
   it('selects a candidate through the authenticated selection endpoint', async () => {
     const fetchFn = vi.fn().mockResolvedValue(response({ runId, providerResourceId: 42, selectionId: 9 }))
     const api = createApi(fetchFn)

@@ -72,6 +72,23 @@ describe('Vecteezy search', () => {
     expect(page.resources[0].ephemeral.previewUrl).toBe('https://preview.test/7.mp4')
   })
 
+  it('sends a validated page while retaining ten resources per provider request', async () => {
+    const fetcher = vi.fn().mockResolvedValue(response())
+
+    await searchVecteezy('person walking sunrise', { ...credentials, fetcher, page: 37 })
+
+    const url = new URL(String(fetcher.mock.calls[0][0]))
+    expect(url.searchParams.get('page')).toBe('37')
+    expect(url.searchParams.get('per_page')).toBe('10')
+  })
+
+  it.each([0, 101, 1.5])('rejects an invalid search page before provider I/O: %s', async page => {
+    const fetcher = vi.fn()
+
+    await expect(searchVecteezy('sunrise', { ...credentials, fetcher, page })).rejects.toThrow('invalid Vecteezy page')
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+
   it('sanitizes accepted fields and ignores unknown raw resource fields', async () => {
     const page = await searchVecteezy('sunrise', {
       ...credentials, fetcher: vi.fn().mockResolvedValue(response()),

@@ -7,6 +7,8 @@ export interface VideoAssetRequest {
   text?: string
   theme?: string
   candidateCount: number
+  page?: number
+  sourceRunId?: string
 }
 
 export interface VideoAssetSelectionRequest {
@@ -67,6 +69,8 @@ export interface VideoAssetMatchResponse {
   visualIntent: VisualIntent
   queries: Array<VisualQuery & { status: 'completed' | 'failed'; errorCode?: string }>
   candidates: VideoAssetCandidate[]
+  page?: number
+  hasNextPage?: boolean
 }
 
 export class VideoAssetError extends Error {
@@ -129,11 +133,19 @@ export function parseVideoAssetRequest(value: unknown): VideoAssetRequest {
   const candidateCount = input.candidateCount === undefined
     ? 8
     : integerInRange(input.candidateCount, 5, 10)
+  const page = input.page === undefined ? undefined : integerInRange(input.page, 1, 100)
+  const sourceRunId = optionalUuid(input.sourceRunId)
 
-  if (subtitleChunkId === undefined && text === undefined && theme === undefined) {
+  if (subtitleChunkId === undefined && text === undefined && theme === undefined && sourceRunId === undefined) {
     throw invalidRequest()
   }
   if (subtitleChunkId !== undefined && text !== undefined) {
+    throw invalidRequest()
+  }
+  if ((sourceRunId !== undefined && (page === undefined || page === 1))
+    || (page !== undefined && page > 1 && sourceRunId === undefined)
+    || (page !== undefined && candidateCount !== 8)
+    || (sourceRunId !== undefined && (subtitleChunkId !== undefined || text !== undefined))) {
     throw invalidRequest()
   }
 
@@ -142,6 +154,8 @@ export function parseVideoAssetRequest(value: unknown): VideoAssetRequest {
     ...(text === undefined ? {} : { text }),
     ...(theme === undefined ? {} : { theme }),
     candidateCount,
+    ...(page === undefined ? {} : { page }),
+    ...(sourceRunId === undefined ? {} : { sourceRunId }),
   }
 }
 
@@ -258,6 +272,13 @@ function optionalPositiveInteger(value: unknown): number | undefined {
     return undefined
   }
   return positiveSafeInteger(value)
+}
+
+function optionalUuid(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined
+  const result = requiredString(value)
+  if (!UUID.test(result)) throw invalidRequest()
+  return result
 }
 
 function positiveSafeInteger(value: unknown): number {

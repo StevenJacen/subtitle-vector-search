@@ -42,7 +42,7 @@ export interface VideoAssetMatchingDependencies {
   repository: VideoAssetRepository
   sha256(value: string): Promise<string>
   plan(input: VisualPlannerInput): Promise<{ plan: VisualPlan; fallbackUsed: boolean }>
-  search(term: string, kind: QueryKind): Promise<ProviderSearchResult>
+  search(term: string, kind: QueryKind, page?: number): Promise<ProviderSearchResult>
   detail(providerResourceId: number): Promise<VecteezySearchResource>
   fuse(lanes: VecteezyLane[], candidateCount: number): FusedCandidate[]
   now(): number
@@ -74,56 +74,89 @@ export async function matchVideoAssets(
       )
     }
     if (begin.status === 'completed' || begin.status === 'degraded') {
-      return await refreshPersistedRun(await dependencies.repository.loadRun(begin.runId), dependencies)
+      const refreshed = await refreshPersistedRun(await dependencies.repository.loadRun(begin.runId), dependencies)
+      return withPagination(
+        refreshed,
+        request,
+        refreshed.candidates.length === request.candidateCount && (request.page ?? 100) < 100,
+      )
     }
   }
 
   const totalStartedAt = dependencies.now()
-  let source: VisualPlannerInput
-  try {
-    source = await planningSource(request, dependencies.repository)
-  } catch (error) {
-    const missingChunk = error instanceof VideoAssetError && error.code === 'subtitle_chunk_not_ready'
-    const failureCode = missingChunk ? error.code : 'source_context_failed'
-    const controlled = missingChunk ? error : new Error('database operation failed')
-    await dependencies.repository.finishRun({
-      runId: begin.runId,
-      status: 'failed',
-      fallbackUsed: false,
-      visualIntent: null,
-      plannerElapsedMs: 0,
-      totalElapsedMs: elapsed(dependencies, totalStartedAt),
-      failureCode,
-      queries: failedQueries(
-        failureCode,
-        missingChunk ? 'subtitle chunk unavailable' : 'source context unavailable',
-        0,
-      ),
-      candidates: [],
-    })
-    throw controlled
-  }
-  const plannerStartedAt = dependencies.now()
   let planned: { plan: VisualPlan; fallbackUsed: boolean }
-  try {
-    planned = await dependencies.plan(source)
-  } catch (error) {
-    const controlled = plannerError(error)
-    const plannerElapsedMs = elapsed(dependencies, plannerStartedAt)
-    await dependencies.repository.finishRun({
-      runId: begin.runId,
-      status: 'failed',
-      fallbackUsed: false,
-      visualIntent: null,
-      plannerElapsedMs,
-      totalElapsedMs: elapsed(dependencies, totalStartedAt),
-      failureCode: controlled.code,
-      queries: failedQueries(controlled.code, 'planner unavailable', plannerElapsedMs),
-      candidates: [],
-    })
-    throw controlled
+  let plannerElapsedMs = 0
+  if (request.sourceRunId !== undefined) {
+    try {
+      const sourceRun = await dependencies.repository.loadRun(request.sourceRunId)
+      planned = {
+        plan: {
+          visualIntent: sourceRun.visualIntent,
+          queries: sourceRun.queries.map(query => ({ kind: query.kind, term: query.term })),
+        },
+        fallbackUsed: sourceRun.planner.fallbackUsed,
+      }
+    } catch {
+      await dependencies.repository.finishRun({
+        runId: begin.runId,
+        status: 'failed',
+        fallbackUsed: false,
+        visualIntent: null,
+        plannerElapsedMs: 0,
+        totalElapsedMs: elapsed(dependencies, totalStartedAt),
+        failureCode: 'source_run_unavailable',
+        queries: failedQueries('source_run_unavailable', 'source run unavailable', 0, request.page),
+        candidates: [],
+      })
+      throw new VideoAssetError(422, 'source_run_unavailable', 'source video search run is unavailable')
+    }
+  } else {
+    let source: VisualPlannerInput
+    try {
+      source = await planningSource(request, dependencies.repository)
+    } catch (error) {
+      const missingChunk = error instanceof VideoAssetError && error.code === 'subtitle_chunk_not_ready'
+      const failureCode = missingChunk ? error.code : 'source_context_failed'
+      const controlled = missingChunk ? error : new Error('database operation failed')
+      await dependencies.repository.finishRun({
+        runId: begin.runId,
+        status: 'failed',
+        fallbackUsed: false,
+        visualIntent: null,
+        plannerElapsedMs: 0,
+        totalElapsedMs: elapsed(dependencies, totalStartedAt),
+        failureCode,
+        queries: failedQueries(
+          failureCode,
+          missingChunk ? 'subtitle chunk unavailable' : 'source context unavailable',
+          0,
+          request.page,
+        ),
+        candidates: [],
+      })
+      throw controlled
+    }
+    const plannerStartedAt = dependencies.now()
+    try {
+      planned = await dependencies.plan(source)
+    } catch (error) {
+      const controlled = plannerError(error)
+      plannerElapsedMs = elapsed(dependencies, plannerStartedAt)
+      await dependencies.repository.finishRun({
+        runId: begin.runId,
+        status: 'failed',
+        fallbackUsed: false,
+        visualIntent: null,
+        plannerElapsedMs,
+        totalElapsedMs: elapsed(dependencies, totalStartedAt),
+        failureCode: controlled.code,
+        queries: failedQueries(controlled.code, 'planner unavailable', plannerElapsedMs, request.page),
+        candidates: [],
+      })
+      throw controlled
+    }
+    plannerElapsedMs = elapsed(dependencies, plannerStartedAt)
   }
-  const plannerElapsedMs = elapsed(dependencies, plannerStartedAt)
 
   const laneResults = await Promise.allSettled(LANE_DEFINITIONS.map(async lane => {
     const query = requiredQuery(planned.plan, lane.kind)
@@ -132,7 +165,9 @@ export async function matchVideoAssets(
       return {
         lane,
         query,
-        result: await dependencies.search(query.term, lane.kind),
+        result: request.page === undefined
+          ? await dependencies.search(query.term, lane.kind)
+          : await dependencies.search(query.term, lane.kind, request.page),
         elapsedMs: elapsed(dependencies, startedAt),
       }
     } catch {
@@ -147,7 +182,7 @@ export async function matchVideoAssets(
       return {
         ...query,
         weight: lane.weight,
-        filters: QUERY_FILTERS,
+        filters: queryFilters(request.page),
         providerTotal: result.value.result.totalResources,
         status: 'completed',
         elapsedMs: result.value.elapsedMs,
@@ -156,7 +191,7 @@ export async function matchVideoAssets(
     return {
       ...query,
       weight: lane.weight,
-      filters: QUERY_FILTERS,
+      filters: queryFilters(request.page),
       providerTotal: null,
       status: 'failed',
       elapsedMs: result.reason instanceof LaneFailure ? result.reason.elapsedMs : 0,
@@ -217,7 +252,7 @@ export async function matchVideoAssets(
     candidates: candidates.map(candidate => candidate.persisted),
   })
 
-  return {
+  const response: VideoAssetMatchResponse = {
     runId: begin.runId,
     status,
     planner: {
@@ -229,6 +264,7 @@ export async function matchVideoAssets(
     queries: responseQueries(queryRows),
     candidates: candidates.map(candidate => responseCandidate(candidate.persisted, candidate.previewUrl)),
   }
+  return withPagination(response, request, hasNextProviderPage(laneResults, request.page))
 }
 
 async function planningSource(
@@ -261,16 +297,36 @@ async function requestDigest(
   inputKind: 'chunk' | 'text' | 'theme',
   sha256: VideoAssetMatchingDependencies['sha256'],
 ): Promise<string> {
-  const canonical = JSON.stringify({
-    version: 1,
-    promptVersion: PROMPT_VERSION,
-    sourceKind: inputKind,
-    ...(request.subtitleChunkId === undefined
-      ? request.text === undefined ? {} : { sourceText: request.text }
-      : { sourceId: request.subtitleChunkId }),
-    theme: request.theme ?? null,
-    candidateCount: request.candidateCount,
-  })
+  const canonical = JSON.stringify(request.page === undefined
+    ? {
+        version: 1,
+        promptVersion: PROMPT_VERSION,
+        sourceKind: inputKind,
+        ...(request.subtitleChunkId === undefined
+          ? request.text === undefined ? {} : { sourceText: request.text }
+          : { sourceId: request.subtitleChunkId }),
+        theme: request.theme ?? null,
+        candidateCount: request.candidateCount,
+      }
+    : request.sourceRunId !== undefined
+      ? {
+          version: 2,
+          promptVersion: PROMPT_VERSION,
+          sourceRunId: request.sourceRunId,
+          page: request.page,
+          candidateCount: request.candidateCount,
+        }
+      : {
+          version: 2,
+          promptVersion: PROMPT_VERSION,
+          sourceKind: inputKind,
+          ...(request.subtitleChunkId === undefined
+            ? request.text === undefined ? {} : { sourceText: request.text }
+            : { sourceId: request.subtitleChunkId }),
+          theme: request.theme ?? null,
+          candidateCount: request.candidateCount,
+          page: request.page,
+        })
   let digest: string
   try {
     digest = (await sha256(canonical)).toLowerCase()
@@ -441,17 +497,45 @@ function requiredQuery(plan: VisualPlan, kind: QueryKind) {
   return query
 }
 
-function failedQueries(errorCode: string, term: string, elapsedMs: number): FinishRunQuery[] {
+function failedQueries(errorCode: string, term: string, elapsedMs: number, page?: number): FinishRunQuery[] {
   return LANE_DEFINITIONS.map(lane => ({
     kind: lane.kind,
     term,
     weight: lane.weight,
-    filters: QUERY_FILTERS,
+    filters: queryFilters(page),
     providerTotal: null,
     status: 'failed',
     elapsedMs,
     errorCode,
   }))
+}
+
+function queryFilters(page?: number): Record<string, unknown> {
+  return page === undefined ? QUERY_FILTERS : { ...QUERY_FILTERS, page }
+}
+
+function withPagination(
+  response: VideoAssetMatchResponse,
+  request: VideoAssetRequest,
+  hasNextPage: boolean,
+): VideoAssetMatchResponse {
+  return request.page === undefined
+    ? response
+    : { ...response, page: request.page, hasNextPage }
+}
+
+function hasNextProviderPage(
+  results: Array<PromiseSettledResult<{ result: ProviderSearchResult } & Record<string, unknown>>>,
+  page?: number,
+): boolean {
+  if (page === undefined || page >= 100) return false
+  return results.some(result => {
+    if (result.status !== 'fulfilled') return false
+    const provider = result.value.result
+    return provider.totalResources === null
+      ? provider.resources.length >= QUERY_FILTERS.perPage
+      : page * QUERY_FILTERS.perPage < provider.totalResources
+  })
 }
 
 function plannerError(error: unknown): VideoAssetError {

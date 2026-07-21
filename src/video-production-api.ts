@@ -69,11 +69,21 @@ export class VideoProductionApi {
     }
   }
 
-  matchScene(input: { theme: string; candidateCount: number }): Promise<SceneMatchResponse> {
+  matchScene(input: {
+    theme: string
+    candidateCount: number
+    page?: number
+    sourceRunId?: string
+  }): Promise<SceneMatchResponse> {
     return this.request(
       this.matchUrl,
-      { theme: input.theme, candidateCount: input.candidateCount },
-      isSceneMatchResponse,
+      {
+        theme: input.theme,
+        candidateCount: input.candidateCount,
+        ...(input.page === undefined ? {} : { page: input.page }),
+        ...(input.sourceRunId === undefined ? {} : { sourceRunId: input.sourceRunId }),
+      },
+      value => isSceneMatchResponse(value, input.page),
       'video asset match',
     )
   }
@@ -243,9 +253,11 @@ export class VideoProductionApi {
   }
 }
 
-function isSceneMatchResponse(value: unknown): value is SceneMatchResponse {
+function isSceneMatchResponse(value: unknown, expectedPage?: number): value is SceneMatchResponse {
+  const requiredKeys = ['runId', 'status', 'planner', 'visualIntent', 'queries', 'candidates']
+  if (expectedPage !== undefined) requiredKeys.push('page', 'hasNextPage')
   if (!isRecord(value)
-    || !hasExactKeys(value, ['runId', 'status', 'planner', 'visualIntent', 'queries', 'candidates'])
+    || !hasExactKeys(value, requiredKeys)
     || !isUuid(value.runId)
     || !isCompletedMatchStatus(value.status)
     || !isRecord(value.planner)
@@ -259,7 +271,9 @@ function isSceneMatchResponse(value: unknown): value is SceneMatchResponse {
     || !Array.isArray(value.queries)
     || !value.queries.every(isVisualQuery)
     || !Array.isArray(value.candidates)
-    || !value.candidates.every(isCandidate)) {
+    || !value.candidates.every(isCandidate)
+    || (expectedPage !== undefined
+      && (value.page !== expectedPage || typeof value.hasNextPage !== 'boolean'))) {
     return false
   }
   return true
