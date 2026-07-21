@@ -8,13 +8,13 @@ import {
 } from '../supabase/functions/_shared/passage-selection.js'
 
 describe('subtitle passage request contract', () => {
-  it('accepts only a trimmed English theme and scene count', () => {
+  it('accepts bounded nonblank Unicode themes and a scene count', () => {
     expect(parsePassageRequest({ theme: '  hope through hardship  ', sceneCount: 5 })).toEqual({
       theme: 'hope through hardship',
       sceneCount: 5,
     })
-    expect(parsePassageRequest({ theme: "Don't give up!", sceneCount: 10 })).toEqual({
-      theme: "Don't give up!",
+    expect(parsePassageRequest({ theme: '  \u5e0c\u671b\u4e0e\u575a\u6301  ', sceneCount: 10 })).toEqual({
+      theme: '\u5e0c\u671b\u4e0e\u575a\u6301',
       sceneCount: 10,
     })
   })
@@ -33,12 +33,12 @@ describe('subtitle passage request contract', () => {
     expect(() => parsePassageRequest(input)).toThrow('invalid request')
   })
 
-  it.each(['', '2026', 'hope \u5e0c\u671b', `a${'b'.repeat(300)}`])(
-    'returns the established controlled error for invalid English theme %j',
+  it.each(['', '   ', 'hope\u0000now', 'hope\nnow', `a${'b'.repeat(300)}`])(
+    'rejects blank, controlled, or overlength theme %j',
     theme => {
       expect(requestErrorFor({ theme, sceneCount: 5 })).toMatchObject({
-      code: 'english_theme_required',
-      message: 'English themes are required',
+        code: 'invalid_request',
+        message: 'invalid request',
       })
     },
   )
@@ -77,13 +77,28 @@ describe('subtitle passage response contract', () => {
         startCueIndex: 0,
         endCueIndex: 4,
         totalDurationMs: 15_000,
-        cues,
+        cues: cues.map(cue => ({
+          ...cue,
+          timestamp: `${formatTimestamp(cue.startMs)} --> ${formatTimestamp(cue.endMs)}`,
+        })),
       },
     })
     expect(Object.keys(buildPassageResponse(passage))).toEqual(['passage'])
     expect(buildPassageResponse(passage)).not.toHaveProperty('similarity')
+    expect(passage.cues[2]).toMatchObject({
+      text: '  Exact stored dialogue.  ',
+      timestamp: '00:00:06.000 --> 00:00:09.000',
+    })
   })
 })
+
+function formatTimestamp(milliseconds: number): string {
+  const hours = Math.floor(milliseconds / 3_600_000)
+  const minutes = Math.floor(milliseconds % 3_600_000 / 60_000)
+  const seconds = Math.floor(milliseconds % 60_000 / 1_000)
+  const remainder = milliseconds % 1_000
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(remainder).padStart(3, '0')}`
+}
 
 function requestErrorFor(input: unknown): Error {
   try {

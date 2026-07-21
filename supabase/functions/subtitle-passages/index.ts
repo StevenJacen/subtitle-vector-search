@@ -2,7 +2,9 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts'
 import { createClient } from 'npm:@supabase/supabase-js@2.110.2'
 import { assertQueryEmbedding } from '../_shared/search.ts'
 import {
+  buildPassageCueRanges,
   buildPassageResponse,
+  deduplicatePassageCues,
   NoEligiblePassageError,
   parsePassageRequest,
   PassageRequestError,
@@ -33,12 +35,6 @@ interface CueRow {
 
 interface TrackRow {
   id: number
-}
-
-interface TrackCueRange {
-  trackId: number
-  firstCueIndex: number
-  lastCueIndex: number
 }
 
 const ANCHOR_MATCH_COUNT = 20
@@ -100,7 +96,7 @@ async function findPassage(client: any, input: PassageRequest) {
   }))
   const anchors = rows.map(toAnchor)
   const readyAnchors = await filterReadyAnchors(client, anchors)
-  const ranges = cueRanges(readyAnchors, input.sceneCount)
+  const ranges = buildPassageCueRanges(readyAnchors, input.sceneCount)
   const cueRows = (await Promise.all(ranges.map(async range => await data<CueRow[]>(
     client
       .from('subtitle_cues')
@@ -115,7 +111,7 @@ async function findPassage(client: any, input: PassageRequest) {
     theme: input.theme,
     sceneCount: input.sceneCount,
     anchors: readyAnchors,
-    cues: cueRows.map(toCue),
+    cues: deduplicatePassageCues(cueRows.map(toCue)),
   })
 }
 
@@ -133,21 +129,6 @@ async function filterReadyAnchors(client: any, anchors: PassageAnchor[]): Promis
   )
   const readyTrackIds = new Set(readyTracks.map(track => track.id))
   return anchors.filter(anchor => readyTrackIds.has(anchor.trackId))
-}
-
-function cueRanges(anchors: PassageAnchor[], sceneCount: number): TrackCueRange[] {
-  const uniqueTrackIds = [...new Set(anchors.map(anchor => anchor.trackId))]
-  return uniqueTrackIds.map(trackId => {
-    const trackAnchors = anchors.filter(anchor => anchor.trackId === trackId)
-    return {
-      trackId,
-      firstCueIndex: Math.max(
-        0,
-        Math.min(...trackAnchors.map(anchor => anchor.firstCueIndex)) - sceneCount + 1,
-      ),
-      lastCueIndex: Math.max(...trackAnchors.map(anchor => anchor.lastCueIndex)) + sceneCount - 1,
-    }
-  })
 }
 
 function toAnchor(row: HybridAnchorRow): PassageAnchor {

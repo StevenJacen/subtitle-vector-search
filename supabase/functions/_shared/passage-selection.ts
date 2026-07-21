@@ -6,6 +6,10 @@ export interface PassageCue {
   text: string
 }
 
+export interface SelectedPassageCue extends PassageCue {
+  timestamp: string
+}
+
 export interface PassageAnchor {
   similarity: number
   movieId: number
@@ -22,7 +26,13 @@ export interface SelectedPassage {
   startCueIndex: number
   endCueIndex: number
   totalDurationMs: number
-  cues: PassageCue[]
+  cues: SelectedPassageCue[]
+}
+
+export interface PassageCueRange {
+  trackId: number
+  firstCueIndex: number
+  lastCueIndex: number
 }
 
 export interface PassageRequest {
@@ -31,11 +41,10 @@ export interface PassageRequest {
 }
 
 export class PassageRequestError extends Error {
-  constructor(
-    readonly code: 'invalid_request' | 'english_theme_required' = 'invalid_request',
-    message = code === 'english_theme_required' ? 'English themes are required' : 'invalid request',
-  ) {
-    super(message)
+  readonly code = 'invalid_request'
+
+  constructor() {
+    super('invalid request')
     this.name = 'PassageRequestError'
   }
 }
@@ -59,16 +68,15 @@ const MAX_SCENE_COUNT = 10
 const MIN_CUE_DURATION_MS = 1_200
 const MIN_PASSAGE_DURATION_MS = 15_000
 const MAX_PASSAGE_DURATION_MS = 60_000
+export const MAX_PASSAGE_CUE_RANGE_ROWS = 900
 
 export function parsePassageRequest(value: unknown): PassageRequest {
   if (!record(value)
     || !exactKeys(value, ['sceneCount', 'theme'])
     || typeof value.theme !== 'string'
+    || !validTheme(value.theme)
     || !validSceneCount(value.sceneCount)) {
     throw new PassageRequestError()
-  }
-  if (!validEnglishTheme(value.theme)) {
-    throw new PassageRequestError('english_theme_required')
   }
 
   return { theme: value.theme.trim(), sceneCount: value.sceneCount }
@@ -83,7 +91,7 @@ export function selectContinuousPassage(input: {
   if (!validSceneCount(input.sceneCount)) {
     throw new Error('scene count must be an integer from 5 through 10')
   }
-  if (typeof input.theme !== 'string' || input.theme.trim() === '') {
+  if (typeof input.theme !== 'string' || !validTheme(input.theme)) {
     throw new Error('theme must be a non-blank string')
   }
   if (!Array.isArray(input.anchors) || !input.anchors.every(validAnchor)
@@ -96,18 +104,14 @@ export function selectContinuousPassage(input: {
   const candidates: RankedPassage[] = []
 
   for (const anchor of input.anchors) {
-    const anchorLength = anchor.lastCueIndex - anchor.firstCueIndex + 1
-    if (anchorLength > input.sceneCount) {
-      continue
-    }
-
     const trackCues = cuesByTrack.get(anchor.trackId)
     if (trackCues === undefined) {
       continue
     }
 
-    const earliestStart = Math.max(0, anchor.lastCueIndex - input.sceneCount + 1)
-    const latestStart = anchor.firstCueIndex
+    const otherBoundaryStart = anchor.lastCueIndex - input.sceneCount + 1
+    const earliestStart = Math.max(0, Math.min(anchor.firstCueIndex, otherBoundaryStart))
+    const latestStart = Math.max(anchor.firstCueIndex, otherBoundaryStart)
     for (let startCueIndex = earliestStart; startCueIndex <= latestStart; startCueIndex += 1) {
       const cues = continuousWindow(trackCues, startCueIndex, input.sceneCount)
       if (cues === undefined || !eligibleWindow(cues)) {
@@ -125,7 +129,10 @@ export function selectContinuousPassage(input: {
         startCueIndex,
         endCueIndex,
         totalDurationMs: cues.reduce((total, cue) => total + cue.endMs - cue.startMs, 0),
-        cues: cues.map(cue => ({ ...cue })),
+        cues: cues.map(cue => ({
+          ...cue,
+          timestamp: `${formatTimestamp(cue.startMs)} --> ${formatTimestamp(cue.endMs)}`,
+        })),
       }
       candidates.push({
         passage,
@@ -148,15 +155,68 @@ export function buildPassageResponse(passage: SelectedPassage): { passage: Selec
   return { passage }
 }
 
-function indexCues(cues: PassageCue[]): Map<number, Map<number, PassageCue>> {
-  const tracks = new Map<number, Map<number, PassageCue>>()
+export function buildPassageCueRanges(
+  anchors: PassageAnchor[],
+  sceneCount: number,
+): PassageCueRange[] {
+  if (!validSceneCount(sceneCount)
+    || !Array.isArray(anchors)
+    || !anchors.every(validAnchor)) {
+    throw new Error('invalid passage range input')
+  }
+
+  const ranges = anchors
+    .flatMap(anchor => splitCueRange({
+      trackId: anchor.trackId,
+      firstCueIndex: Math.max(0, anchor.firstCueIndex - sceneCount + 1),
+      lastCueIndex: anchor.lastCueIndex + sceneCount - 1,
+    }, sceneCount))
+    .sort((left, right) => left.trackId - right.trackId
+      || left.firstCueIndex - right.firstCueIndex
+      || left.lastCueIndex - right.lastCueIndex)
+
+  const merged: PassageCueRange[] = []
+  for (const range of ranges) {
+    const previous = merged.at(-1)
+    const mergedLastCueIndex = previous === undefined
+      ? range.lastCueIndex
+      : Math.max(previous.lastCueIndex, range.lastCueIndex)
+    const canMerge = previous !== undefined
+      && previous.trackId === range.trackId
+      && range.firstCueIndex <= previous.lastCueIndex
+      && mergedLastCueIndex - previous.firstCueIndex + 1 <= MAX_PASSAGE_CUE_RANGE_ROWS
+
+    if (canMerge && previous !== undefined) {
+      previous.lastCueIndex = mergedLastCueIndex
+    } else {
+      merged.push({ ...range })
+    }
+  }
+  return merged
+}
+
+export function deduplicatePassageCues(cues: PassageCue[]): PassageCue[] {
+  if (!Array.isArray(cues) || !cues.every(validCue)) {
+    throw new Error('invalid passage input')
+  }
+
+  const cuesByKey = new Map<string, PassageCue>()
   for (const cue of cues) {
-    const track = tracks.get(cue.trackId) ?? new Map<number, PassageCue>()
-    const existing = track.get(cue.cueIndex)
+    const key = `${cue.trackId}:${cue.cueIndex}`
+    const existing = cuesByKey.get(key)
     if (existing !== undefined
       && (existing.startMs !== cue.startMs || existing.endMs !== cue.endMs || existing.text !== cue.text)) {
       throw new Error('conflicting passage cues')
     }
+    cuesByKey.set(key, cue)
+  }
+  return [...cuesByKey.values()]
+}
+
+function indexCues(cues: PassageCue[]): Map<number, Map<number, PassageCue>> {
+  const tracks = new Map<number, Map<number, PassageCue>>()
+  for (const cue of deduplicatePassageCues(cues)) {
+    const track = tracks.get(cue.trackId) ?? new Map<number, PassageCue>()
     track.set(cue.cueIndex, cue)
     tracks.set(cue.trackId, track)
   }
@@ -192,7 +252,7 @@ function containsDialogue(text: string): boolean {
   if (visible === '') {
     return false
   }
-  if (/^[A-Z][A-Z0-9 .'-]{0,40}:$/i.test(visible)) {
+  if (speakerLabelOnly(visible)) {
     return false
   }
   if (/^\[[\s\S]*\]$/.test(visible) || /^\([\s\S]*\)$/.test(visible)) {
@@ -239,7 +299,7 @@ function compareRankedPassages(left: RankedPassage, right: RankedPassage): numbe
 }
 
 function tokenSet(text: string): Set<string> {
-  return new Set(text.toLowerCase().match(/[a-z0-9]+(?:'[a-z0-9]+)?/g) ?? [])
+  return new Set(text.toLocaleLowerCase().match(/[\p{L}\p{N}]+(?:['\u2019][\p{L}\p{N}]+)*/gu) ?? [])
 }
 
 function stripMarkup(text: string): string {
@@ -269,12 +329,60 @@ function validCue(value: PassageCue): boolean {
     && typeof value.text === 'string'
 }
 
-function validEnglishTheme(value: string): boolean {
+function validTheme(value: string): boolean {
   const theme = value.trim()
   return theme !== ''
-    && theme.length <= 300
-    && /^[\x09-\x0D\x20-\x7E]+$/.test(theme)
-    && /[A-Za-z]/.test(theme)
+    && [...theme].length <= 300
+    && !/[\p{Cc}\p{Cs}]/u.test(theme)
+}
+
+function splitCueRange(range: PassageCueRange, sceneCount: number): PassageCueRange[] {
+  const ranges: PassageCueRange[] = []
+  let firstCueIndex = range.firstCueIndex
+  while (firstCueIndex <= range.lastCueIndex) {
+    const lastCueIndex = Math.min(
+      range.lastCueIndex,
+      firstCueIndex + MAX_PASSAGE_CUE_RANGE_ROWS - 1,
+    )
+    ranges.push({ trackId: range.trackId, firstCueIndex, lastCueIndex })
+    if (lastCueIndex === range.lastCueIndex) {
+      break
+    }
+    firstCueIndex = lastCueIndex - sceneCount + 2
+  }
+  return ranges
+}
+
+function speakerLabelOnly(text: string): boolean {
+  if (!text.endsWith(':')) {
+    return false
+  }
+  const label = text.slice(0, -1).trim()
+  if (label === ''
+    || label.length > 80
+    || !/^[\p{L}\p{M}\p{N}\s#().,'\u2019/-]+$/u.test(label)) {
+    return false
+  }
+
+  const letters = label.match(/\p{L}/gu)?.join('') ?? ''
+  if (letters === '') {
+    return false
+  }
+  if (letters === letters.toLocaleUpperCase()) {
+    return true
+  }
+
+  return label.split(/\s+/).every(word => word
+    .split(/[-'\u2019]/)
+    .every(part => /^\p{Lu}[\p{Ll}\p{M}]*$/u.test(part)))
+}
+
+function formatTimestamp(milliseconds: number): string {
+  const hours = Math.floor(milliseconds / 3_600_000)
+  const minutes = Math.floor(milliseconds % 3_600_000 / 60_000)
+  const seconds = Math.floor(milliseconds % 60_000 / 1_000)
+  const remainder = milliseconds % 1_000
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(remainder).padStart(3, '0')}`
 }
 
 function validSceneCount(value: unknown): value is number {

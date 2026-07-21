@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import * as passageSelectionModule from '../src/workbench/passage-selection.js'
 import {
   selectContinuousPassage,
   type PassageAnchor,
@@ -35,7 +36,7 @@ describe('continuous passage selection', () => {
       startCueIndex: 0,
       endCueIndex: sceneCount - 1,
       totalDurationMs: 15_000,
-      cues,
+      cues: withTimestamps(cues),
     })
   })
 
@@ -121,10 +122,21 @@ describe('continuous passage selection', () => {
     })
 
     expect(passage.cues[0].text).toBe(exactText)
-    expect(passage.cues).toEqual(cues)
+    expect(passage.cues.map(({ timestamp: _timestamp, ...cue }) => cue)).toEqual(cues)
+    expect(passage.cues[0].timestamp).toBe('00:00:00.000 --> 00:00:03.000')
   })
 
-  it.each(['MORGAN:', 'Morgan:', '[DOOR SLAMS]', '(ominous music)', '\u266a music \u266a', '   '])(
+  it.each([
+    'MORGAN:',
+    'Morgan:',
+    'MAN #1:',
+    'VOICE (O.S.):',
+    '\u00c9MILE:',
+    '[DOOR SLAMS]',
+    '(ominous music)',
+    '\u266a music \u266a',
+    '   ',
+  ])(
     'rejects a passage containing non-dialogue-only cue %j',
     invalidText => {
       const cues = cueSequence({
@@ -140,6 +152,45 @@ describe('continuous passage selection', () => {
       })).toThrow('no eligible subtitle passage')
     },
   )
+
+  it('does not confuse ordinary colon-ended dialogue with a speaker label', () => {
+    const cues = cueSequence({
+      durations: Array.from({ length: 5 }, () => 3_000),
+      texts: ['Remember this:', 'We keep going.', 'Hope remains.', 'Stay with me.', 'We begin again.'],
+    })
+
+    expect(selectContinuousPassage({
+      theme: 'remember hope',
+      sceneCount: 5,
+      anchors: [{ ...defaultAnchor, lastCueIndex: 4 }],
+      cues,
+    }).cues[0].text).toBe('Remember this:')
+  })
+
+  it.each([
+    [5, 18],
+    [10, 44],
+  ])('selects a %i-cue window from inside an oversized %i-cue anchor', (sceneCount, anchorLength) => {
+    const cues = cueSequence({
+      startIndex: 20,
+      durations: Array.from({ length: anchorLength }, () => 3_000),
+    })
+
+    const passage = selectContinuousPassage({
+      theme: 'hope through hardship',
+      sceneCount,
+      anchors: [{
+        ...defaultAnchor,
+        firstCueIndex: 20,
+        lastCueIndex: 20 + anchorLength - 1,
+      }],
+      cues,
+    })
+
+    expect(passage.cues).toHaveLength(sceneCount)
+    expect(passage.startCueIndex).toBeGreaterThanOrEqual(20)
+    expect(passage.endCueIndex).toBeLessThanOrEqual(20 + anchorLength - 1)
+  })
 
   it('orders windows by parent similarity before normalized theme coverage', () => {
     const highSimilarity = cueSequence({
@@ -224,6 +275,48 @@ describe('continuous passage selection', () => {
   })
 })
 
+describe('bounded passage cue retrieval', () => {
+  it('merges overlapping expanded ranges for the same track', () => {
+    expect(buildCueRanges([
+      { ...defaultAnchor, firstCueIndex: 100, lastCueIndex: 117 },
+      { ...defaultAnchor, firstCueIndex: 110, lastCueIndex: 127 },
+    ], 5)).toEqual([{ trackId: 11, firstCueIndex: 96, lastCueIndex: 131 }])
+  })
+
+  it('keeps disjoint far-apart anchors on the same track as separate ranges', () => {
+    expect(buildCueRanges([
+      { ...defaultAnchor, firstCueIndex: 100, lastCueIndex: 117 },
+      { ...defaultAnchor, firstCueIndex: 5_000, lastCueIndex: 5_017 },
+    ], 5)).toEqual([
+      { trackId: 11, firstCueIndex: 96, lastCueIndex: 121 },
+      { trackId: 11, firstCueIndex: 4_996, lastCueIndex: 5_021 },
+    ])
+  })
+
+  it('does not merge overlapping ranges beyond the safe PostgREST row cap', () => {
+    const ranges = buildCueRanges([
+      { ...defaultAnchor, firstCueIndex: 4, lastCueIndex: 499 },
+      { ...defaultAnchor, firstCueIndex: 500, lastCueIndex: 995 },
+    ], 5)
+
+    expect(maxCueRangeRows()).toBe(900)
+    expect(ranges).toEqual([
+      { trackId: 11, firstCueIndex: 0, lastCueIndex: 503 },
+      { trackId: 11, firstCueIndex: 496, lastCueIndex: 999 },
+    ])
+    expect(ranges.every(range => range.lastCueIndex - range.firstCueIndex + 1 <= maxCueRangeRows()))
+      .toBe(true)
+  })
+
+  it('deduplicates repeated fetched cue rows and rejects conflicting duplicates', () => {
+    const cue = cueSequence({ durations: [3_000] })[0]
+
+    expect(deduplicateCues([cue, { ...cue }])).toEqual([cue])
+    expect(() => deduplicateCues([cue, { ...cue, text: 'Conflicting stored text.' }]))
+      .toThrow('conflicting passage cues')
+  })
+})
+
 function cueSequence(input: {
   trackId?: number
   startIndex?: number
@@ -245,4 +338,41 @@ function cueSequence(input: {
     startMs += duration
     return cue
   })
+}
+
+function withTimestamps(cues: PassageCue[]) {
+  return cues.map(cue => ({
+    ...cue,
+    timestamp: `${formatTimestamp(cue.startMs)} --> ${formatTimestamp(cue.endMs)}`,
+  }))
+}
+
+function formatTimestamp(milliseconds: number): string {
+  const hours = Math.floor(milliseconds / 3_600_000)
+  const minutes = Math.floor(milliseconds % 3_600_000 / 60_000)
+  const seconds = Math.floor(milliseconds % 60_000 / 1_000)
+  const remainder = milliseconds % 1_000
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(remainder).padStart(3, '0')}`
+}
+
+type PassageCueRange = { trackId: number; firstCueIndex: number; lastCueIndex: number }
+
+function buildCueRanges(anchors: PassageAnchor[], sceneCount: number): PassageCueRange[] {
+  const build = (passageSelectionModule as {
+    buildPassageCueRanges?: (anchors: PassageAnchor[], sceneCount: number) => PassageCueRange[]
+  }).buildPassageCueRanges
+  expect(build).toBeTypeOf('function')
+  return build!(anchors, sceneCount)
+}
+
+function maxCueRangeRows(): number {
+  return (passageSelectionModule as { MAX_PASSAGE_CUE_RANGE_ROWS?: number }).MAX_PASSAGE_CUE_RANGE_ROWS ?? -1
+}
+
+function deduplicateCues(cues: PassageCue[]): PassageCue[] {
+  const deduplicate = (passageSelectionModule as {
+    deduplicatePassageCues?: (cues: PassageCue[]) => PassageCue[]
+  }).deduplicatePassageCues
+  expect(deduplicate).toBeTypeOf('function')
+  return deduplicate!(cues)
 }

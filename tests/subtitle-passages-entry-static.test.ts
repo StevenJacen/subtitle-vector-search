@@ -39,13 +39,15 @@ describe('subtitle passages Edge entry', () => {
 
     expect(source).toContain(".from('subtitle_tracks')")
     expect(source).toContain(".eq('status', 'ready')")
-    expect(source).toContain('new Set(anchors.map(anchor => anchor.trackId))')
+    expect(source).toContain('buildPassageCueRanges(readyAnchors, input.sceneCount)')
     expect(source).toContain(".from('subtitle_cues')")
     expect(source).toContain(".select('track_id, cue_index, start_ms, end_ms, text')")
     expect(source).toContain(".eq('track_id', range.trackId)")
     expect(source).toContain(".gte('cue_index', range.firstCueIndex)")
     expect(source).toContain(".lte('cue_index', range.lastCueIndex)")
     expect(source).toContain(".order('cue_index', { ascending: true })")
+    expect(source).toContain('deduplicatePassageCues(cueRows.map(toCue))')
+    expect(source).not.toContain('Math.min(...trackAnchors.map')
   })
 
   it('returns one canonical passage and controlled failures without logging subtitle text', () => {
@@ -57,6 +59,7 @@ describe('subtitle passages Edge entry', () => {
     expect(source).toContain("errorResponse(400, error.code, error.message)")
     expect(source).toContain("errorResponse(422, 'no_eligible_passage'")
     expect(source).toContain("errorResponse(500, 'passage_search_failed'")
+    expect(source).not.toContain('english_theme_required')
     expect(source).not.toContain('console.log')
     expect(source).not.toContain('console.error')
   })
