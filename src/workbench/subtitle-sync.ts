@@ -35,11 +35,11 @@ export interface SubtitleSyncOptions {
   snapshotPath: string
   downloadsDir: string
   targetSuccessCount: number
-  maxAttempts: number
 }
 
 export interface SubtitleSyncDependencies extends Omit<BatchImportDependencies, 'output'> {
   createId: () => string
+  runBatchImport?: typeof runBatchImport
 }
 
 export interface SubtitleSyncEvent {
@@ -55,7 +55,6 @@ const defaultOptions: SubtitleSyncOptions = {
   snapshotPath: '.batch-state/subtitle-sync-snapshot.json',
   downloadsDir: 'downloads/classics',
   targetSuccessCount: 200,
-  maxAttempts: 230,
 }
 
 const safeMessages = new Set([
@@ -109,7 +108,7 @@ export class SubtitleSyncController {
   readonly events = new SubtitleSyncEventBus()
 
   private readonly options: SubtitleSyncOptions
-  private readonly dependencies: SubtitleSyncDependencies
+  private readonly dependencies: ResolvedSubtitleSyncDependencies
   private current: SubtitleSyncSnapshot
   private running: Promise<void> | null = null
   private stopRequested = false
@@ -121,6 +120,7 @@ export class SubtitleSyncController {
       ...batch,
       createId: randomUUID,
       ...dependencies,
+      runBatchImport: dependencies.runBatchImport ?? runBatchImport,
     }
     this.current = idleSnapshot(this.dependencies.now())
   }
@@ -211,7 +211,7 @@ export class SubtitleSyncController {
   }
 
   private async runAutomatic(): Promise<void> {
-    await runBatchImport({
+    await this.dependencies.runBatchImport({
       candidatesPath: this.options.candidatesPath,
       statePath: this.options.batchStatePath,
       downloadsDir: this.options.downloadsDir,
@@ -280,6 +280,10 @@ export class SubtitleSyncController {
     await this.dependencies.ensureDirectory(dirname(this.options.snapshotPath))
     await this.dependencies.writeText(this.options.snapshotPath, `${JSON.stringify(this.snapshot())}\n`)
   }
+}
+
+type ResolvedSubtitleSyncDependencies = Omit<SubtitleSyncDependencies, 'runBatchImport'> & {
+  runBatchImport: typeof runBatchImport
 }
 
 function assertInput(input: SubtitleSyncInput): void {

@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
-import { SubtitleSyncController, type SubtitleSyncDependencies } from '../src/workbench/subtitle-sync.js'
+import {
+  SubtitleSyncController,
+  type SubtitleSyncDependencies,
+  type SubtitleSyncOptions,
+} from '../src/workbench/subtitle-sync.js'
 
 const MOVIE = { imdbId: 'tt2543164', title: 'Arrival', releaseYear: 2016 }
 
@@ -9,7 +13,7 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-function setup(overrides: Partial<SubtitleSyncDependencies> = {}, optionOverrides: Record<string, number> = {}) {
+function setup(overrides: Partial<SubtitleSyncDependencies> = {}) {
   const snapshots: string[] = []
   const writes: Array<{ path: string; text: string }> = []
   const dependencies: SubtitleSyncDependencies = {
@@ -29,15 +33,14 @@ function setup(overrides: Partial<SubtitleSyncDependencies> = {}, optionOverride
     createId: vi.fn(() => 'job-1'),
     ...overrides,
   }
-  return { controller: new SubtitleSyncController({
+  const options: SubtitleSyncOptions = {
     candidatesPath: 'candidates.json',
     batchStatePath: 'batch-state.json',
     snapshotPath: 'snapshot.json',
     downloadsDir: 'downloads',
     targetSuccessCount: 2,
-    maxAttempts: 2,
-    ...optionOverrides,
-  }, dependencies), dependencies, snapshots, writes }
+  }
+  return { controller: new SubtitleSyncController(options, dependencies), dependencies, snapshots, writes }
 }
 
 async function settled(controller: SubtitleSyncController) {
@@ -161,14 +164,22 @@ describe('SubtitleSyncController', () => {
     expect(dependencies.importMovie).not.toHaveBeenCalled()
   })
 
-  it('does not report candidate exhaustion until automatic mode processes the finite candidate list', async () => {
-    const { controller, dependencies } = setup({}, { targetSuccessCount: 3, maxAttempts: 1 })
+  it('uses an internal unbounded attempt count for automatic finite batches', async () => {
+    type BatchRunner = NonNullable<SubtitleSyncDependencies['runBatchImport']>
+    const runBatchImport = vi.fn(async (
+      _options?: Parameters<BatchRunner>[0],
+      _dependencies?: Parameters<BatchRunner>[1],
+      hooks?: Parameters<BatchRunner>[2],
+    ) => {
+      await hooks?.onProgress?.({ type: 'candidate_exhausted' })
+      return { successes: [], failures: [] }
+    })
+    const { controller } = setup({ runBatchImport })
 
     await controller.start({ mode: 'automatic' })
     await settled(controller)
 
-    expect(controller.snapshot()).toMatchObject({ status: 'candidate_exhausted', attempted: 2, succeeded: 2 })
-    expect(dependencies.downloadMovie).toHaveBeenCalledTimes(2)
+    expect(runBatchImport).toHaveBeenCalledWith(expect.objectContaining({ maxAttempts: Number.MAX_SAFE_INTEGER }), expect.anything(), expect.anything())
   })
 
   it('reloads only a valid sanitized snapshot', async () => {
