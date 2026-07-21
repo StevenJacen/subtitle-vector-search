@@ -88,9 +88,11 @@ API grants or public RLS policies.
 
 Extend the additive `subtitle-passages` contract with an optional source anchor:
 track ID plus first and last cue indexes. The Edge Function validates that the
-track is ready, loads enough neighboring cues, and uses the existing continuous
-passage rules to return exactly the requested 5-10 scenes from that movie. The
-existing theme-only request remains unchanged.
+track is ready, loads enough neighboring cues, and uses the selected range's
+midpoint cue as a deterministic anchor. It returns exactly the requested 5-10
+scenes from that movie and always contains that midpoint, even when the search
+chunk itself is wider than the requested scene count. The existing theme-only
+request remains unchanged.
 
 The workbench task input and request digest include the optional anchor. This
 keeps retries idempotent and records the real subtitle provenance in the v2
