@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest'
 import {
   buildAssSubtitles,
   buildCaptionWindows,
+  buildDynamicAssSubtitles,
   escapeAssText,
 } from '../src/ass-subtitles.js'
+import { buildDynamicTimeline, type DynamicScene } from '../src/workbench/render-plan.js'
 import type { StoryboardScene } from '../src/storyboard.js'
 
 const exactQuote = String.raw`Hope {still} follows C:\paths.`
@@ -70,5 +72,40 @@ describe('buildAssSubtitles', () => {
     { invalidScenes: [...scenes.slice(0, 2), { ...scenes[2], movieTitle: undefined }, scenes[3]] },
   ])('rejects malformed scene input', ({ invalidScenes }) => {
     expect(() => buildAssSubtitles(invalidScenes)).toThrow('invalid subtitle scenes')
+  })
+})
+
+describe('buildDynamicAssSubtitles', () => {
+  const dynamicScenes: DynamicScene[] = [1_200, 2_345, 3_010, 4_444, 5_001].map((durationMs, index) => ({
+    index,
+    durationMs,
+    captionEn: index === 1 ? String.raw`Exact {English} C:\line` : `Exact English ${index + 1}`,
+    captionZh: `精确中文 ${index + 1}`,
+    sourceInMs: 120_000 + index * 2_000,
+  }))
+
+  it.each([
+    { width: 1920 as const, height: 1080 as const, expectedStyle: 'Landscape', marginL: 192, marginV: 108 },
+    { width: 1080 as const, height: 1920 as const, expectedStyle: 'Portrait', marginL: 108, marginV: 192 },
+  ])('creates one exact bilingual event per cue with safe $expectedStyle margins', ({ width, height, expectedStyle, marginL, marginV }) => {
+    const config = { width, height, frameRate: 30 as const, transitionMs: 400 }
+    const timeline = buildDynamicTimeline(dynamicScenes, config)
+    const ass = buildDynamicAssSubtitles(dynamicScenes, timeline, config, {
+      movieTitle: 'Movie Title',
+      releaseYear: 1994,
+    })
+    const events = ass.split('\n').filter(line => line.startsWith('Dialogue:'))
+    const style = ass.split('\n').find(line => line.startsWith(`Style: ${expectedStyle},`))?.split(',')
+
+    expect(events).toHaveLength(5)
+    expect(events[0]).toContain('0:00:00.00,0:00:01.20')
+    expect(events.at(-1)).toContain('0:00:11.00,0:00:16.00')
+    expect(events[1]).toContain(`${escapeAssText(dynamicScenes[1].captionEn)}\\N${escapeAssText(dynamicScenes[1].captionZh)}\\NMovie Title (1994)`)
+    expect(events[1]).not.toContain('00:02:02.000')
+    expect(events.every(event => event.includes(`,${expectedStyle},`))).toBe(true)
+    expect(Number(style?.[19])).toBeGreaterThanOrEqual(marginL)
+    expect(Number(style?.[20])).toBeGreaterThanOrEqual(marginL)
+    expect(Number(style?.[21])).toBeGreaterThanOrEqual(marginV)
+    expect(ass).not.toContain('Style: Default,Microsoft YaHei')
   })
 })

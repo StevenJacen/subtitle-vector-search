@@ -28,6 +28,7 @@ export interface FinalMediaExpectations {
   durationSeconds: number
   frameRateTolerance?: number
   durationToleranceMs?: number
+  audioCodec?: 'aac' | null
 }
 
 const minimumPlausibleMediaSizeBytes = 1_000
@@ -125,6 +126,7 @@ export function validateFinalMediaProbe(
 ): MediaProbe {
   const frameRateTolerance = expected.frameRateTolerance ?? 0.5
   const durationToleranceMs = expected.durationToleranceMs ?? 1_000
+  const expectedAudioCodec = expected.audioCodec === undefined ? 'aac' : expected.audioCodec
   if (probe.width !== expected.width
     || probe.height !== expected.height
     || probe.frameRate < expected.fps - frameRateTolerance
@@ -132,9 +134,10 @@ export function validateFinalMediaProbe(
     || probe.durationMs < expected.durationSeconds * 1_000 - durationToleranceMs
     || probe.durationMs > expected.durationSeconds * 1_000 + durationToleranceMs
     || probe.videoCodec !== 'h264'
-    || probe.audioCodec !== 'aac'
-    || probe.audioSampleRate !== 48_000
-    || probe.audioChannels !== 2
+    || probe.audioCodec !== expectedAudioCodec
+    || (expectedAudioCodec === null
+      ? probe.audioSampleRate !== null || probe.audioChannels !== null
+      : probe.audioSampleRate !== 48_000 || probe.audioChannels !== 2)
     || probe.pixelFormat !== 'yuv420p') {
     throw new Error('invalid final media')
   }

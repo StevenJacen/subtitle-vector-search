@@ -1,5 +1,5 @@
 import { mkdir, writeFile } from 'node:fs/promises'
-import { dirname, win32 } from 'node:path'
+import { dirname, join, win32 } from 'node:path'
 import { buildAssSubtitles } from './ass-subtitles.js'
 import {
   defaultProcessRunner,
@@ -10,6 +10,11 @@ import {
 } from './media-probe.js'
 import type { StoryboardScene } from './storyboard.js'
 import type { ResolvedArtifactPath } from './video-artifacts.js'
+import {
+  buildDynamicTimeline,
+  type DynamicRenderConfiguration,
+  type TimelineScene,
+} from './workbench/render-plan.js'
 
 export interface RenderConfiguration {
   width: number
@@ -63,6 +68,24 @@ export interface RenderVideoResult {
   finalProbe: MediaProbe
 }
 
+export interface SilentWorkbenchRenderInput {
+  sourcePaths: readonly string[]
+  assPath: string
+  finalPath: string
+  timeline: readonly TimelineScene[]
+  config: DynamicRenderConfiguration
+  commands?: RenderCommands
+}
+
+export interface SilentWorkbenchRenderResult {
+  sourceProbes: readonly MediaProbe[]
+  normalizedPaths: readonly string[]
+  subtitlesPath: string
+  finalPath: string
+  blackFrames: BlackFrameFinding[]
+  finalProbe: MediaProbe
+}
+
 const defaultFontFilePath = 'C:\\Windows\\Fonts\\msyh.ttc'
 
 export function buildTransitionOffsets(render: RenderConfiguration): [number, number, number] {
@@ -104,6 +127,139 @@ export function buildNormalizationArgs(
     destinationPath,
   )
   return args
+}
+
+export function buildDynamicNormalizationArgs(
+  sourcePath: string,
+  destinationPath: string,
+  scene: TimelineScene,
+  probe: MediaProbe,
+  config: DynamicRenderConfiguration,
+): string[] {
+  const args: string[] = []
+  if (probe.durationMs < scene.sourceInMs + scene.sourceDurationMs) args.push('-stream_loop', '-1')
+  args.push(
+    '-ss', formatNumber(scene.sourceInMs / 1_000),
+    '-i', sourcePath,
+    '-an',
+    '-vf', [
+      `scale=${config.width}:${config.height}:force_original_aspect_ratio=increase`,
+      `crop=${config.width}:${config.height}:(iw-ow)/2:(ih-oh)/2`,
+      'setsar=1',
+      `fps=${config.frameRate}`,
+      'settb=AVTB',
+      'setpts=PTS-STARTPTS',
+      'format=yuv420p',
+    ].join(','),
+    '-t', formatNumber(scene.sourceDurationMs / 1_000),
+    '-c:v', 'libx264',
+    '-preset', 'medium',
+    '-crf', '18',
+    '-pix_fmt', 'yuv420p',
+    '-y',
+    destinationPath,
+  )
+  return args
+}
+
+export function buildSilentRenderArgs(input: {
+  sourcePaths: readonly string[]
+  assPath: string
+  finalPath: string
+  timeline: readonly TimelineScene[]
+  config: DynamicRenderConfiguration
+}): string[] {
+  validateSilentRenderArguments(input)
+  const filters: string[] = []
+  let current = '[0:v]'
+  for (let index = 0; index < input.timeline.length - 1; index += 1) {
+    const scene = input.timeline[index]
+    if (scene.xfadeOffsetMs === null || scene.transitionOutMs <= 0) throw new Error('invalid silent render timeline')
+    const output = `[x${index + 1}]`
+    filters.push(`${current}[${index + 1}:v]xfade=transition=fade:duration=${formatNumber(scene.transitionOutMs / 1_000)}:offset=${formatNumber(scene.xfadeOffsetMs / 1_000)}${output}`)
+    current = output
+  }
+  filters.push(`${current}ass=filename='${filterPath(input.assPath)}'[vout]`)
+  const totalDurationMs = input.timeline.at(-1)?.endMs
+  if (totalDurationMs === undefined) throw new Error('invalid silent render timeline')
+
+  return [
+    ...input.sourcePaths.flatMap(path => ['-i', path]),
+    '-filter_complex', filters.join(';'),
+    '-map', '[vout]',
+    '-c:v', 'libx264',
+    '-crf', '18',
+    '-preset', 'medium',
+    '-pix_fmt', 'yuv420p',
+    '-r', String(input.config.frameRate),
+    '-movflags', '+faststart',
+    '-t', formatNumber(totalDurationMs / 1_000),
+    '-y',
+    input.finalPath,
+  ]
+}
+
+export async function renderSilentWorkbenchVideo(
+  input: SilentWorkbenchRenderInput,
+  run: ProcessRunner = defaultProcessRunner,
+): Promise<SilentWorkbenchRenderResult> {
+  validateSilentWorkbenchInput(input)
+  const ffmpegCommand = input.commands?.ffmpeg ?? 'ffmpeg'
+  const ffprobeCommand = input.commands?.ffprobe ?? 'ffprobe'
+  const probeRunner: ProcessRunner = (_command, args) => run(ffprobeCommand, args)
+  const sourceProbes = await Promise.all(input.sourcePaths.map(path => probeMedia(path, probeRunner)))
+  const normalizedDirectory = join(dirname(input.finalPath), 'normalized-v2')
+  const normalizedPaths = input.timeline.map(scene => join(
+    normalizedDirectory,
+    `scene-${String(scene.index + 1).padStart(2, '0')}.mp4`,
+  ))
+  await Promise.all([
+    mkdir(normalizedDirectory, { recursive: true }),
+    mkdir(dirname(input.finalPath), { recursive: true }),
+  ])
+
+  for (let index = 0; index < input.timeline.length; index += 1) {
+    await runChecked(run, ffmpegCommand, buildDynamicNormalizationArgs(
+      input.sourcePaths[index],
+      normalizedPaths[index],
+      input.timeline[index],
+      sourceProbes[index],
+      input.config,
+    ), 'source normalization')
+  }
+  await runChecked(run, ffmpegCommand, buildSilentRenderArgs({
+    sourcePaths: normalizedPaths,
+    assPath: input.assPath,
+    finalPath: input.finalPath,
+    timeline: input.timeline,
+    config: input.config,
+  }), 'final render')
+
+  const totalDurationMs = input.timeline[input.timeline.length - 1].endMs
+  const finalProbe = validateFinalMediaProbe(await probeMedia(input.finalPath, probeRunner), {
+    width: input.config.width,
+    height: input.config.height,
+    fps: input.config.frameRate,
+    durationSeconds: totalDurationMs / 1_000,
+    durationToleranceMs: 50,
+    audioCodec: null,
+  })
+  const blackDetection = await runChecked(
+    run,
+    ffmpegCommand,
+    buildBlackDetectArgs(input.finalPath),
+    'black frame detection',
+  )
+  const blackFrames = parseBlackFrameFindings(`${blackDetection.stdout}\n${blackDetection.stderr}`)
+
+  return {
+    sourceProbes,
+    normalizedPaths,
+    subtitlesPath: input.assPath,
+    finalPath: input.finalPath,
+    blackFrames,
+    finalProbe,
+  }
 }
 
 export function buildFinalRenderArgs(
@@ -275,6 +431,38 @@ function validateRenderInput(input: RenderVideoInput): void {
       .some(path => typeof path !== 'string' || path.trim() === '')) {
     throw new Error('invalid render input')
   }
+}
+
+function validateSilentWorkbenchInput(input: SilentWorkbenchRenderInput): void {
+  validateSilentRenderArguments(input)
+}
+
+function validateSilentRenderArguments(input: {
+  sourcePaths: readonly string[]
+  assPath: string
+  finalPath: string
+  timeline: readonly TimelineScene[]
+  config: DynamicRenderConfiguration
+}): void {
+  if (typeof input.assPath !== 'string'
+    || input.assPath.trim() === ''
+    || typeof input.finalPath !== 'string'
+    || input.finalPath.trim() === ''
+    || input.sourcePaths.length !== input.timeline.length
+    || input.sourcePaths.some(path => typeof path !== 'string' || path.trim() === '')
+  ) {
+    throw new Error('invalid silent render input')
+  }
+
+  const expected = buildDynamicTimeline(input.timeline, input.config)
+  if (input.timeline.some((scene, index) => {
+    const canonical = expected[index]
+    return scene.startMs !== canonical.startMs
+      || scene.endMs !== canonical.endMs
+      || scene.transitionOutMs !== canonical.transitionOutMs
+      || scene.sourceDurationMs !== canonical.sourceDurationMs
+      || scene.xfadeOffsetMs !== canonical.xfadeOffsetMs
+  })) throw new Error('invalid silent render timeline')
 }
 
 function validateRenderConfiguration(render: RenderConfiguration): void {

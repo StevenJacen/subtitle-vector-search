@@ -102,3 +102,33 @@ describe('validateFinalMediaProbe', () => {
     expect(() => validateFinalMediaProbe({ ...finalProbe, ...change })).toThrow('invalid final media')
   })
 })
+
+describe('validate silent workbench output', () => {
+  const silentProbe = parseMediaProbe({
+    format: { duration: '16.000000', size: '1234567' },
+    streams: [validProbeJson.streams[0]],
+  })
+
+  it('requires a null audio codec and null audio properties', () => {
+    expect(validateFinalMediaProbe(silentProbe, {
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      durationSeconds: 16,
+      audioCodec: null,
+    })).toBe(silentProbe)
+
+    expect(() => validateFinalMediaProbe({
+      ...silentProbe,
+      audioCodec: 'aac',
+      audioSampleRate: 48_000,
+      audioChannels: 2,
+    }, {
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      durationSeconds: 16,
+      audioCodec: null,
+    })).toThrow('invalid final media')
+  })
+})

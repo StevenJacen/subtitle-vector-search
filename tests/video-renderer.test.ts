@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { StoryboardScene } from '../src/storyboard.js'
+import { buildDynamicAssSubtitles } from '../src/ass-subtitles.js'
 import { artifactKey, resolveArtifactPath } from '../src/video-artifacts.js'
 import {
   PRODUCTION_RENDER,
@@ -11,10 +12,14 @@ import {
   buildFinalRenderArgs,
   buildNormalizationArgs,
   buildTransitionOffsets,
+  buildDynamicNormalizationArgs,
+  buildSilentRenderArgs,
   parseBlackFrameFindings,
+  renderSilentWorkbenchVideo,
   renderVideo,
   type RenderConfiguration,
 } from '../src/video-renderer.js'
+import { buildDynamicTimeline, type DynamicScene } from '../src/workbench/render-plan.js'
 import { probeMedia, type MediaProbe, type ProcessResult } from '../src/media-probe.js'
 
 const sourceProbe: MediaProbe = {
@@ -42,6 +47,8 @@ const scenes: StoryboardScene[] = [0, 1, 2, 3].map(index => ({
     releaseYear: 1994,
   } : {}),
 }))
+
+const mediaCommandsAvailable = await commandAvailable('ffmpeg') && await commandAvailable('ffprobe')
 
 describe('FFmpeg argument builders', () => {
   it('uses the exact production render contract and transition formula', () => {
@@ -121,6 +128,71 @@ describe('FFmpeg argument builders', () => {
     expect(args).toEqual(expect.arrayContaining(['-frames:v', '1', '-q:v', '2', 'contact-sheet.jpg']))
     expect(args[args.indexOf('-filter_complex') + 1]).toContain('hstack')
     expect(args[args.indexOf('-filter_complex') + 1]).toContain('vstack')
+  })
+})
+
+describe('dynamic silent FFmpeg argument builders', () => {
+  const dynamicScenes: DynamicScene[] = [1_200, 4_000, 1_400, 2_000, 5_000].map((durationMs, index) => ({
+    index,
+    durationMs,
+    captionEn: `Line ${index}`,
+    captionZh: `台词 ${index}`,
+    sourceInMs: index * 250,
+  }))
+  const config = { width: 1920 as const, height: 1080 as const, frameRate: 30 as const, transitionMs: 400 }
+  const timeline = buildDynamicTimeline(dynamicScenes, config)
+
+  it('normalizes each clip with center-safe cover crop, a nonfinal handle, and no audio', () => {
+    const args = buildDynamicNormalizationArgs('source.mp4', 'normalized.mp4', timeline[0], sourceProbe, config)
+    const filter = args[args.indexOf('-vf') + 1]
+
+    expect(args).toEqual(expect.arrayContaining(['-ss', '0', '-i', 'source.mp4', '-an', '-t', '1.5']))
+    expect(filter).toContain('scale=1920:1080:force_original_aspect_ratio=increase')
+    expect(filter).toContain('crop=1920:1080:(iw-ow)/2:(ih-oh)/2')
+    expect(filter).toContain('fps=30')
+  })
+
+  it('maps only video and builds variable xfade offsets without audio sources or filters', () => {
+    const args = buildSilentRenderArgs({
+      sourcePaths: timeline.map(scene => `n${scene.index}.mp4`),
+      assPath: 'C:\\run\\subtitles.ass',
+      finalPath: 'final.mp4',
+      timeline,
+      config,
+    })
+    const graph = args[args.indexOf('-filter_complex') + 1]
+    const maps = args.flatMap((arg, index) => arg === '-map' ? [args[index + 1]] : [])
+
+    expect(graph).toContain('duration=0.3:offset=1.2')
+    expect(graph).toContain('duration=0.35:offset=5.2')
+    expect(graph).toContain('duration=0.35:offset=6.6')
+    expect(graph).toContain('duration=0.4:offset=8.6')
+    expect(maps).toEqual(['[vout]'])
+    expect(args).toEqual(expect.arrayContaining(['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-r', '30', '-t', '13.6']))
+    expect(args).not.toContain('-c:a')
+    expect(args).not.toContain('-an')
+    expect(graph).not.toMatch(/anoise|\[\d+:a\]|\[aout\]|afade|volume|highpass|lowpass/)
+  })
+
+  it('independently rejects invalid configuration, timeline, and paths', () => {
+    const valid = {
+      sourcePaths: timeline.map(scene => `n${scene.index}.mp4`),
+      assPath: 'subtitles.ass',
+      finalPath: 'final.mp4',
+      timeline,
+      config,
+    }
+    const gap = timeline.map(scene => ({ ...scene }))
+    gap[2].startMs += 1
+    const wrongTransition = timeline.map(scene => ({ ...scene }))
+    wrongTransition[0].transitionOutMs = 299
+    wrongTransition[0].sourceDurationMs = wrongTransition[0].durationMs + 299
+
+    expect(() => buildSilentRenderArgs({ ...valid, assPath: ' ' })).toThrow('invalid silent render input')
+    expect(() => buildSilentRenderArgs({ ...valid, sourcePaths: ['', ...valid.sourcePaths.slice(1)] })).toThrow('invalid silent render input')
+    expect(() => buildSilentRenderArgs({ ...valid, config: { ...config, transitionMs: 401 } })).toThrow('invalid dynamic render configuration')
+    expect(() => buildSilentRenderArgs({ ...valid, timeline: gap })).toThrow('invalid silent render timeline')
+    expect(() => buildSilentRenderArgs({ ...valid, timeline: wrongTransition })).toThrow('invalid silent render timeline')
   })
 })
 
@@ -207,6 +279,76 @@ describe('real local FFmpeg render', () => {
     expect(result.blackFrames.every(frame => frame.durationSeconds <= 1)).toBe(true)
     expect(result.finalProbe).toMatchObject({ audioCodec: 'aac', audioSampleRate: 48_000, audioChannels: 2 })
   }, 120_000)
+
+  it.skipIf(!mediaCommandsAvailable).each([
+    {
+      name: 'five unequal landscape scenes',
+      config: { width: 1920 as const, height: 1080 as const, frameRate: 30 as const, transitionMs: 400 },
+      durations: [2_800, 2_950, 3_050, 3_150, 3_300],
+    },
+    {
+      name: 'ten unequal portrait scenes',
+      config: { width: 1080 as const, height: 1920 as const, frameRate: 30 as const, transitionMs: 400 },
+      durations: [1_460, 1_470, 1_480, 1_490, 1_500, 1_510, 1_520, 1_530, 1_540, 1_550],
+    },
+  ])('renders $name as exact silent H.264 video with nonblack samples', async ({ config, durations }) => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'subtitle-workbench-renderer-'))
+    temporaryDirectories.push(root)
+    const dynamicScenes: DynamicScene[] = durations.map((durationMs, index) => ({
+      index,
+      durationMs,
+      captionEn: `Exact subtitle cue ${index + 1}`,
+      captionZh: `精确字幕 ${index + 1}`,
+      sourceInMs: 0,
+    }))
+    const timeline = buildDynamicTimeline(dynamicScenes, config)
+    const sourcePaths = dynamicScenes.map(scene => join(root, `source-${scene.index}.mp4`))
+    const assPath = join(root, 'subtitles.ass')
+    const finalPath = join(root, 'final.mp4')
+    const colors = ['white', 'yellow', 'cyan', 'lime', 'magenta']
+
+    await Promise.all(sourcePaths.map(async (path, index) => {
+      const generated = await runProcess('ffmpeg', [
+        '-y', '-f', 'lavfi', '-i', `color=c=${colors[index % colors.length]}:size=320x180:rate=30:duration=1`,
+        '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=1',
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', path,
+      ])
+      expect(generated.exitCode, generated.stderr).toBe(0)
+    }))
+    await fs.writeFile(assPath, buildDynamicAssSubtitles(dynamicScenes, timeline, config, {
+      movieTitle: 'Classic Film',
+      releaseYear: 1994,
+    }), 'utf8')
+
+    const result = await renderSilentWorkbenchVideo({ sourcePaths, assPath, finalPath, timeline, config })
+    const expectedDurationMs = durations.reduce((sum, value) => sum + value, 0)
+
+    expect(result.finalProbe).toMatchObject({
+      width: config.width,
+      height: config.height,
+      frameRate: 30,
+      videoCodec: 'h264',
+      pixelFormat: 'yuv420p',
+      audioCodec: null,
+      audioSampleRate: null,
+      audioChannels: null,
+    })
+    expect(result.finalProbe.durationMs).toBeGreaterThanOrEqual(expectedDurationMs - 50)
+    expect(result.finalProbe.durationMs).toBeLessThanOrEqual(expectedDurationMs + 50)
+    expect(result.sourceProbes).toHaveLength(durations.length)
+    expect(result.normalizedPaths).toHaveLength(durations.length)
+    expect(result.blackFrames).toEqual([])
+
+    for (const sampleMs of [250, Math.floor(expectedDurationMs / 2), expectedDurationMs - 250]) {
+      const sampled = await runProcess('ffmpeg', [
+        '-ss', String(sampleMs / 1_000), '-i', finalPath,
+        '-frames:v', '1', '-vf', 'signalstats,metadata=print:key=lavfi.signalstats.YAVG', '-an', '-f', 'null', '-',
+      ])
+      expect(sampled.exitCode, sampled.stderr).toBe(0)
+      const averageLuma = sampled.stderr.match(/lavfi\.signalstats\.YAVG=(\d+(?:\.\d+)?)/)?.[1]
+      expect(Number(averageLuma)).toBeGreaterThan(32)
+    }
+  }, 240_000)
 })
 
 function tuple4<T>(values: T[]): [T, T, T, T] {

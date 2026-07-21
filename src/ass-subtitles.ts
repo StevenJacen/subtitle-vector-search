@@ -1,4 +1,9 @@
 import type { StoryboardScene } from './storyboard.js'
+import type {
+  DynamicRenderConfiguration,
+  DynamicScene,
+  TimelineScene,
+} from './workbench/render-plan.js'
 
 export interface CaptionWindow {
   startSeconds: number
@@ -79,6 +84,60 @@ export function buildAssSubtitles(
 
 export const generateAssSubtitles = buildAssSubtitles
 
+export interface DynamicAssSource {
+  movieTitle: string
+  releaseYear: number
+}
+
+export function buildDynamicAssSubtitles(
+  scenes: readonly DynamicScene[],
+  timeline: readonly TimelineScene[],
+  config: DynamicRenderConfiguration,
+  source: DynamicAssSource,
+): string {
+  if (scenes.length !== timeline.length
+    || scenes.length < 5
+    || scenes.length > 10
+    || source.movieTitle.trim() === ''
+    || !Number.isSafeInteger(source.releaseYear)
+    || timeline.some((entry, index) => entry.index !== index
+      || entry.captionEn !== scenes[index]?.captionEn
+      || entry.captionZh !== scenes[index]?.captionZh
+      || entry.startMs !== (index === 0 ? 0 : timeline[index - 1]?.endMs)
+      || entry.endMs - entry.startMs !== scenes[index]?.durationMs)) {
+    throw new Error('invalid dynamic subtitle scenes')
+  }
+
+  const portrait = config.width < config.height
+  const styleName = portrait ? 'Portrait' : 'Landscape'
+  const fontSize = portrait ? 52 : 60
+  const marginL = Math.ceil(config.width * 0.10)
+  const marginV = Math.ceil(config.height * 0.10)
+  const events = timeline.map(scene => {
+    const sourceLine = `${source.movieTitle} (${source.releaseYear})`
+    const text = [scene.captionEn, scene.captionZh, sourceLine].map(escapeAssText).join('\\N')
+    return `Dialogue: 0,${assTimeMs(scene.startMs)},${assTimeMs(scene.endMs)},${styleName},,0,0,0,,${text}`
+  })
+
+  return [
+    '[Script Info]',
+    'ScriptType: v4.00+',
+    'WrapStyle: 2',
+    'ScaledBorderAndShadow: yes',
+    `PlayResX: ${config.width}`,
+    `PlayResY: ${config.height}`,
+    '',
+    '[V4+ Styles]',
+    'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
+    `Style: ${styleName},Microsoft YaHei,${fontSize},&H00FFFFFF,&H000000FF,&H00101010,&H80000000,0,0,0,0,100,100,0,0,1,3,1,2,${marginL},${marginL},${marginV},1`,
+    '',
+    '[Events]',
+    'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
+    ...events,
+    '',
+  ].join('\n')
+}
+
 function validateScenes(scenes: readonly StoryboardScene[]): void {
   if (scenes.length !== 4
     || scenes.some((scene, index) => scene.index !== index
@@ -110,6 +169,10 @@ function assTime(seconds: number): string {
   const wholeSeconds = Math.floor(centiseconds % 6_000 / 100)
   const remainder = centiseconds % 100
   return `${hours}:${pad(minutes)}:${pad(wholeSeconds)}.${pad(remainder)}`
+}
+
+function assTimeMs(milliseconds: number): string {
+  return assTime(milliseconds / 1_000)
 }
 
 function pad(value: number): string {
