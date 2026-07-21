@@ -120,6 +120,44 @@ describe('batch classics importer', () => {
     expect(context.dependencies.importMovie).toHaveBeenCalledTimes(1)
   })
 
+  it('persists a fixed safe failure message instead of the provider error', async () => {
+    const context = deps({
+      downloadMovie: vi.fn(async () => {
+        throw new Error('provider response token=secret at C:\\private\\subtitle.srt')
+      }),
+    })
+
+    const state = await runBatchImport({
+      candidatesPath: 'candidates.json',
+      statePath: '.batch-state/state.json',
+      downloadsDir: 'downloads/classics',
+      targetSuccessCount: 2,
+      maxAttempts: 2,
+      dryRun: false,
+    }, context.dependencies)
+
+    expect(state.failures).toHaveLength(2)
+    expect(state.failures.every(failure => failure.stage === 'download' && failure.message === 'Subtitle download failed')).toBe(true)
+    expect(JSON.stringify(context.writes)).not.toMatch(/secret|private|subtitle\.srt/i)
+  })
+
+  it('reports an attempt limit instead of candidate exhaustion when eligible candidates remain', async () => {
+    const context = deps()
+    const events: string[] = []
+
+    await runBatchImport({
+      candidatesPath: 'candidates.json',
+      statePath: '.batch-state/state.json',
+      downloadsDir: 'downloads/classics',
+      targetSuccessCount: 3,
+      maxAttempts: 1,
+      dryRun: false,
+    }, context.dependencies, { onProgress: event => { events.push(event.type) } })
+
+    expect(events).toContain('attempt_limit_reached')
+    expect(events).not.toContain('candidate_exhausted')
+  })
+
   it('emits structured progress and cooperatively stops before the next movie', async () => {
     const context = deps()
     const events: unknown[] = []

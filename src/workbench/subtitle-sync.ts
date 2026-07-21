@@ -72,7 +72,10 @@ const safeMessages = new Set([
   'Subtitle provider configuration needs attention',
   'Synchronization interrupted; rerun to resume',
   'Synchronization failed',
+  'Synchronization attempt limit reached; rerun to resume',
 ])
+
+let activeSyncOwner: symbol | null = null
 
 export class SubtitleSyncEventBus {
   private readonly history: SubtitleSyncEvent[] = []
@@ -123,7 +126,7 @@ export class SubtitleSyncController {
   }
 
   start(input: SubtitleSyncInput): Promise<SubtitleSyncSnapshot> {
-    if (this.running !== null) throw new Error('subtitle_sync_already_running')
+    if (this.running !== null || activeSyncOwner !== null) throw new Error('subtitle_sync_already_running')
     assertInput(input)
 
     const startedAt = this.dependencies.now()
@@ -140,8 +143,13 @@ export class SubtitleSyncController {
       startedAt,
       updatedAt: startedAt,
     }
+    const owner = Symbol('subtitle-sync-owner')
+    activeSyncOwner = owner
     const task = this.run(input)
-    this.running = task.finally(() => { this.running = null })
+    this.running = task.finally(() => {
+      this.running = null
+      if (activeSyncOwner === owner) activeSyncOwner = null
+    })
     return Promise.resolve(this.snapshot())
   }
 
@@ -170,6 +178,10 @@ export class SubtitleSyncController {
     try {
       await this.persist()
       this.events.publish(this.current)
+      if (this.stopRequested) {
+        await this.finish('stopped')
+        return
+      }
       if (input.mode === 'manual') {
         await this.runManual(input.movie)
       } else {
@@ -204,7 +216,7 @@ export class SubtitleSyncController {
       statePath: this.options.batchStatePath,
       downloadsDir: this.options.downloadsDir,
       targetSuccessCount: this.options.targetSuccessCount,
-      maxAttempts: this.options.maxAttempts,
+      maxAttempts: Number.MAX_SAFE_INTEGER,
       dryRun: false,
     }, { ...this.dependencies, output: () => {} }, {
       shouldStop: () => this.stopRequested,
@@ -239,6 +251,13 @@ export class SubtitleSyncController {
       case 'completed':
       case 'candidate_exhausted':
         await this.finish(event.type)
+        return
+      case 'attempt_limit_reached':
+        await this.transition({
+          status: 'failed',
+          currentMovie: null,
+          message: 'Synchronization attempt limit reached; rerun to resume',
+        })
     }
   }
 

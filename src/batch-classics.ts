@@ -76,6 +76,7 @@ export type BatchImportProgress =
   | { type: 'configuration_error'; movie: SubtitleMovieInput }
   | { type: 'stopped' }
   | { type: 'completed' }
+  | { type: 'attempt_limit_reached' }
   | { type: 'candidate_exhausted' }
 
 export interface BatchImportHooks {
@@ -109,6 +110,7 @@ export async function runBatchImport(
   const state = await readState(resolved.statePath, deps)
   const alreadySucceeded = new Set(state.successes.map(success => success.imdbId))
   const alreadyFailed = new Set(state.failures.map(failure => failure.imdbId))
+  const attemptedCandidates = new Set<string>()
   let attempts = 0
 
   await deps.ensureDirectory(resolved.downloadsDir)
@@ -122,6 +124,7 @@ export async function runBatchImport(
     if (state.successes.length >= resolved.targetSuccessCount || attempts >= resolved.maxAttempts) break
     if (alreadySucceeded.has(candidate.imdbId) || alreadyFailed.has(candidate.imdbId)) continue
     attempts += 1
+    attemptedCandidates.add(candidate.imdbId)
 
     const file = join(resolved.downloadsDir, `${slugify(candidate.title)}-${candidate.year}-${candidate.imdbId}.srt`)
     const displayIndex = resolved.dryRun ? attempts : state.successes.length + 1
@@ -160,7 +163,11 @@ export async function runBatchImport(
     }
   }
 
-  await reportProgress(hooks, state.successes.length >= resolved.targetSuccessCount ? { type: 'completed' } : { type: 'candidate_exhausted' })
+  const eligibleCandidatesRemain = candidates.some(candidate => !alreadySucceeded.has(candidate.imdbId)
+    && !alreadyFailed.has(candidate.imdbId) && !attemptedCandidates.has(candidate.imdbId))
+  await reportProgress(hooks, state.successes.length >= resolved.targetSuccessCount ? { type: 'completed' }
+    : attempts >= resolved.maxAttempts && eligibleCandidatesRemain ? { type: 'attempt_limit_reached' }
+      : { type: 'candidate_exhausted' })
   deps.output(`Batch progress: ${state.successes.length}/${resolved.targetSuccessCount} imported, ${state.failures.length} failed.\n`)
   return state
 }
@@ -270,7 +277,11 @@ async function reportProgress(hooks: BatchImportHooks, event: BatchImportProgres
 function resultForError(error: unknown, stage: BatchImportFailure['stage']): SyncMovieResult {
   const terminal = classifyBatchImportError(error)
   if (terminal !== null) return { status: terminal }
-  return { status: 'failed', stage, message: summarizeError(error) }
+  return { status: 'failed', stage, message: safeFailureMessage(stage) }
+}
+
+function safeFailureMessage(stage: BatchImportFailure['stage']): string {
+  return stage === 'download' ? 'Subtitle download failed' : 'Subtitle import failed'
 }
 
 function summarizeError(error: unknown): string {

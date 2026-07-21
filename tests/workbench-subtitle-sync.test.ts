@@ -9,14 +9,18 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-function setup(overrides: Partial<SubtitleSyncDependencies> = {}) {
+function setup(overrides: Partial<SubtitleSyncDependencies> = {}, optionOverrides: Record<string, number> = {}) {
   const snapshots: string[] = []
+  const writes: Array<{ path: string; text: string }> = []
   const dependencies: SubtitleSyncDependencies = {
     readText: vi.fn(async () => JSON.stringify([
       { imdbId: 'tt2543164', title: 'Arrival', year: 2016, rating: 7.9, votes: 800_000, genres: 'Drama,Mystery,Sci-Fi', score: 100 },
       { imdbId: 'tt0133093', title: 'The Matrix', year: 1999, rating: 8.7, votes: 2_000_000, genres: 'Action,Sci-Fi', score: 99 },
     ])),
-    writeText: vi.fn(async (path, text) => { if (path === 'snapshot.json') snapshots.push(text) }),
+    writeText: vi.fn(async (path, text) => {
+      writes.push({ path, text })
+      if (path === 'snapshot.json') snapshots.push(text)
+    }),
     exists: vi.fn(() => false),
     ensureDirectory: vi.fn(async () => undefined),
     downloadMovie: vi.fn(async () => undefined),
@@ -32,7 +36,8 @@ function setup(overrides: Partial<SubtitleSyncDependencies> = {}) {
     downloadsDir: 'downloads',
     targetSuccessCount: 2,
     maxAttempts: 2,
-  }, dependencies), dependencies, snapshots }
+    ...optionOverrides,
+  }, dependencies), dependencies, snapshots, writes }
 }
 
 async function settled(controller: SubtitleSyncController) {
@@ -40,6 +45,20 @@ async function settled(controller: SubtitleSyncController) {
 }
 
 describe('SubtitleSyncController', () => {
+  it('allows only one active job across controller instances and releases its own lock', async () => {
+    const firstDownload = deferred<void>()
+    const first = setup({ downloadMovie: vi.fn(() => firstDownload.promise) })
+    const second = setup()
+
+    await first.controller.start({ mode: 'manual', movie: MOVIE })
+    expect(() => second.controller.start({ mode: 'automatic' })).toThrowError('subtitle_sync_already_running')
+
+    firstDownload.resolve()
+    await settled(first.controller)
+    await expect(second.controller.start({ mode: 'manual', movie: MOVIE })).resolves.toMatchObject({ status: 'running' })
+    await settled(second.controller)
+  })
+
   it('starts manual work in the background and rejects a second start synchronously', async () => {
     const download = deferred<void>()
     const { controller } = setup({ downloadMovie: vi.fn(() => download.promise) })
@@ -60,8 +79,8 @@ describe('SubtitleSyncController', () => {
     expect(dependencies.downloadMovie).not.toHaveBeenCalled()
   })
 
-  it('continues automatic work after a movie failure and publishes sanitized progress', async () => {
-    const { controller, dependencies, snapshots } = setup({
+  it('continues automatic work after a movie failure and never persists the provider error', async () => {
+    const { controller, dependencies, snapshots, writes } = setup({
       downloadMovie: vi.fn(async movie => {
         if (movie.imdbId === MOVIE.imdbId) throw new Error('provider said token=secret at C:\\private\\download.srt')
       }),
@@ -76,6 +95,7 @@ describe('SubtitleSyncController', () => {
     expect(dependencies.downloadMovie).toHaveBeenCalledTimes(2)
     expect(events).toContain('Movie import failed; continuing')
     expect(JSON.stringify(snapshots)).not.toMatch(/secret|private|download\.srt/i)
+    expect(JSON.stringify(writes)).not.toMatch(/secret|private|download\.srt/i)
   })
 
   it('ends automatic work with a quota status and a safe message', async () => {
@@ -124,6 +144,31 @@ describe('SubtitleSyncController', () => {
 
     expect(controller.snapshot()).toMatchObject({ status: 'stopped', attempted: 1, succeeded: 1 })
     expect(dependencies.downloadMovie).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops manual work before the provider operation starts', async () => {
+    const { controller, dependencies } = setup()
+    const messages: string[] = []
+    controller.events.subscribe(event => messages.push(event.snapshot.message))
+
+    await controller.start({ mode: 'manual', movie: MOVIE })
+    controller.stop()
+    await settled(controller)
+
+    expect(controller.snapshot()).toMatchObject({ status: 'stopped', attempted: 0, succeeded: 0, failed: 0 })
+    expect(messages).not.toContain('Importing subtitle')
+    expect(dependencies.downloadMovie).not.toHaveBeenCalled()
+    expect(dependencies.importMovie).not.toHaveBeenCalled()
+  })
+
+  it('does not report candidate exhaustion until automatic mode processes the finite candidate list', async () => {
+    const { controller, dependencies } = setup({}, { targetSuccessCount: 3, maxAttempts: 1 })
+
+    await controller.start({ mode: 'automatic' })
+    await settled(controller)
+
+    expect(controller.snapshot()).toMatchObject({ status: 'candidate_exhausted', attempted: 2, succeeded: 2 })
+    expect(dependencies.downloadMovie).toHaveBeenCalledTimes(2)
   })
 
   it('reloads only a valid sanitized snapshot', async () => {
