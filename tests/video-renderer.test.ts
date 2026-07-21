@@ -318,6 +318,10 @@ describe('real local FFmpeg render', () => {
     await fs.writeFile(assPath, buildDynamicAssSubtitles(dynamicScenes, timeline, config, {
       movieTitle: 'Classic Film',
       releaseYear: 1994,
+      cueTimestamps: durations.map((durationMs, index) => {
+        const startMs = 120_000 + index * 10_000
+        return `${subtitleTimestamp(startMs)} --> ${subtitleTimestamp(startMs + durationMs)}`
+      }),
     }), 'utf8')
 
     const result = await renderSilentWorkbenchVideo({ sourcePaths, assPath, finalPath, timeline, config })
@@ -354,6 +358,15 @@ describe('real local FFmpeg render', () => {
 function tuple4<T>(values: T[]): [T, T, T, T] {
   if (values.length !== 4) throw new Error('expected four values')
   return values as [T, T, T, T]
+}
+
+function subtitleTimestamp(milliseconds: number): string {
+  const hours = Math.floor(milliseconds / 3_600_000)
+  const minutes = Math.floor(milliseconds % 3_600_000 / 60_000)
+  const seconds = Math.floor(milliseconds % 60_000 / 1_000)
+  const remainder = milliseconds % 1_000
+  return [hours, minutes, seconds].map(value => String(value).padStart(2, '0')).join(':')
+    + `.${String(remainder).padStart(3, '0')}`
 }
 
 async function commandAvailable(command: string): Promise<boolean> {

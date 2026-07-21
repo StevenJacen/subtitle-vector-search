@@ -87,6 +87,7 @@ export const generateAssSubtitles = buildAssSubtitles
 export interface DynamicAssSource {
   movieTitle: string
   releaseYear: number
+  cueTimestamps: readonly string[]
 }
 
 export function buildDynamicAssSubtitles(
@@ -95,11 +96,10 @@ export function buildDynamicAssSubtitles(
   config: DynamicRenderConfiguration,
   source: DynamicAssSource,
 ): string {
+  const cueSourceStarts = parseCueSourceStarts(source, scenes)
   if (scenes.length !== timeline.length
     || scenes.length < 5
     || scenes.length > 10
-    || source.movieTitle.trim() === ''
-    || !Number.isSafeInteger(source.releaseYear)
     || timeline.some((entry, index) => entry.index !== index
       || entry.captionEn !== scenes[index]?.captionEn
       || entry.captionZh !== scenes[index]?.captionZh
@@ -113,8 +113,8 @@ export function buildDynamicAssSubtitles(
   const fontSize = portrait ? 52 : 60
   const marginL = Math.ceil(config.width * 0.10)
   const marginV = Math.ceil(config.height * 0.10)
-  const events = timeline.map(scene => {
-    const sourceLine = `${source.movieTitle} (${source.releaseYear})`
+  const events = timeline.map((scene, index) => {
+    const sourceLine = `${source.movieTitle} (${source.releaseYear}) · ${cueSourceStarts[index]}`
     const text = [scene.captionEn, scene.captionZh, sourceLine].map(escapeAssText).join('\\N')
     return `Dialogue: 0,${assTimeMs(scene.startMs)},${assTimeMs(scene.endMs)},${styleName},,0,0,0,,${text}`
   })
@@ -136,6 +136,35 @@ export function buildDynamicAssSubtitles(
     ...events,
     '',
   ].join('\n')
+}
+
+function parseCueSourceStarts(source: DynamicAssSource, scenes: readonly DynamicScene[]): string[] {
+  if (typeof source !== 'object'
+    || source === null
+    || typeof source.movieTitle !== 'string'
+    || source.movieTitle.trim() === ''
+    || !Number.isSafeInteger(source.releaseYear)
+    || !Array.isArray(source.cueTimestamps)
+    || source.cueTimestamps.length !== scenes.length) {
+    throw new Error('invalid dynamic subtitle source')
+  }
+
+  return source.cueTimestamps.map((timestamp, index) => {
+    if (typeof timestamp !== 'string') throw new Error('invalid dynamic subtitle source')
+    const match = timestamp.match(/^(\d{2}):([0-5]\d):([0-5]\d)\.(\d{3}) --> (\d{2}):([0-5]\d):([0-5]\d)\.(\d{3})$/)
+    if (match === null) throw new Error('invalid dynamic subtitle source')
+    const startMs = subtitleTimeMs(match.slice(1, 5))
+    const endMs = subtitleTimeMs(match.slice(5, 9))
+    if (endMs <= startMs || endMs - startMs !== scenes[index]?.durationMs) {
+      throw new Error('invalid dynamic subtitle source')
+    }
+    return timestamp.slice(0, 12)
+  })
+}
+
+function subtitleTimeMs(parts: string[]): number {
+  const [hours, minutes, seconds, milliseconds] = parts.map(Number)
+  return hours * 3_600_000 + minutes * 60_000 + seconds * 1_000 + milliseconds
 }
 
 function validateScenes(scenes: readonly StoryboardScene[]): void {

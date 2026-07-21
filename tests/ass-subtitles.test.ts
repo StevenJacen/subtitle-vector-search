@@ -4,6 +4,7 @@ import {
   buildCaptionWindows,
   buildDynamicAssSubtitles,
   escapeAssText,
+  type DynamicAssSource,
 } from '../src/ass-subtitles.js'
 import { buildDynamicTimeline, type DynamicScene } from '../src/workbench/render-plan.js'
 import type { StoryboardScene } from '../src/storyboard.js'
@@ -83,6 +84,13 @@ describe('buildDynamicAssSubtitles', () => {
     captionZh: `精确中文 ${index + 1}`,
     sourceInMs: 120_000 + index * 2_000,
   }))
+  const cueTimestamps = [
+    '00:02:00.000 --> 00:02:01.200',
+    '00:02:10.000 --> 00:02:12.345',
+    '00:02:20.000 --> 00:02:23.010',
+    '00:02:30.000 --> 00:02:34.444',
+    '00:02:40.000 --> 00:02:45.001',
+  ]
 
   it.each([
     { width: 1920 as const, height: 1080 as const, expectedStyle: 'Landscape', marginL: 192, marginV: 108 },
@@ -93,6 +101,7 @@ describe('buildDynamicAssSubtitles', () => {
     const ass = buildDynamicAssSubtitles(dynamicScenes, timeline, config, {
       movieTitle: 'Movie Title',
       releaseYear: 1994,
+      cueTimestamps,
     })
     const events = ass.split('\n').filter(line => line.startsWith('Dialogue:'))
     const style = ass.split('\n').find(line => line.startsWith(`Style: ${expectedStyle},`))?.split(',')
@@ -100,7 +109,9 @@ describe('buildDynamicAssSubtitles', () => {
     expect(events).toHaveLength(5)
     expect(events[0]).toContain('0:00:00.00,0:00:01.20')
     expect(events.at(-1)).toContain('0:00:11.00,0:00:16.00')
-    expect(events[1]).toContain(`${escapeAssText(dynamicScenes[1].captionEn)}\\N${escapeAssText(dynamicScenes[1].captionZh)}\\NMovie Title (1994)`)
+    for (const [index, event] of events.entries()) {
+      expect(event).toContain(`${escapeAssText(dynamicScenes[index].captionZh)}\\NMovie Title (1994) · ${cueTimestamps[index].slice(0, 12)}`)
+    }
     expect(events[1]).not.toContain('00:02:02.000')
     expect(events.every(event => event.includes(`,${expectedStyle},`))).toBe(true)
     expect(Number(style?.[19])).toBeGreaterThanOrEqual(marginL)
@@ -108,4 +119,37 @@ describe('buildDynamicAssSubtitles', () => {
     expect(Number(style?.[21])).toBeGreaterThanOrEqual(marginV)
     expect(ass).not.toContain('Style: Default,Microsoft YaHei')
   })
+
+  it.each([
+    {
+      name: 'missing timestamps',
+      source: { movieTitle: 'Movie Title', releaseYear: 1994 } as unknown as DynamicAssSource,
+    },
+    {
+      name: 'wrong timestamp count',
+      source: { movieTitle: 'Movie Title', releaseYear: 1994, cueTimestamps: cueTimestamps.slice(0, 4) },
+    },
+    {
+      name: 'malformed timestamp',
+      source: { movieTitle: 'Movie Title', releaseYear: 1994, cueTimestamps: replaceAt(cueTimestamps, 2, '00:02:20 --> 00:02:23') },
+    },
+    {
+      name: 'reversed timestamp',
+      source: { movieTitle: 'Movie Title', releaseYear: 1994, cueTimestamps: replaceAt(cueTimestamps, 2, '00:02:23.010 --> 00:02:20.000') },
+    },
+    {
+      name: 'duration mismatch',
+      source: { movieTitle: 'Movie Title', releaseYear: 1994, cueTimestamps: replaceAt(cueTimestamps, 2, '00:02:20.000 --> 00:02:23.011') },
+    },
+  ])('rejects $name', ({ source }) => {
+    const config = { width: 1920 as const, height: 1080 as const, frameRate: 30 as const, transitionMs: 400 }
+    const timeline = buildDynamicTimeline(dynamicScenes, config)
+
+    expect(() => buildDynamicAssSubtitles(dynamicScenes, timeline, config, source as DynamicAssSource))
+      .toThrow('invalid dynamic subtitle source')
+  })
 })
+
+function replaceAt(values: readonly string[], index: number, replacement: string): string[] {
+  return values.map((value, current) => current === index ? replacement : value)
+}
