@@ -31,6 +31,7 @@ import {
 } from './http-server.js'
 import { assertWorkbenchFixtureMode, createWorkbenchFixtureRuntime } from './fixture-runtime.js'
 import { planPassageWithOllama } from './ollama.js'
+import { SubtitleLibraryClient } from './subtitle-library.js'
 import type { SelectedPassage, SelectedPassageCue } from './passage-selection.js'
 import {
   WorkbenchTaskService,
@@ -58,6 +59,7 @@ export interface WorkbenchRuntime {
   previews: { resolve(previewId: string): Promise<string | undefined> | string | undefined }
   health(): ReturnType<typeof runWorkbenchHealthChecks>
   resolveFinalPath(taskId: string): Promise<string | null>
+  subtitleLibrary?: SubtitleLibraryClient
 }
 
 export function parseWorkbenchServerConfiguration(
@@ -220,6 +222,14 @@ export function createWorkbenchRuntime(
     previews,
     health: () => runWorkbenchHealthChecks({ ollamaModel: configuration.ollamaModel }, healthDependencies),
     resolveFinalPath: taskId => finalPathForCompletedTask(artifactRoot, taskId),
+    subtitleLibrary: new SubtitleLibraryClient({
+      supabaseUrl: configuration.supabaseUrl,
+      publishableKey: configuration.supabasePublishableKey,
+      personalToken: configuration.personalToken,
+      ollamaEndpoint: configuration.ollamaEndpoint,
+      ollamaModel: configuration.ollamaModel,
+      fetchFn: fetcher,
+    }),
   }
 }
 
