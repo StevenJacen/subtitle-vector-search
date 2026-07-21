@@ -74,6 +74,31 @@ describe('workbench server configuration', () => {
 })
 
 describe('subtitle passage client', () => {
+  it('posts an exact source anchor only when one is selected', async () => {
+    const fetcher = vi.fn(async () => Response.json({ passage: passage() }))
+
+    await requestSubtitlePassage({
+      supabaseUrl: environment.SUPABASE_URL,
+      publishableKey: environment.SUPABASE_PUBLISHABLE_KEY,
+      personalToken: environment.SUBTITLE_PERSONAL_TOKEN,
+      theme: 'hope after confinement',
+      sceneCount: 5,
+      sourceAnchor: { trackId: 12, firstCueIndex: 40, lastCueIndex: 47 },
+      fetcher,
+    })
+
+    expect(fetcher).toHaveBeenCalledWith(
+      'https://project.supabase.co/functions/v1/subtitle-passages',
+      expect.objectContaining({
+        body: JSON.stringify({
+          theme: 'hope after confinement',
+          sceneCount: 5,
+          sourceAnchor: { trackId: 12, firstCueIndex: 40, lastCueIndex: 47 },
+        }),
+      }),
+    )
+  })
+
   it('posts the exact theme/count and returns a validated continuous passage', async () => {
     const fetcher = vi.fn(async () => Response.json({ passage: passage() }))
 

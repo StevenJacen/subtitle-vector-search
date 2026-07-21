@@ -198,7 +198,12 @@ describe('workbench HTTP security boundary', () => {
     const valid = await fetch(`${origin}/api/tasks`, {
       method: 'POST',
       headers: mutationHeaders(origin),
-      body: JSON.stringify({ theme: 'hope', aspectRatio: '9:16', sceneCount: 6 }),
+      body: JSON.stringify({
+        theme: 'hope',
+        aspectRatio: '9:16',
+        sceneCount: 6,
+        sourceAnchor: { trackId: 12, firstCueIndex: 40, lastCueIndex: 47 },
+      }),
     })
     const extra = await fetch(`${origin}/api/tasks`, {
       method: 'POST',
@@ -221,6 +226,12 @@ describe('workbench HTTP security boundary', () => {
     expect(wrongType.status).toBe(415)
     expect(oversized.status).toBe(413)
     expect(taskService.create).toHaveBeenCalledOnce()
+    expect(taskService.create).toHaveBeenCalledWith({
+      theme: 'hope',
+      aspectRatio: '9:16',
+      sceneCount: 6,
+      sourceAnchor: { trackId: 12, firstCueIndex: 40, lastCueIndex: 47 },
+    })
   })
 
   it('routes bounded scene actions and starts production asynchronously', async () => {

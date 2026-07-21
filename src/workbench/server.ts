@@ -32,7 +32,7 @@ import {
 import { assertWorkbenchFixtureMode, createWorkbenchFixtureRuntime } from './fixture-runtime.js'
 import { planPassageWithOllama } from './ollama.js'
 import { SubtitleLibraryClient } from './subtitle-library.js'
-import type { SelectedPassage, SelectedPassageCue } from './passage-selection.js'
+import type { PassageSourceAnchor, SelectedPassage, SelectedPassageCue } from './passage-selection.js'
 import {
   WorkbenchTaskService,
   type CreateTaskInput,
@@ -99,6 +99,7 @@ export async function requestSubtitlePassage(input: {
   personalToken: string
   theme: string
   sceneCount: number
+  sourceAnchor?: PassageSourceAnchor
   fetcher?: typeof fetch
 }): Promise<SelectedPassage> {
   try {
@@ -109,7 +110,11 @@ export async function requestSubtitlePassage(input: {
         'x-subtitle-token': input.personalToken,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ theme: input.theme, sceneCount: input.sceneCount }),
+      body: JSON.stringify({
+        theme: input.theme,
+        sceneCount: input.sceneCount,
+        ...(input.sourceAnchor === undefined ? {} : { sourceAnchor: input.sourceAnchor }),
+      }),
       redirect: 'error',
       signal: AbortSignal.timeout(30_000),
     })
@@ -166,6 +171,7 @@ export function createWorkbenchRuntime(
       personalToken: configuration.personalToken,
       theme: input.theme,
       sceneCount: input.sceneCount,
+      ...(input.sourceAnchor === undefined ? {} : { sourceAnchor: input.sourceAnchor }),
       fetcher,
     }),
     planPassage: input => planPassageWithOllama({
@@ -580,6 +586,7 @@ function requestDigest(input: CreateTaskInput): string {
     theme: input.theme.trim(),
     aspectRatio: input.aspectRatio,
     sceneCount: input.sceneCount,
+    ...(input.sourceAnchor === undefined ? {} : { sourceAnchor: input.sourceAnchor }),
   })).digest('hex')
 }
 

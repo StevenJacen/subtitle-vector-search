@@ -8,6 +8,7 @@ import {
   NoEligiblePassageError,
   parsePassageRequest,
   PassageRequestError,
+  selectAnchoredPassage,
   selectContinuousPassage,
   type PassageAnchor,
   type PassageCue,
@@ -35,6 +36,12 @@ interface CueRow {
 
 interface TrackRow {
   id: number
+}
+
+interface AnchoredTrackRow {
+  id: number
+  movie_id: number
+  movies: { id: number; title: string; release_year: number | null } | null
 }
 
 const ANCHOR_MATCH_COUNT = 20
@@ -82,6 +89,10 @@ function requiredEnvironment(name: string): string {
 }
 
 async function findPassage(client: any, input: PassageRequest) {
+  if (input.sourceAnchor !== undefined) {
+    return await findAnchoredPassage(client, input)
+  }
+
   const embedding = assertQueryEmbedding(
     await embeddingSession.run(input.theme, { mean_pool: true, normalize: true }),
   )
@@ -111,6 +122,39 @@ async function findPassage(client: any, input: PassageRequest) {
     theme: input.theme,
     sceneCount: input.sceneCount,
     anchors: readyAnchors,
+    cues: deduplicatePassageCues(cueRows.map(toCue)),
+  })
+}
+
+async function findAnchoredPassage(client: any, input: PassageRequest) {
+  const tracks = await data<AnchoredTrackRow[]>(
+    client
+      .from('subtitle_tracks')
+      .select('id, movie_id, movies!inner(id, title, release_year)')
+      .eq('id', input.sourceAnchor!.trackId)
+      .eq('status', 'ready'),
+  )
+  const track = tracks[0]
+  if (track === undefined || track.movies === null) {
+    throw new NoEligiblePassageError()
+  }
+  const cueRows = await data<CueRow[]>(
+    client
+      .from('subtitle_cues')
+      .select('track_id, cue_index, start_ms, end_ms, text')
+      .eq('track_id', input.sourceAnchor.trackId)
+      .gte('cue_index', Math.max(0, input.sourceAnchor.firstCueIndex - input.sceneCount + 1))
+      .lte('cue_index', input.sourceAnchor.lastCueIndex + input.sceneCount - 1)
+      .order('cue_index', { ascending: true }),
+  )
+  return selectAnchoredPassage({
+    sceneCount: input.sceneCount,
+    sourceAnchor: input.sourceAnchor,
+    movie: {
+      id: track.movies.id,
+      title: track.movies.title,
+      releaseYear: track.movies.release_year,
+    },
     cues: deduplicatePassageCues(cueRows.map(toCue)),
   })
 }

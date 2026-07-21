@@ -35,9 +35,16 @@ export interface PassageCueRange {
   lastCueIndex: number
 }
 
+export interface PassageSourceAnchor {
+  trackId: number
+  firstCueIndex: number
+  lastCueIndex: number
+}
+
 export interface PassageRequest {
   theme: string
   sceneCount: number
+  sourceAnchor?: PassageSourceAnchor
 }
 
 export class PassageRequestError extends Error {
@@ -72,14 +79,56 @@ export const MAX_PASSAGE_CUE_RANGE_ROWS = 900
 
 export function parsePassageRequest(value: unknown): PassageRequest {
   if (!record(value)
-    || !exactKeys(value, ['sceneCount', 'theme'])
+    || !exactKeys(value, value.sourceAnchor === undefined
+      ? ['sceneCount', 'theme']
+      : ['sceneCount', 'sourceAnchor', 'theme'])
     || typeof value.theme !== 'string'
     || !validTheme(value.theme)
-    || !validSceneCount(value.sceneCount)) {
+    || !validSceneCount(value.sceneCount)
+    || (value.sourceAnchor !== undefined && !validSourceAnchor(value.sourceAnchor))) {
     throw new PassageRequestError()
   }
 
-  return { theme: value.theme.trim(), sceneCount: value.sceneCount }
+  return {
+    theme: value.theme.trim(),
+    sceneCount: value.sceneCount,
+    ...(value.sourceAnchor === undefined ? {} : { sourceAnchor: value.sourceAnchor }),
+  }
+}
+
+export function selectAnchoredPassage(input: {
+  sceneCount: number
+  sourceAnchor: PassageSourceAnchor
+  movie: { id: number; title: string; releaseYear: number | null }
+  cues: PassageCue[]
+}): SelectedPassage {
+  if (!validSceneCount(input.sceneCount)
+    || !validSourceAnchor(input.sourceAnchor)
+    || !validMovie(input.movie)
+    || !Array.isArray(input.cues)
+    || !input.cues.every(validCue)) {
+    throw new Error('invalid anchored passage input')
+  }
+
+  const midpointCueIndex = Math.floor(
+    (input.sourceAnchor.firstCueIndex + input.sourceAnchor.lastCueIndex) / 2,
+  )
+  const startCueIndex = Math.max(0, midpointCueIndex - Math.floor(input.sceneCount / 2))
+  const cues = continuousWindow(
+    indexCues(input.cues).get(input.sourceAnchor.trackId) ?? new Map(),
+    startCueIndex,
+    input.sceneCount,
+  )
+  if (cues === undefined || !eligibleWindow(cues)) {
+    throw new NoEligiblePassageError()
+  }
+
+  return selectedPassage({
+    movie: input.movie,
+    trackId: input.sourceAnchor.trackId,
+    startCueIndex,
+    cues,
+  })
 }
 
 export function selectContinuousPassage(input: {
@@ -118,22 +167,12 @@ export function selectContinuousPassage(input: {
         continue
       }
 
-      const endCueIndex = startCueIndex + input.sceneCount - 1
-      const passage: SelectedPassage = {
-        movie: {
-          id: anchor.movieId,
-          title: anchor.movieTitle,
-          releaseYear: anchor.releaseYear,
-        },
+      const passage = selectedPassage({
+        movie: { id: anchor.movieId, title: anchor.movieTitle, releaseYear: anchor.releaseYear },
         trackId: anchor.trackId,
         startCueIndex,
-        endCueIndex,
-        totalDurationMs: cues.reduce((total, cue) => total + cue.endMs - cue.startMs, 0),
-        cues: cues.map(cue => ({
-          ...cue,
-          timestamp: `${formatTimestamp(cue.startMs)} --> ${formatTimestamp(cue.endMs)}`,
-        })),
-      }
+        cues,
+      })
       candidates.push({
         passage,
         similarity: anchor.similarity,
@@ -319,6 +358,23 @@ function validAnchor(value: PassageAnchor): boolean {
     && value.lastCueIndex >= value.firstCueIndex
 }
 
+function validSourceAnchor(value: unknown): value is PassageSourceAnchor {
+  return record(value)
+    && exactKeys(value, ['firstCueIndex', 'lastCueIndex', 'trackId'])
+    && positiveInteger(value.trackId)
+    && nonNegativeInteger(value.firstCueIndex)
+    && nonNegativeInteger(value.lastCueIndex)
+    && value.lastCueIndex >= value.firstCueIndex
+}
+
+function validMovie(value: unknown): value is { id: number; title: string; releaseYear: number | null } {
+  return record(value)
+    && positiveInteger(value.id)
+    && typeof value.title === 'string'
+    && value.title.trim() !== ''
+    && (value.releaseYear === null || safeInteger(value.releaseYear))
+}
+
 function validCue(value: PassageCue): boolean {
   return record(value)
     && positiveInteger(value.trackId)
@@ -327,6 +383,25 @@ function validCue(value: PassageCue): boolean {
     && positiveInteger(value.endMs)
     && value.endMs > value.startMs
     && typeof value.text === 'string'
+}
+
+function selectedPassage(input: {
+  movie: { id: number; title: string; releaseYear: number | null }
+  trackId: number
+  startCueIndex: number
+  cues: PassageCue[]
+}): SelectedPassage {
+  return {
+    movie: input.movie,
+    trackId: input.trackId,
+    startCueIndex: input.startCueIndex,
+    endCueIndex: input.startCueIndex + input.cues.length - 1,
+    totalDurationMs: input.cues.reduce((total, cue) => total + cue.endMs - cue.startMs, 0),
+    cues: input.cues.map(cue => ({
+      ...cue,
+      timestamp: `${formatTimestamp(cue.startMs)} --> ${formatTimestamp(cue.endMs)}`,
+    })),
+  }
 }
 
 function validTheme(value: string): boolean {

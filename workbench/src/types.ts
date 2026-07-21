@@ -87,6 +87,12 @@ export interface SelectedPassage {
   cues: PassageCue[]
 }
 
+export interface PassageSourceAnchor {
+  trackId: number
+  firstCueIndex: number
+  lastCueIndex: number
+}
+
 export interface WorkbenchScene {
   index: number
   cueIndex: number
@@ -140,6 +146,7 @@ export interface CreateTaskInput {
   theme: string
   aspectRatio: AspectRatio
   sceneCount: number
+  sourceAnchor?: PassageSourceAnchor
 }
 
 export interface WorkbenchTaskEvent {

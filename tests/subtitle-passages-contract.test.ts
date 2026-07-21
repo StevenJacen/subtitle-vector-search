@@ -6,6 +6,7 @@ import {
   type PassageAnchor,
   type PassageCue,
 } from '../supabase/functions/_shared/passage-selection.js'
+import * as passageSelectionModule from '../supabase/functions/_shared/passage-selection.js'
 
 describe('subtitle passage request contract', () => {
   it('accepts bounded nonblank Unicode themes and a scene count', () => {
@@ -19,6 +20,23 @@ describe('subtitle passage request contract', () => {
     })
   })
 
+  it('accepts an ordered safe-integer source anchor without changing the theme-only shape', () => {
+    expect(parsePassageRequest({
+      theme: 'hope',
+      sceneCount: 5,
+      sourceAnchor: { trackId: 12, firstCueIndex: 40, lastCueIndex: 43 },
+    })).toEqual({
+      theme: 'hope',
+      sceneCount: 5,
+      sourceAnchor: { trackId: 12, firstCueIndex: 40, lastCueIndex: 43 },
+    })
+
+    expect(parsePassageRequest({ theme: 'hope', sceneCount: 5 })).toEqual({
+      theme: 'hope',
+      sceneCount: 5,
+    })
+  })
+
   it.each([
     null,
     [],
@@ -29,6 +47,11 @@ describe('subtitle passage request contract', () => {
     { theme: 'hope', sceneCount: 11 },
     { theme: 'hope', sceneCount: 5.5 },
     { theme: 'hope', sceneCount: 5, movieId: 7 },
+    { theme: 'hope', sceneCount: 5, sourceAnchor: { trackId: 0, firstCueIndex: 40, lastCueIndex: 43 } },
+    { theme: 'hope', sceneCount: 5, sourceAnchor: { trackId: 12, firstCueIndex: -1, lastCueIndex: 43 } },
+    { theme: 'hope', sceneCount: 5, sourceAnchor: { trackId: 12, firstCueIndex: 44, lastCueIndex: 43 } },
+    { theme: 'hope', sceneCount: 5, sourceAnchor: { trackId: 12, firstCueIndex: 40, lastCueIndex: 43.5 } },
+    { theme: 'hope', sceneCount: 5, sourceAnchor: { trackId: 12, firstCueIndex: 40, lastCueIndex: 43, movieId: 7 } },
   ])('rejects malformed or extended input %#', input => {
     expect(() => parsePassageRequest(input)).toThrow('invalid request')
   })
@@ -45,6 +68,33 @@ describe('subtitle passage request contract', () => {
 })
 
 describe('subtitle passage response contract', () => {
+  it('selects a deterministic midpoint-containing window from an exact anchor', () => {
+    const select = (passageSelectionModule as typeof passageSelectionModule & {
+      selectAnchoredPassage?: (input: unknown) => ReturnType<typeof selectContinuousPassage>
+    }).selectAnchoredPassage
+    expect(select).toBeTypeOf('function')
+
+    const cues: PassageCue[] = Array.from({ length: 12 }, (_, offset) => ({
+      trackId: 12,
+      cueIndex: 36 + offset,
+      startMs: offset * 3_000,
+      endMs: (offset + 1) * 3_000,
+      text: `Exact dialogue ${offset}.`,
+    }))
+    const passage = select!({
+      sceneCount: 5,
+      sourceAnchor: { trackId: 12, firstCueIndex: 40, lastCueIndex: 47 },
+      movie: { id: 7, title: 'Exact Film', releaseYear: 1994 },
+      cues,
+    })
+
+    expect(passage.movie).toEqual({ id: 7, title: 'Exact Film', releaseYear: 1994 })
+    expect(passage.trackId).toBe(12)
+    expect(passage.cues).toHaveLength(5)
+    expect(passage.cues.map(cue => cue.cueIndex)).toEqual([41, 42, 43, 44, 45])
+    expect(passage.cues.some(cue => cue.cueIndex === 43)).toBe(true)
+  })
+
   it('returns one canonical passage with exact cue text and no anchor diagnostics', () => {
     const anchors: PassageAnchor[] = [{
       similarity: 0.84,

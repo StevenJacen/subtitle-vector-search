@@ -109,7 +109,7 @@ function fakeDependencies(overrides: Partial<WorkbenchTaskDependencies> = {}) {
   const dependencies: WorkbenchTaskDependencies = {
     createId: () => TASK_ID,
     now: () => new Date('2026-07-21T00:00:00.000Z'),
-    requestDigest: () => REQUEST_DIGEST,
+    requestDigest: vi.fn(() => REQUEST_DIGEST),
     selectPassage: vi.fn(async input => {
       order.push('passage')
       return passage(input.sceneCount)
@@ -341,6 +341,41 @@ describe('workbench events', () => {
 })
 
 describe('workbench task creation and review', () => {
+  it('validates and forwards an exact source anchor into passage selection and digesting', async () => {
+    const fake = fakeDependencies()
+    const service = new WorkbenchTaskService(fake.dependencies)
+    const input = {
+      theme: 'Hope after confinement',
+      aspectRatio: '16:9' as const,
+      sceneCount: 5,
+      sourceAnchor: { trackId: 12, firstCueIndex: 40, lastCueIndex: 47 },
+    }
+
+    await service.create(input)
+
+    expect(fake.dependencies.requestDigest).toHaveBeenCalledWith(input)
+    expect(fake.dependencies.selectPassage).toHaveBeenCalledWith(input)
+  })
+
+  it.each([
+    null,
+    { trackId: 0, firstCueIndex: 40, lastCueIndex: 47 },
+    { trackId: 12, firstCueIndex: -1, lastCueIndex: 47 },
+    { trackId: 12, firstCueIndex: 48, lastCueIndex: 47 },
+    { trackId: 12, firstCueIndex: 40.5, lastCueIndex: 47 },
+  ])('rejects invalid exact source anchor %#', async sourceAnchor => {
+    const fake = fakeDependencies()
+    const service = new WorkbenchTaskService(fake.dependencies)
+
+    await expect(service.create({
+      theme: 'Hope',
+      aspectRatio: '16:9',
+      sceneCount: 5,
+      sourceAnchor: sourceAnchor as never,
+    })).rejects.toThrow('invalid_workbench_task_input')
+    expect(fake.dependencies.selectPassage).not.toHaveBeenCalled()
+  })
+
   it('creates passage, translations, and exactly eight initial candidates per scene in order', async () => {
     const fake = fakeDependencies()
     const service = new WorkbenchTaskService(fake.dependencies)

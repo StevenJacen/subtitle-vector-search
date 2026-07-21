@@ -12,7 +12,7 @@ import {
   type SceneCandidateState,
 } from './candidate-pool.js'
 import type { PlannedCue } from './ollama.js'
-import type { SelectedPassage } from './passage-selection.js'
+import type { PassageSourceAnchor, SelectedPassage } from './passage-selection.js'
 import {
   buildDynamicTimeline,
   type DynamicRenderConfiguration,
@@ -37,6 +37,7 @@ export interface CreateTaskInput {
   theme: string
   aspectRatio: '9:16' | '16:9'
   sceneCount: number
+  sourceAnchor?: PassageSourceAnchor
 }
 
 export interface CandidateIdentity {
@@ -792,9 +793,26 @@ function validateCreateInput(input: CreateTaskInput): void {
     || (input.aspectRatio !== '9:16' && input.aspectRatio !== '16:9')
     || !Number.isSafeInteger(input.sceneCount)
     || input.sceneCount < 5
-    || input.sceneCount > 10) {
+    || input.sceneCount > 10
+    || (input.sourceAnchor !== undefined && !validSourceAnchor(input.sourceAnchor))) {
     throw new Error('invalid_workbench_task_input')
   }
+}
+
+function validSourceAnchor(value: unknown): value is PassageSourceAnchor {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const anchor = value as Record<string, unknown>
+  const keys = Object.keys(anchor).sort()
+  return keys.length === 3
+    && keys[0] === 'firstCueIndex'
+    && keys[1] === 'lastCueIndex'
+    && keys[2] === 'trackId'
+    && Number.isSafeInteger(anchor.trackId)
+    && (anchor.trackId as number) > 0
+    && Number.isSafeInteger(anchor.firstCueIndex)
+    && (anchor.firstCueIndex as number) >= 0
+    && Number.isSafeInteger(anchor.lastCueIndex)
+    && (anchor.lastCueIndex as number) >= (anchor.firstCueIndex as number)
 }
 
 function assertReviewable(manifest: WorkbenchManifest, sceneIndex: number): void {

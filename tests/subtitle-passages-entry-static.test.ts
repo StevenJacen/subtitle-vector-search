@@ -50,6 +50,20 @@ describe('subtitle passages Edge entry', () => {
     expect(source).not.toContain('Math.min(...trackAnchors.map')
   })
 
+  it('uses only the selected ready track and never hybrid-matches exact anchors', () => {
+    const source = readFileSync(entryPath, 'utf8')
+
+    expect(source).toContain('if (input.sourceAnchor !== undefined)')
+    expect(source).toContain(".eq('id', input.sourceAnchor!.trackId)")
+    expect(source).toContain(".eq('status', 'ready')")
+    expect(source).toContain(".select('id, movie_id, movies!inner(id, title, release_year)')")
+    expect(source).toContain('selectAnchoredPassage({')
+    expect(source).toContain('Math.max(0, input.sourceAnchor.firstCueIndex - input.sceneCount + 1)')
+    expect(source).toContain('input.sourceAnchor.lastCueIndex + input.sceneCount - 1')
+    expect(source.indexOf('if (input.sourceAnchor !== undefined)'))
+      .toBeLessThan(source.indexOf('embeddingSession.run(input.theme'))
+  })
+
   it('returns one canonical passage and controlled failures without logging subtitle text', () => {
     const source = readFileSync(entryPath, 'utf8')
 

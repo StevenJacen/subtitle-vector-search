@@ -261,13 +261,41 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
 }
 
 function createInput(value: unknown): CreateTaskInput {
-  const input = exactObject(value, ['theme', 'aspectRatio', 'sceneCount'])
+  const hasSourceAnchor = typeof value === 'object'
+    && value !== null
+    && !Array.isArray(value)
+    && Object.prototype.hasOwnProperty.call(value, 'sourceAnchor')
+  const input = exactObject(value, hasSourceAnchor
+    ? ['theme', 'aspectRatio', 'sceneCount', 'sourceAnchor']
+    : ['theme', 'aspectRatio', 'sceneCount'])
   if (typeof input.theme !== 'string' || input.theme.trim() === '' || input.theme.trim().length > 300
     || (input.aspectRatio !== '9:16' && input.aspectRatio !== '16:9')
-    || !Number.isSafeInteger(input.sceneCount) || (input.sceneCount as number) < 5 || (input.sceneCount as number) > 10) {
+    || !Number.isSafeInteger(input.sceneCount) || (input.sceneCount as number) < 5 || (input.sceneCount as number) > 10
+    || (input.sourceAnchor !== undefined && !validSourceAnchor(input.sourceAnchor))) {
     throw httpError(400, 'invalid_task', 'Invalid task')
   }
-  return { theme: input.theme.trim(), aspectRatio: input.aspectRatio, sceneCount: input.sceneCount as number }
+  return {
+    theme: input.theme.trim(),
+    aspectRatio: input.aspectRatio,
+    sceneCount: input.sceneCount as number,
+    ...(input.sourceAnchor === undefined ? {} : { sourceAnchor: input.sourceAnchor }),
+  }
+}
+
+function validSourceAnchor(value: unknown): value is CreateTaskInput['sourceAnchor'] {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const anchor = value as Record<string, unknown>
+  const keys = Object.keys(anchor).sort()
+  return keys.length === 3
+    && keys[0] === 'firstCueIndex'
+    && keys[1] === 'lastCueIndex'
+    && keys[2] === 'trackId'
+    && Number.isSafeInteger(anchor.trackId)
+    && (anchor.trackId as number) > 0
+    && Number.isSafeInteger(anchor.firstCueIndex)
+    && (anchor.firstCueIndex as number) >= 0
+    && Number.isSafeInteger(anchor.lastCueIndex)
+    && (anchor.lastCueIndex as number) >= (anchor.firstCueIndex as number)
 }
 
 function selectionInput(value: unknown): { candidate: CandidateIdentity; confirmed: boolean } {
