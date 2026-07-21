@@ -1,5 +1,5 @@
-import { AlertCircle, Play, RotateCcw } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { AlertCircle, Clapperboard, Play, RotateCcw } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createWorkbenchApi } from './api.js'
 import { CreateToolbar } from './components/CreateToolbar.js'
 import { FinalOutput } from './components/FinalOutput.js'
@@ -7,10 +7,14 @@ import { PassagePanel } from './components/PassagePanel.js'
 import { ProductionProgress } from './components/ProductionProgress.js'
 import { SceneReview } from './components/SceneReview.js'
 import { StatusBar } from './components/StatusBar.js'
+import { SubtitleLibrary } from './components/SubtitleLibrary.js'
 import { TaskRail } from './components/TaskRail.js'
 import type {
   CandidateKey,
   CreateTaskInput,
+  AspectRatio,
+  PassageSourceAnchor,
+  SubtitleSearchResult,
   WorkbenchApi,
   WorkbenchHealthReport,
   WorkbenchTask,
@@ -18,6 +22,7 @@ import type {
 
 const browserApi = createWorkbenchApi()
 const productionStages = new Set(['starting', 'preflight', 'downloading', 'probing', 'rendering', 'validating', 'completing'])
+type View = 'production' | 'library'
 
 interface AppProps {
   api?: WorkbenchApi
@@ -31,6 +36,10 @@ export function App({ api = browserApi, initialTask }: AppProps) {
   const [healthLoading, setHealthLoading] = useState(true)
   const [pending, setPending] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [view, setView] = useState<View>('production')
+  const [aspectRatio, setAspectRatio] = useState<AspectRatio>('9:16')
+  const [sceneCount, setSceneCount] = useState(5)
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([])
 
   const updateTask = useCallback((task: WorkbenchTask) => {
     setCurrentTask(task)
@@ -85,6 +94,16 @@ export function App({ api = browserApi, initialTask }: AppProps) {
     updateTask(await api.createTask(input))
   })
 
+  const createFromSubtitle = async (result: SubtitleSearchResult) => {
+    const sourceAnchor = resultSourceAnchor(result)
+    if (sourceAnchor === undefined) {
+      setError('所选台词缺少可用的字幕锚点')
+      return
+    }
+    await create({ theme: result.text, aspectRatio, sceneCount, sourceAnchor })
+    setView('production')
+  }
+
   const openTask = (taskId: string) => {
     void run('open', async () => updateTask(await api.getTask(taskId)))
   }
@@ -117,59 +136,111 @@ export function App({ api = browserApi, initialTask }: AppProps) {
   const producing = currentTask !== undefined && productionStages.has(currentTask.stage)
   const selectionRequired = currentTask?.stage === 'failed' && currentTask.failure?.code === 'selection_required'
   const reviewable = currentTask?.stage === 'review' || selectionRequired
+  const selectView = (next: View) => setView(next)
+  const moveTab = (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
+    const keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End']
+    if (!keys.includes(event.key)) return
+    event.preventDefault()
+    const nextIndex = event.key === 'ArrowLeft' ? (index + 1) % 2
+      : event.key === 'ArrowRight' ? (index + 1) % 2
+        : event.key === 'Home' ? 0 : 1
+    selectView(nextIndex === 0 ? 'production' : 'library')
+    tabRefs.current[nextIndex]?.focus()
+  }
 
   return (
     <div className="app-shell">
       <StatusBar health={health} loading={healthLoading} />
-      <div className="workbench-layout">
-        <TaskRail tasks={tasks} selectedTaskId={currentTask?.taskId} onOpen={openTask} />
+      <nav className="view-tabs" role="tablist" aria-label="工作台视图">
+        <button
+          ref={element => { tabRefs.current[0] = element }}
+          aria-controls="production-view"
+          aria-selected={view === 'production'}
+          id="production-tab"
+          role="tab"
+          tabIndex={view === 'production' ? 0 : -1}
+          type="button"
+          onClick={() => selectView('production')}
+          onKeyDown={event => moveTab(event, 0)}
+        >
+          <Clapperboard size={16} aria-hidden="true" />视频制作
+        </button>
+        <button
+          ref={element => { tabRefs.current[1] = element }}
+          aria-controls="library-view"
+          aria-selected={view === 'library'}
+          id="library-tab"
+          role="tab"
+          tabIndex={view === 'library' ? 0 : -1}
+          type="button"
+          onClick={() => selectView('library')}
+          onKeyDown={event => moveTab(event, 1)}
+        >字幕库</button>
+      </nav>
+      <div className={`workbench-layout${view === 'library' ? ' workbench-layout--library' : ''}`}>
+        {view === 'production' && <TaskRail tasks={tasks} selectedTaskId={currentTask?.taskId} onOpen={openTask} />}
         <main className="workspace">
-          <CreateToolbar pending={pending === 'create'} onCreate={create} />
-          {error !== null && <div className="operation-error" role="alert"><AlertCircle size={16} aria-hidden="true" />{error}</div>}
-          {currentTask === undefined ? (
-            <div className="workspace-empty">输入主题后创建任务</div>
-          ) : (
-            <>
-              <PassagePanel task={currentTask} />
-              {producing && <ProductionProgress stage={currentTask.stage} />}
-              {currentTask.stage === 'failed' && currentTask.failure !== undefined && (
-                <section className="failure-panel" role="alert">
-                  <div><AlertCircle size={18} aria-hidden="true" /><strong>{currentTask.failure.message}</strong></div>
-                  {currentTask.failure.retryable && !selectionRequired && (
-                    <button className="button button--danger" type="button" disabled={pending !== null} onClick={() => void resume()}>
-                      <RotateCcw size={16} aria-hidden="true" />恢复任务
-                    </button>
+          {view === 'production' ? (
+            <section id="production-view" role="tabpanel" aria-labelledby="production-tab">
+              <CreateToolbar
+                aspectRatio={aspectRatio}
+                sceneCount={sceneCount}
+                pending={pending === 'create'}
+                onAspectRatioChange={setAspectRatio}
+                onSceneCountChange={setSceneCount}
+                onCreate={create}
+              />
+              {error !== null && <div className="operation-error" role="alert"><AlertCircle size={16} aria-hidden="true" />{error}</div>}
+              {currentTask === undefined ? (
+                <div className="workspace-empty">输入主题后创建任务</div>
+              ) : (
+                <>
+                  <PassagePanel task={currentTask} />
+                  {producing && <ProductionProgress stage={currentTask.stage} />}
+                  {currentTask.stage === 'failed' && currentTask.failure !== undefined && (
+                    <section className="failure-panel" role="alert">
+                      <div><AlertCircle size={18} aria-hidden="true" /><strong>{currentTask.failure.message}</strong></div>
+                      {currentTask.failure.retryable && !selectionRequired && (
+                        <button className="button button--danger" type="button" disabled={pending !== null} onClick={() => void resume()}>
+                          <RotateCcw size={16} aria-hidden="true" />恢复任务
+                        </button>
+                      )}
+                    </section>
                   )}
-                </section>
+                  {currentTask.stage === 'completed' && currentTask.output !== undefined ? (
+                    <FinalOutput output={currentTask.output} />
+                  ) : reviewable ? (
+                    <div className="scene-list">
+                      {currentTask.scenes.map(scene => (
+                        <SceneReview
+                          key={scene.index}
+                          scene={scene}
+                          disabled={pending !== null}
+                          onLoadMore={() => loadMore(scene.index)}
+                          onSelection={(candidate, confirmed) => select(scene.index, candidate, confirmed)}
+                        />
+                      ))}
+                      <div className="production-action">
+                        <span>{currentTask.scenes.filter(scene => sameKey(scene.selected, scene.confirmed)).length} / {currentTask.sceneCount} 已确认</span>
+                        <button
+                          className="button button--primary"
+                          type="button"
+                          aria-label="开始制作"
+                          disabled={!allConfirmed || currentTask.stage !== 'review' || pending !== null}
+                          onClick={() => void produce()}
+                        >
+                          <Play size={17} aria-hidden="true" />开始制作
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </>
               )}
-              {currentTask.stage === 'completed' && currentTask.output !== undefined ? (
-                <FinalOutput output={currentTask.output} />
-              ) : reviewable ? (
-                <div className="scene-list">
-                  {currentTask.scenes.map(scene => (
-                    <SceneReview
-                      key={scene.index}
-                      scene={scene}
-                      disabled={pending !== null}
-                      onLoadMore={() => loadMore(scene.index)}
-                      onSelection={(candidate, confirmed) => select(scene.index, candidate, confirmed)}
-                    />
-                  ))}
-                  <div className="production-action">
-                    <span>{currentTask.scenes.filter(scene => sameKey(scene.selected, scene.confirmed)).length} / {currentTask.sceneCount} 已确认</span>
-                    <button
-                      className="button button--primary"
-                      type="button"
-                      aria-label="开始制作"
-                      disabled={!allConfirmed || currentTask.stage !== 'review' || pending !== null}
-                      onClick={() => void produce()}
-                    >
-                      <Play size={17} aria-hidden="true" />开始制作
-                    </button>
-                  </div>
-                </div>
-              ) : null}
-            </>
+            </section>
+          ) : (
+            <section id="library-view" role="tabpanel" aria-labelledby="library-tab">
+              <SubtitleLibrary api={api} onCreate={createFromSubtitle} />
+            </section>
           )}
         </main>
       </div>
@@ -185,4 +256,14 @@ function mergeTasks(current: WorkbenchTask[], incoming: WorkbenchTask[]): Workbe
   const tasks = new Map(current.map(task => [task.taskId, task]))
   for (const task of incoming) tasks.set(task.taskId, task)
   return [...tasks.values()].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+}
+
+function resultSourceAnchor(result: SubtitleSearchResult): PassageSourceAnchor | undefined {
+  if (result.cues.length === 0) return undefined
+  const cueIndexes = result.cues.map(cue => cue.index)
+  return {
+    trackId: result.trackId,
+    firstCueIndex: Math.min(...cueIndexes),
+    lastCueIndex: Math.max(...cueIndexes),
+  }
 }

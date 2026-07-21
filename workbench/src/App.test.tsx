@@ -151,6 +151,50 @@ function apiFixture(initialTasks: WorkbenchTask[] = [task()], healthReport = hea
 }
 
 describe('App', () => {
+  it('switches to the subtitle library with the keyboard and creates an anchored task using current controls', async () => {
+    const user = userEvent.setup()
+    const fixture = apiFixture([])
+    vi.mocked(fixture.api.searchSubtitles).mockResolvedValue({
+      originalQuery: 'face fear',
+      normalizedQuery: 'face fear',
+      warning: null,
+      results: [{
+        similarity: 0.9,
+        rrfScore: 0.05,
+        semanticRank: 1,
+        fullTextRank: 2,
+        movie: { id: 1, title: 'The Shawshank Redemption', releaseYear: 1994 },
+        trackId: 7,
+        chunkIndex: 4,
+        startMs: 120_000,
+        endMs: 132_000,
+        timestamp: '00:02:00,000 --> 00:02:12,000',
+        text: 'Get busy living, or get busy dying.',
+        cues: [
+          { index: 40, startMs: 120_000, endMs: 123_000, text: 'Get busy living,' },
+          { index: 43, startMs: 129_000, endMs: 132_000, text: 'or get busy dying.' },
+        ],
+      }],
+    })
+    render(<App api={fixture.api} />)
+
+    const productionTab = await screen.findByRole('tab', { name: '视频制作' })
+    productionTab.focus()
+    await user.keyboard('{ArrowRight}')
+    expect(screen.getByRole('tab', { name: '字幕库' })).toHaveAttribute('aria-selected', 'true')
+    await user.type(screen.getByRole('searchbox', { name: '搜索台词' }), 'face fear')
+    await user.click(screen.getByRole('button', { name: '搜索台词' }))
+    await user.click(await screen.findByRole('button', { name: '用此台词制作' }))
+
+    await waitFor(() => expect(fixture.api.createTask).toHaveBeenCalledWith(expect.objectContaining({
+      theme: 'Get busy living, or get busy dying.',
+      aspectRatio: '9:16',
+      sceneCount: 5,
+      sourceAnchor: { trackId: 7, firstCueIndex: 40, lastCueIndex: 43 },
+    })))
+    expect(screen.getByRole('tab', { name: '视频制作' })).toHaveAttribute('aria-selected', 'true')
+  })
+
   it('starts as the compact creation tool with bounded defaults and aspect segments', async () => {
     const { api } = apiFixture([])
     render(<App api={api} />)

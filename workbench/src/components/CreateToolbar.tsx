@@ -4,13 +4,22 @@ import type { AspectRatio, CreateTaskInput } from '../types.js'
 
 interface CreateToolbarProps {
   pending?: boolean
+  aspectRatio: AspectRatio
+  sceneCount: number
+  onAspectRatioChange(value: AspectRatio): void
+  onSceneCountChange(value: number): void
   onCreate(input: CreateTaskInput): Promise<void>
 }
 
-export function CreateToolbar({ pending = false, onCreate }: CreateToolbarProps) {
+export function CreateToolbar({
+  pending = false,
+  aspectRatio,
+  sceneCount,
+  onAspectRatioChange,
+  onSceneCountChange,
+  onCreate,
+}: CreateToolbarProps) {
   const [theme, setTheme] = useState('')
-  const [aspectRatio, setAspectRatio] = useState<AspectRatio>('9:16')
-  const [sceneCount, setSceneCount] = useState(5)
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
@@ -40,7 +49,7 @@ export function CreateToolbar({ pending = false, onCreate }: CreateToolbarProps)
             value="9:16"
             checked={aspectRatio === '9:16'}
             aria-label="竖屏 9:16"
-            onChange={() => setAspectRatio('9:16')}
+            onChange={() => onAspectRatioChange('9:16')}
           />
           9:16
         </label>
@@ -51,7 +60,7 @@ export function CreateToolbar({ pending = false, onCreate }: CreateToolbarProps)
             value="16:9"
             checked={aspectRatio === '16:9'}
             aria-label="横屏 16:9"
-            onChange={() => setAspectRatio('16:9')}
+            onChange={() => onAspectRatioChange('16:9')}
           />
           16:9
         </label>
@@ -63,7 +72,7 @@ export function CreateToolbar({ pending = false, onCreate }: CreateToolbarProps)
           title="减少场景"
           aria-label="减少场景"
           disabled={pending || sceneCount <= 5}
-          onClick={() => setSceneCount(current => Math.max(5, current - 1))}
+          onClick={() => onSceneCountChange(Math.max(5, sceneCount - 1))}
         >
           <Minus size={16} aria-hidden="true" />
         </button>
@@ -73,7 +82,7 @@ export function CreateToolbar({ pending = false, onCreate }: CreateToolbarProps)
           title="增加场景"
           aria-label="增加场景"
           disabled={pending || sceneCount >= 10}
-          onClick={() => setSceneCount(current => Math.min(10, current + 1))}
+          onClick={() => onSceneCountChange(Math.min(10, sceneCount + 1))}
         >
           <Plus size={16} aria-hidden="true" />
         </button>
