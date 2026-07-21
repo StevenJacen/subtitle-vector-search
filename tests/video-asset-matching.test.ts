@@ -183,6 +183,15 @@ describe('video asset matching orchestration', () => {
         filters: { page: 2, hasNextPage: true }, providerTotal: 1_000,
       })),
     })],
+    ['exhausted first page', persistedRun({
+      runId: '99999999-9999-4999-8999-999999999999',
+      inputKind: 'theme',
+      theme: 'hope',
+      queries: plan.queries.map(query => ({
+        ...query, status: 'completed' as const,
+        filters: { page: 1, hasNextPage: false }, providerTotal: 8,
+      })),
+    })],
     ['non-theme input', { ...rootRun('99999999-9999-4999-8999-999999999999'), inputKind: 'text' }],
   ])('rejects %s as a workbench page root', async (_name, sourceRun) => {
     const sourceRunId = '99999999-9999-4999-8999-999999999999'

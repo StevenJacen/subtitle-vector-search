@@ -562,6 +562,7 @@ function isExplicitRootRun(run: PersistedVideoAssetRun, theme?: string): boolean
     && run.inputKind === 'theme'
     && run.theme === theme
     && run.queries.length === LANE_DEFINITIONS.length
+    && queryAuditHasNextPage(run.queries, 1)
     && LANE_DEFINITIONS.every(lane => run.queries.some(query => (
       query.kind === lane.kind
       && query.filters.page === 1

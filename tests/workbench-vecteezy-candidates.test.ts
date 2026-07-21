@@ -86,6 +86,7 @@ describe('local Vecteezy candidate adapter', () => {
     'https://localhost/preview.mp4',
     'https://127.0.0.1/preview.mp4',
     'https://user:secret@media.vecteezy.com/preview.mp4',
+    'https://media.vecteezy.com:8443/preview.mp4',
   ])('rejects unsafe default preview URL %s', url => {
     const registry = new PreviewRegistry()
     expect(() => registry.register(url)).toThrowError(expect.objectContaining({ code: 'preview_url_forbidden' }))
