@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SceneCandidateState } from '../src/workbench/candidate-pool.js'
-import type {
-  WorkbenchFormalReservation,
-  WorkbenchDownloadReceipt,
-  WorkbenchManifest,
-  WorkbenchSelection,
-  WorkbenchSource,
+import {
+  nextWorkbenchStage,
+  type WorkbenchDownloadReceipt,
+  type WorkbenchFormalReservation,
+  type WorkbenchManifest,
+  type WorkbenchSelection,
+  type WorkbenchSource,
 } from '../src/workbench/artifacts-v2.js'
 import { FormalDownloadBudget, VecteezyDownloadError } from '../src/vecteezy-download.js'
 import {
@@ -63,22 +64,61 @@ function downloadInfo(resourceId: number, sourceSizeBytes = 1 * MiB) {
 }
 
 function manifestFor(inputScenes: readonly ConfirmedScene[]): WorkbenchManifest {
+  const cues = inputScenes.map((_, index) => {
+    const startMs = index * 3_000
+    const endMs = startMs + 3_000
+    const stamp = (milliseconds: number) => `00:00:${String(milliseconds / 1_000).padStart(2, '0')}.000`
+    return {
+      trackId: 7,
+      cueIndex: 30 + index,
+      startMs,
+      endMs,
+      text: `Exact cue ${index + 1}.`,
+      timestamp: `${stamp(startMs)} --> ${stamp(endMs)}`,
+    }
+  })
   return {
+    version: 2,
     taskId: TASK_ID,
+    renderId: '40000000-0000-4000-8000-000000000001',
+    requestDigest: 'b'.repeat(64),
+    theme: 'Resumable download test',
+    aspectRatio: '16:9',
+    width: 1920,
+    height: 1080,
     sceneCount: inputScenes.length,
-    scenes: inputScenes.map(value => ({
+    passage: {
+      movie: { id: 9, title: 'Example Film', releaseYear: 1994 },
+      trackId: 7,
+      startCueIndex: 30,
+      endCueIndex: 29 + inputScenes.length,
+      totalDurationMs: inputScenes.length * 3_000,
+      cues,
+    },
+    scenes: inputScenes.map((value, index) => ({
       index: value.index,
+      cueIndex: cues[index].cueIndex,
+      durationMs: 3_000,
+      captionEn: cues[index].text,
+      plan: {
+        captionZh: `\u53f0\u8bcd${index + 1}`,
+        visualConcept: `person walking through an open landscape ${index + 1}`,
+      },
       selected: value.selected,
       confirmed: value.confirmed,
     })),
     formalReservations: [],
     sources: [],
     stage: 'preflight',
-  } as unknown as WorkbenchManifest
+    createdAt: '2026-07-21T00:00:00.000Z',
+    updatedAt: '2026-07-21T00:00:00.000Z',
+  }
 }
 
 function artifactStore(initial: WorkbenchManifest) {
   let current = structuredClone(initial)
+  let failedUpdate: { attempt: number; error: Error } | undefined
+  let updateAttempt = 0
   const events: string[] = []
   const store: WorkbenchArtifactStore = {
     readTask: vi.fn(async taskId => {
@@ -87,13 +127,27 @@ function artifactStore(initial: WorkbenchManifest) {
     }),
     updateTask: vi.fn(async (taskId, updater) => {
       expect(taskId).toBe(TASK_ID)
-      current = await updater(structuredClone(current))
+      const candidate = await updater(structuredClone(current))
+      updateAttempt += 1
+      if (failedUpdate?.attempt === updateAttempt) {
+        const error = failedUpdate.error
+        failedUpdate = undefined
+        throw error
+      }
+      current = candidate
       events.push('persist')
       return structuredClone(current)
     }),
     verifyReceipt: vi.fn(async () => false),
   }
-  return { store, events, current: () => current }
+  return {
+    store,
+    events,
+    current: () => current,
+    failUpdateAt: (attempt: number, error: Error) => {
+      failedUpdate = { attempt, error }
+    },
+  }
 }
 
 function downloadClient(events: string[] = []) {
@@ -202,6 +256,45 @@ describe('workbench formal downloads', () => {
     expect(client.requestDownloadWithInfo).toHaveBeenCalledTimes(1)
     expect(artifacts.current().formalReservations[0]).toMatchObject({ status: 'uncertain' })
   })
+
+  it.each(['wait', 'transfer', 'receipt-persist'] as const)(
+    'fails %s errors as durable uncertainty without another formal call',
+    async failurePoint => {
+      const inputScenes = scenes(5)
+      const artifacts = artifactStore(manifestFor(inputScenes))
+      const client = downloadClient()
+      const privateMessage = `private signed provider detail at ${failurePoint}`
+      if (failurePoint === 'wait') client.waitForDownload.mockRejectedValueOnce(new Error(privateMessage))
+      if (failurePoint === 'transfer') client.transferSignedUrl.mockRejectedValueOnce(new Error(privateMessage))
+      if (failurePoint === 'receipt-persist') artifacts.failUpdateAt(2, new Error(privateMessage))
+
+      const run = () => downloadConfirmedScenes({
+        taskId: TASK_ID,
+        scenes: inputScenes,
+        budget: new FormalDownloadBudget(5),
+        artifacts: artifacts.store,
+        client,
+      })
+
+      const firstError = await run().catch(error => error)
+      expect(firstError).toMatchObject({ code: 'formal_call_uncertain', message: 'formal call uncertain' })
+      expect(String(firstError)).not.toContain(privateMessage)
+      expect(artifacts.current()).toMatchObject({
+        stage: 'failed',
+        failure: {
+          code: 'formal_call_uncertain',
+          message: 'Formal download outcome is uncertain',
+          retryable: false,
+        },
+      })
+      expect(artifacts.current().formalReservations[0]).toMatchObject({ status: 'uncertain' })
+      expect(JSON.stringify(artifacts.current())).not.toContain(privateMessage)
+      expect(nextWorkbenchStage(artifacts.current(), { hashes: {} })).toBe('failed')
+
+      await expect(run()).rejects.toMatchObject({ code: 'formal_call_uncertain' })
+      expect(client.requestDownloadWithInfo).toHaveBeenCalledTimes(1)
+    },
+  )
 
   it('persists each reservation before exactly one formal call per scene', async () => {
     const inputScenes = scenes(5)

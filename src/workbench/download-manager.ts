@@ -184,29 +184,28 @@ export async function downloadConfirmedScenes(input: {
     let request: FormalDownloadRequest
     try {
       request = await input.client.requestDownloadWithInfo(result.info, input.budget, reservationId)
+      const ready = await input.client.waitForDownload(request)
+      const destination = `video-runs/${input.taskId}/sources/scene-${result.sceneIndex}.mp4`
+      const completed = await input.client.transferSignedUrl(ready as DownloadReady, destination)
+      const receipt: WorkbenchDownloadReceipt = {
+        taskId: input.taskId,
+        sceneIndex: result.sceneIndex,
+        reservationId,
+        artifactKey: completed.artifactKey,
+        sha256: completed.sourceSha256,
+        sizeBytes: completed.sourceSizeBytes,
+      }
+      await input.artifacts.updateTask(input.taskId, current => ({
+        ...current,
+        formalReservations: current.formalReservations.map(value => value.reservationId === reservationId
+          ? { ...value, status: 'completed', receipt }
+          : value),
+      }))
+      downloaded.set(result.sceneIndex, verifiedFromDownload(result, reservationId, completed))
     } catch {
-      await markUncertain(input.artifacts, input.taskId, reservationId)
+      await markUncertain(input.artifacts, input.taskId, reservationId).catch(() => undefined)
       throw new WorkbenchDownloadError('formal_call_uncertain')
     }
-
-    const ready = await input.client.waitForDownload(request)
-    const destination = `video-runs/${input.taskId}/sources/scene-${result.sceneIndex}.mp4`
-    const completed = await input.client.transferSignedUrl(ready as DownloadReady, destination)
-    const receipt: WorkbenchDownloadReceipt = {
-      taskId: input.taskId,
-      sceneIndex: result.sceneIndex,
-      reservationId,
-      artifactKey: completed.artifactKey,
-      sha256: completed.sourceSha256,
-      sizeBytes: completed.sourceSizeBytes,
-    }
-    await input.artifacts.updateTask(input.taskId, current => ({
-      ...current,
-      formalReservations: current.formalReservations.map(value => value.reservationId === reservationId
-        ? { ...value, status: 'completed', receipt }
-        : value),
-    }))
-    downloaded.set(result.sceneIndex, verifiedFromDownload(result, reservationId, completed))
   }
 
   return input.scenes.map(scene => {
@@ -279,9 +278,11 @@ async function markUncertain(
 ): Promise<void> {
   await artifacts.updateTask(taskId, current => ({
     ...current,
-    formalReservations: current.formalReservations.map(value => value.reservationId === reservationId
-      ? { ...value, status: 'uncertain' }
-      : value),
+    formalReservations: current.formalReservations.map(value => {
+      if (value.reservationId !== reservationId) return value
+      const { receipt: _receipt, ...reservation } = value
+      return { ...reservation, status: 'uncertain' }
+    }),
     stage: 'failed',
     failure: {
       code: 'formal_call_uncertain',
