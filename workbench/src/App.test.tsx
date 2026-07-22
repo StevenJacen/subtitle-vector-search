@@ -195,6 +195,44 @@ describe('App', () => {
     expect(screen.getByRole('tab', { name: '视频制作' })).toHaveAttribute('aria-selected', 'true')
   })
 
+  it('preserves the subtitle query and results across view switches', async () => {
+    const user = userEvent.setup()
+    const fixture = apiFixture([])
+    vi.mocked(fixture.api.searchSubtitles).mockResolvedValue({
+      originalQuery: 'hope',
+      normalizedQuery: 'hope',
+      warning: null,
+      results: [{
+        similarity: 0.9,
+        rrfScore: 0.05,
+        semanticRank: 1,
+        fullTextRank: 1,
+        movie: { id: 1, title: 'The Shawshank Redemption', releaseYear: 1994 },
+        trackId: 7,
+        chunkIndex: 4,
+        startMs: 120_000,
+        endMs: 123_000,
+        timestamp: '00:02:00,000 --> 00:02:03,000',
+        text: 'Hope survives every wall.',
+        cues: [{ index: 40, startMs: 120_000, endMs: 123_000, text: 'Hope survives every wall.' }],
+      }],
+    })
+    render(<App api={fixture.api} />)
+
+    await user.click(screen.getByRole('tab', { name: '字幕库' }))
+    await user.type(screen.getByRole('searchbox', { name: '搜索台词' }), 'hope')
+    await user.click(screen.getByRole('button', { name: '搜索台词' }))
+    expect(await screen.findByText('Hope survives every wall.')).toBeVisible()
+
+    await user.click(screen.getByRole('tab', { name: '视频制作' }))
+    await user.click(screen.getByRole('tab', { name: '字幕库' }))
+
+    expect(screen.getByRole('searchbox', { name: '搜索台词' })).toHaveValue('hope')
+    expect(screen.getByText('Hope survives every wall.')).toBeVisible()
+    expect(fixture.api.searchSubtitles).toHaveBeenCalledOnce()
+    expect(fixture.api.subtitleLibrary).toHaveBeenCalledOnce()
+  })
+
   it('keeps a searched result visible while another production command is pending', async () => {
     const user = userEvent.setup()
     const fixture = apiFixture([task()])

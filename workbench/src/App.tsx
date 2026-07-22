@@ -183,7 +183,7 @@ export function App({ api = browserApi, initialTask }: AppProps) {
         {view === 'production' && <TaskRail tasks={tasks} selectedTaskId={currentTask?.taskId} onOpen={openTask} />}
         <main className="workspace">
           {error !== null && <div className="operation-error" role="alert"><AlertCircle size={16} aria-hidden="true" />{error}</div>}
-          {view === 'production' ? (
+          {view === 'production' && (
             <section id="production-view" role="tabpanel" aria-labelledby="production-tab">
               <CreateToolbar
                 aspectRatio={aspectRatio}
@@ -239,11 +239,10 @@ export function App({ api = browserApi, initialTask }: AppProps) {
                 </>
               )}
             </section>
-          ) : (
-            <section id="library-view" role="tabpanel" aria-labelledby="library-tab">
-              <SubtitleLibrary api={api} busy={pending !== null} onCreate={createFromSubtitle} />
-            </section>
           )}
+          <section id="library-view" role="tabpanel" aria-labelledby="library-tab" hidden={view !== 'library'}>
+            <SubtitleLibrary api={api} busy={pending !== null} onCreate={createFromSubtitle} />
+          </section>
         </main>
       </div>
     </div>
