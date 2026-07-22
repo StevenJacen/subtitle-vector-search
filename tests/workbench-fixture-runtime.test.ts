@@ -258,9 +258,12 @@ describe('subtitle fixture HTTP runtime', () => {
       sourceAnchor: { trackId: 4_101, firstCueIndex: 1_001, lastCueIndex: 1_001 },
     })
 
-    expect(unknown.status).not.toBe(201)
-    expect(belowRange.status).not.toBe(201)
-    expect(aboveRange.status).not.toBe(201)
+    for (const response of [unknown, belowRange, aboveRange]) {
+      expect(response.status).toBe(404)
+      expect(await response.json()).toEqual({
+        error: { code: 'source_anchor_not_found', message: 'Subtitle source anchor not found' },
+      })
+    }
     expect(await fetch(`${origin}/api/tasks`).then(value => value.json())).toEqual({ tasks: [] })
   })
 

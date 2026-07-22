@@ -360,6 +360,34 @@ describe('workbench HTTP security boundary', () => {
       error: { code: 'selection_required', message: 'Scene selection is required' },
     })
   })
+
+  it('maps missing subtitle source anchors to a stable sanitized 404', async () => {
+    const taskService = fakeTaskService()
+    taskService.create = vi.fn(async () => {
+      throw new WorkbenchTaskError(
+        'source_anchor_not_found',
+        'C:\\private\\subtitle-track.json?token=secret',
+        false,
+      )
+    })
+    const { origin } = await start({ taskService })
+
+    const response = await fetch(`${origin}/api/tasks`, {
+      method: 'POST',
+      headers: mutationHeaders(origin),
+      body: JSON.stringify({
+        theme: 'hope',
+        aspectRatio: '16:9',
+        sceneCount: 5,
+        sourceAnchor: { trackId: 4_101, firstCueIndex: 812, lastCueIndex: 814 },
+      }),
+    })
+
+    expect(response.status).toBe(404)
+    expect(await response.json()).toEqual({
+      error: { code: 'source_anchor_not_found', message: 'Subtitle source anchor not found' },
+    })
+  })
 })
 
 describe('subtitle library workbench API', () => {

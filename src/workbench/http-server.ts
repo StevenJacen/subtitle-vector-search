@@ -843,6 +843,9 @@ function controlledSubtitleSyncError(message: string): { status: number; code: s
 }
 
 function controlledTaskError(code: string): { status: number; code: string; message: string } | null {
+  if (code === 'source_anchor_not_found') {
+    return { status: 404, code, message: 'Subtitle source anchor not found' }
+  }
   if (code === 'selection_required') {
     return { status: 409, code, message: 'Scene selection is required' }
   }
