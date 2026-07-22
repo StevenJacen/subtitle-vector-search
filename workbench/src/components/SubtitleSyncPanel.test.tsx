@@ -111,17 +111,61 @@ describe('SubtitleSyncPanel', () => {
     expect(await screen.findByText('Stopped after current movie')).toBeVisible()
   })
 
-  it('closes with Escape and keeps the dialog controls keyboard reachable', async () => {
+  it('does not let a delayed initial snapshot overwrite a newer SSE snapshot', async () => {
+    let resolveInitial: ((value: SubtitleSyncSnapshot) => void) | undefined
+    const { api, emit } = apiFixture()
+    api.subtitleSync = vi.fn(() => new Promise<SubtitleSyncSnapshot>(resolve => { resolveInitial = resolve }))
+    render(<SubtitleSyncPanel api={api} open onClose={vi.fn()} />)
+
+    const running = snapshot({
+      jobId: 'sync-live',
+      mode: 'automatic',
+      status: 'running',
+      attempted: 3,
+      succeeded: 2,
+      message: 'Saving track',
+      updatedAt: '2026-07-21T00:01:00.000Z',
+    })
+    emit(running)
+    expect(await screen.findByText('已尝试 3')).toBeVisible()
+
+    resolveInitial?.(snapshot())
+    await waitFor(() => expect(api.subtitleSync).toHaveBeenCalledOnce())
+    expect(screen.getByText('已有同步任务正在运行')).toBeVisible()
+    expect(screen.getByRole('button', { name: '停止同步' })).toBeEnabled()
+  })
+
+  it('does not let a delayed initial snapshot overwrite a start command result', async () => {
+    const user = userEvent.setup()
+    let resolveInitial: ((value: SubtitleSyncSnapshot) => void) | undefined
+    const { api } = apiFixture()
+    api.subtitleSync = vi.fn(() => new Promise<SubtitleSyncSnapshot>(resolve => { resolveInitial = resolve }))
+    render(<SubtitleSyncPanel api={api} open onClose={vi.fn()} />)
+
+    await user.click(screen.getByRole('button', { name: '继续' }))
+    await user.click(screen.getByRole('button', { name: '开始自动同步' }))
+    expect(await screen.findByText('已有同步任务正在运行')).toBeVisible()
+
+    resolveInitial?.(snapshot())
+    await waitFor(() => expect(api.startSubtitleSync).toHaveBeenCalledOnce())
+    expect(screen.getByRole('button', { name: '停止同步' })).toBeEnabled()
+  })
+
+  it('focuses and contains keyboard navigation while Escape closes the dialog', async () => {
     const user = userEvent.setup()
     const onClose = vi.fn()
     const { api } = apiFixture()
     render(<SubtitleSyncPanel api={api} open onClose={onClose} />)
 
-    const dialog = await screen.findByRole('dialog')
-    dialog.focus()
+    await screen.findByRole('dialog')
+    const close = screen.getByRole('button', { name: '关闭同步面板' })
+    const continueButton = screen.getByRole('button', { name: '继续' })
+    expect(close).toHaveFocus()
+    await user.keyboard('{Shift>}{Tab}{/Shift}')
+    expect(continueButton).toHaveFocus()
+    await user.tab()
+    expect(close).toHaveFocus()
     await user.keyboard('{Escape}')
     expect(onClose).toHaveBeenCalledOnce()
-    await user.tab()
-    expect(screen.getByRole('button', { name: '关闭同步面板' })).toHaveFocus()
   })
 })

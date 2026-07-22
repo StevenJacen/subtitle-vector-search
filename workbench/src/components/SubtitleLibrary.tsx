@@ -13,10 +13,11 @@ type SubtitleLibraryApi = Pick<WorkbenchApi,
 
 interface SubtitleLibraryProps {
   api: SubtitleLibraryApi
+  busy?: boolean
   onCreate(result: SubtitleSearchResult): Promise<void>
 }
 
-export function SubtitleLibrary({ api, onCreate }: SubtitleLibraryProps) {
+export function SubtitleLibrary({ api, busy = false, onCreate }: SubtitleLibraryProps) {
   const [summary, setSummary] = useState<SubtitleLibrarySummary>()
   const [summaryState, setSummaryState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [query, setQuery] = useState('')
@@ -104,6 +105,7 @@ export function SubtitleLibrary({ api, onCreate }: SubtitleLibraryProps) {
 
       {searchState === 'loading' && <p className="subtitle-search-status" role="status">正在搜索台词库</p>}
       {searchState === 'error' && <p className="operation-error" role="alert">台词搜索暂不可用</p>}
+      {busy && <p className="subtitle-search-status" role="status">当前操作完成后可使用台词制作</p>}
       {response?.warning === 'query_normalization_failed' && (
         <p className="subtitle-warning" role="status">查询转换不可用，已使用原始查询</p>
       )}
@@ -130,7 +132,7 @@ export function SubtitleLibrary({ api, onCreate }: SubtitleLibraryProps) {
               <button
                 className="button button--secondary subtitle-result__create"
                 type="button"
-                disabled={creatingKey !== null || result.cues.length === 0}
+                disabled={busy || creatingKey !== null || result.cues.length === 0}
                 onClick={() => void create(result)}
               >
                 <Film size={16} aria-hidden="true" />用此台词制作

@@ -125,4 +125,26 @@ describe('SubtitleLibrary', () => {
 
     await waitFor(() => expect(onCreate).toHaveBeenCalledWith(searchResponse().results[0]))
   })
+
+  it('keeps keyboard focus inside sync and restores it to the trigger on close', async () => {
+    const user = userEvent.setup()
+    const api = apiFixture()
+    render(<SubtitleLibrary api={api} onCreate={vi.fn(async () => undefined)} />)
+
+    const trigger = screen.getByRole('button', { name: '同步新电影' })
+    await user.click(trigger)
+
+    const close = await screen.findByRole('button', { name: '关闭同步面板' })
+    const continueButton = screen.getByRole('button', { name: '继续' })
+    expect(close).toHaveFocus()
+
+    await user.keyboard('{Shift>}{Tab}{/Shift}')
+    expect(continueButton).toHaveFocus()
+    await user.tab()
+    expect(close).toHaveFocus()
+
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog', { name: '同步新电影' })).not.toBeInTheDocument()
+    expect(trigger).toHaveFocus()
+  })
 })

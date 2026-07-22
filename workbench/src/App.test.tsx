@@ -195,6 +195,49 @@ describe('App', () => {
     expect(screen.getByRole('tab', { name: '视频制作' })).toHaveAttribute('aria-selected', 'true')
   })
 
+  it('keeps a searched result visible while another production command is pending', async () => {
+    const user = userEvent.setup()
+    const fixture = apiFixture([task()])
+    let resolveLoadMore: ((value: WorkbenchTask) => void) | undefined
+    vi.mocked(fixture.api.loadMore).mockImplementationOnce(() => new Promise(resolve => { resolveLoadMore = resolve }))
+    vi.mocked(fixture.api.searchSubtitles).mockResolvedValue({
+      originalQuery: 'hope',
+      normalizedQuery: 'hope',
+      warning: null,
+      results: [{
+        similarity: 0.9,
+        rrfScore: 0.05,
+        semanticRank: 1,
+        fullTextRank: 1,
+        movie: { id: 1, title: 'The Shawshank Redemption', releaseYear: 1994 },
+        trackId: 7,
+        chunkIndex: 4,
+        startMs: 120_000,
+        endMs: 132_000,
+        timestamp: '00:02:00,000 --> 00:02:12,000',
+        text: 'Hope is a good thing.',
+        cues: [{ index: 40, startMs: 120_000, endMs: 123_000, text: 'Hope is a good thing.' }],
+      }],
+    })
+    render(<App api={fixture.api} />)
+
+    await screen.findByTestId('candidate-grid-0')
+    await user.click(screen.getAllByRole('button', { name: '加载更多候选' })[0])
+    await user.click(screen.getByRole('tab', { name: '字幕库' }))
+    await user.type(screen.getByRole('searchbox', { name: '搜索台词' }), 'hope')
+    await user.click(screen.getByRole('button', { name: '搜索台词' }))
+
+    const createFromResult = await screen.findByRole('button', { name: '用此台词制作' })
+    expect(createFromResult).toBeDisabled()
+    expect(screen.getByText('当前操作完成后可使用台词制作')).toBeVisible()
+    expect(screen.getByRole('tab', { name: '字幕库' })).toHaveAttribute('aria-selected', 'true')
+    expect(fixture.api.createTask).not.toHaveBeenCalled()
+
+    resolveLoadMore?.(task())
+    await waitFor(() => expect(createFromResult).toBeEnabled())
+    expect(screen.getByText('Hope is a good thing.')).toBeVisible()
+  })
+
   it('starts as the compact creation tool with bounded defaults and aspect segments', async () => {
     const { api } = apiFixture([])
     render(<App api={api} />)

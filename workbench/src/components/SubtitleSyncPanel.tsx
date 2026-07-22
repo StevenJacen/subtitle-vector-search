@@ -1,5 +1,5 @@
 import { RefreshCw, Square, X } from 'lucide-react'
-import { useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 import type { SubtitleSyncSnapshot, WorkbenchApi } from '../types.js'
 
 type SubtitleSyncApi = Pick<WorkbenchApi, 'subtitleSync' | 'startSubtitleSync' | 'stopSubtitleSync' | 'subscribeSubtitleSync'>
@@ -19,25 +19,36 @@ export function SubtitleSyncPanel({ api, open, onClose }: SubtitleSyncPanelProps
   const [imdbId, setImdbId] = useState('')
   const [pending, setPending] = useState<'start' | 'stop' | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const panelRef = useRef<HTMLElement>(null)
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
+  const snapshotVersion = useRef(0)
+  const applySnapshot = useCallback((value: SubtitleSyncSnapshot) => {
+    snapshotVersion.current += 1
+    setSnapshot(value)
+  }, [])
 
   useEffect(() => {
     if (!open) return undefined
     let active = true
+    const initialVersion = snapshotVersion.current
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
     setConfirmAutomatic(false)
     setError(null)
     void api.subtitleSync().then(value => {
-      if (active) setSnapshot(value)
+      if (active && snapshotVersion.current === initialVersion) setSnapshot(value)
     }).catch(() => {
       if (active) setError('无法读取同步状态')
     })
     const unsubscribe = api.subscribeSubtitleSync(value => {
-      if (active) setSnapshot(value)
+      if (active) applySnapshot(value)
     })
+    closeButtonRef.current?.focus()
     return () => {
       active = false
       unsubscribe()
+      previousFocus?.focus()
     }
-  }, [api, open])
+  }, [api, applySnapshot, open])
 
   if (!open) return null
 
@@ -46,7 +57,7 @@ export function SubtitleSyncPanel({ api, open, onClose }: SubtitleSyncPanelProps
     setPending('start')
     setError(null)
     try {
-      setSnapshot(await api.startSubtitleSync({ mode: 'automatic' }))
+      applySnapshot(await api.startSubtitleSync({ mode: 'automatic' }))
     } catch {
       setError('无法开始同步')
     } finally {
@@ -71,7 +82,7 @@ export function SubtitleSyncPanel({ api, open, onClose }: SubtitleSyncPanelProps
     setPending('start')
     setError(null)
     try {
-      setSnapshot(await api.startSubtitleSync({
+      applySnapshot(await api.startSubtitleSync({
         mode: 'manual',
         movie: { title: title.trim(), releaseYear: parsedYear, imdbId: imdbId.trim() },
       }))
@@ -85,7 +96,7 @@ export function SubtitleSyncPanel({ api, open, onClose }: SubtitleSyncPanelProps
     setPending('stop')
     setError(null)
     try {
-      setSnapshot(await api.stopSubtitleSync())
+      applySnapshot(await api.stopSubtitleSync())
     } catch {
       setError('无法停止同步')
     } finally {
@@ -96,19 +107,20 @@ export function SubtitleSyncPanel({ api, open, onClose }: SubtitleSyncPanelProps
   return (
     <div className="sync-overlay" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
       <section
+        ref={panelRef}
         aria-labelledby="subtitle-sync-title"
         aria-modal="true"
         className="sync-panel"
         role="dialog"
         tabIndex={-1}
-        onKeyDown={event => { if (event.key === 'Escape') onClose() }}
+        onKeyDown={event => handleDialogKeyDown(event, panelRef.current, onClose)}
       >
         <header className="sync-panel__header">
           <div>
             <h2 id="subtitle-sync-title">同步新电影</h2>
             {snapshot !== undefined && <span>{syncStatusLabel(snapshot.status)}</span>}
           </div>
-          <button className="icon-button" type="button" aria-label="关闭同步面板" title="关闭同步面板" onClick={onClose}>
+          <button ref={closeButtonRef} className="icon-button" type="button" aria-label="关闭同步面板" title="关闭同步面板" onClick={onClose}>
             <X size={17} aria-hidden="true" />
           </button>
         </header>
@@ -162,6 +174,42 @@ export function SubtitleSyncPanel({ api, open, onClose }: SubtitleSyncPanelProps
       </section>
     </div>
   )
+}
+
+function handleDialogKeyDown(
+  event: KeyboardEvent<HTMLElement>,
+  panel: HTMLElement | null,
+  onClose: () => void,
+): void {
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    onClose()
+    return
+  }
+  if (event.key !== 'Tab' || panel === null) return
+
+  const focusable = [...panel.querySelectorAll<HTMLElement>([
+    'button:not([disabled])',
+    'input:not([disabled])',
+    'select:not([disabled])',
+    'textarea:not([disabled])',
+    '[href]',
+    '[tabindex]:not([tabindex="-1"])',
+  ].join(','))].filter(element => element.getAttribute('aria-hidden') !== 'true')
+  const first = focusable[0]
+  const last = focusable.at(-1)
+  if (first === undefined || last === undefined) return
+
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  } else if (!panel.contains(document.activeElement)) {
+    event.preventDefault()
+    first.focus()
+  }
 }
 
 function SyncProgress({ snapshot }: { snapshot: SubtitleSyncSnapshot }) {

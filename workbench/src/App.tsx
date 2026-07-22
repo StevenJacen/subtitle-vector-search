@@ -77,14 +77,16 @@ export function App({ api = browserApi, initialTask }: AppProps) {
     })
   }, [api, currentTask?.taskId, updateTask])
 
-  const run = useCallback(async (key: string, operation: () => Promise<void>) => {
-    if (pending !== null) return
+  const run = useCallback(async (key: string, operation: () => Promise<void>): Promise<boolean> => {
+    if (pending !== null) return false
     setPending(key)
     setError(null)
     try {
       await operation()
+      return true
     } catch {
       setError('操作未完成，请重试')
+      return false
     } finally {
       setPending(null)
     }
@@ -100,8 +102,8 @@ export function App({ api = browserApi, initialTask }: AppProps) {
       setError('所选台词缺少可用的字幕锚点')
       return
     }
-    await create({ theme: result.text, aspectRatio, sceneCount, sourceAnchor })
-    setView('production')
+    const created = await create({ theme: result.text, aspectRatio, sceneCount, sourceAnchor })
+    if (created) setView('production')
   }
 
   const openTask = (taskId: string) => {
@@ -180,6 +182,7 @@ export function App({ api = browserApi, initialTask }: AppProps) {
       <div className={`workbench-layout${view === 'library' ? ' workbench-layout--library' : ''}`}>
         {view === 'production' && <TaskRail tasks={tasks} selectedTaskId={currentTask?.taskId} onOpen={openTask} />}
         <main className="workspace">
+          {error !== null && <div className="operation-error" role="alert"><AlertCircle size={16} aria-hidden="true" />{error}</div>}
           {view === 'production' ? (
             <section id="production-view" role="tabpanel" aria-labelledby="production-tab">
               <CreateToolbar
@@ -188,9 +191,8 @@ export function App({ api = browserApi, initialTask }: AppProps) {
                 pending={pending === 'create'}
                 onAspectRatioChange={setAspectRatio}
                 onSceneCountChange={setSceneCount}
-                onCreate={create}
+                onCreate={async input => { await create(input) }}
               />
-              {error !== null && <div className="operation-error" role="alert"><AlertCircle size={16} aria-hidden="true" />{error}</div>}
               {currentTask === undefined ? (
                 <div className="workspace-empty">输入主题后创建任务</div>
               ) : (
@@ -216,8 +218,8 @@ export function App({ api = browserApi, initialTask }: AppProps) {
                           key={scene.index}
                           scene={scene}
                           disabled={pending !== null}
-                          onLoadMore={() => loadMore(scene.index)}
-                          onSelection={(candidate, confirmed) => select(scene.index, candidate, confirmed)}
+                          onLoadMore={async () => { await loadMore(scene.index) }}
+                          onSelection={async (candidate, confirmed) => { await select(scene.index, candidate, confirmed) }}
                         />
                       ))}
                       <div className="production-action">
@@ -239,7 +241,7 @@ export function App({ api = browserApi, initialTask }: AppProps) {
             </section>
           ) : (
             <section id="library-view" role="tabpanel" aria-labelledby="library-tab">
-              <SubtitleLibrary api={api} onCreate={createFromSubtitle} />
+              <SubtitleLibrary api={api} busy={pending !== null} onCreate={createFromSubtitle} />
             </section>
           )}
         </main>

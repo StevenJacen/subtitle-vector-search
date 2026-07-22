@@ -40,3 +40,16 @@ Applied the requested `vercel:react-best-practices` review after implementation.
 ## Remaining Concern
 
 The two HTTP 500 responses observed during real-browser verification originate from the currently degraded local service configuration rather than this React task. Fixture-based component behavior, typechecking, and the production bundle are all verified. A configured local subtitle service is needed to perform live search and synchronization successfully.
+
+## Review Hardening
+
+- The synchronization dialog now moves focus inside on open, traps forward and reverse Tab navigation, handles Escape from normal trigger-driven use, and restores focus to the trigger on close.
+- Initial synchronization GET responses are discarded after any newer SSE or start/stop command update, preventing stale idle state from hiding a running job.
+- Shared workbench operations now report whether they actually ran. Exact-result creation stays in the subtitle library when another command is pending or creation fails, and the result action exposes the busy state.
+- Added four regression scenarios covering real-trigger focus restoration, both initial-snapshot races, and pending production work during exact-result creation.
+
+Verification after hardening:
+
+- Focused React suite: 4 files, 29 tests passed.
+- `npm run typecheck`: passed.
+- `npm run workbench:build`: passed.
