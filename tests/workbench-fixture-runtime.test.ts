@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   assertWorkbenchFixtureMode,
   createWorkbenchFixtureRuntime,
@@ -141,6 +141,9 @@ describe('subtitle fixture HTTP runtime', () => {
 
   beforeAll(async () => {
     root = await mkdtemp(join(tmpdir(), 'subtitle-workbench-fixture-'))
+  })
+
+  beforeEach(async () => {
     fixture = await createWorkbenchFixtureRuntime(root) as FixtureWithSubtitles
     server = createWorkbenchHttpServer({
       taskService: fixture.taskService,
@@ -155,8 +158,11 @@ describe('subtitle fixture HTTP runtime', () => {
     origin = (await listenWorkbenchServer(server, { port: 0 })).url
   }, 30_000)
 
-  afterAll(async () => {
+  afterEach(async () => {
     await new Promise<void>(resolve => server.close(() => resolve()))
+  })
+
+  afterAll(async () => {
     await rm(root, { recursive: true, force: true })
   })
 
@@ -203,7 +209,62 @@ describe('subtitle fixture HTTP runtime', () => {
     })
   })
 
-  it('delivers automatic progress and replays snapshots before reaching quota', async () => {
+  it('creates a bounded cue-zero passage through HTTP with canonical non-negative timestamps', async () => {
+    const response = await post('/api/tasks', {
+      theme: 'We will always have Paris.',
+      aspectRatio: '16:9',
+      sceneCount: 5,
+      sourceAnchor: { trackId: 4_301, firstCueIndex: 0, lastCueIndex: 0 },
+    })
+
+    expect(response.status).toBe(201)
+    const body = await response.json() as { task: Awaited<ReturnType<FixtureWithSubtitles['taskService']['get']>> }
+    expect(body.task.passage.movie).toEqual({ id: 3, title: 'Casablanca', releaseYear: 1942 })
+    expect(body.task.passage.trackId).toBe(4_301)
+    expect(body.task.passage.cues).toHaveLength(5)
+    expect(body.task.passage.cues.map(cue => cue.cueIndex)).toEqual([0, 1, 2, 3, 4])
+    expect(body.task.passage.cues).toContainEqual(expect.objectContaining({ cueIndex: 0 }))
+    expect(body.task.passage.cues.every(cue => cue.trackId === 4_301
+      && cue.cueIndex >= 0 && cue.startMs >= 0 && cue.endMs > cue.startMs)).toBe(true)
+    expect(body.task.passage.cues.map(cue => cue.timestamp)).toEqual([
+      '00:11:24.000 --> 00:11:26.800',
+      '00:11:26.800 --> 00:11:29.600',
+      '00:11:29.600 --> 00:11:32.400',
+      '00:11:32.400 --> 00:11:35.200',
+      '00:11:35.200 --> 00:11:38.000',
+    ])
+    expect(body.task.passage.cues.every(cue => (
+      /^\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3}$/.test(cue.timestamp)
+    ))).toBe(true)
+  })
+
+  it('rejects unknown and out-of-range fixture anchors through HTTP', async () => {
+    const unknown = await post('/api/tasks', {
+      theme: 'Unknown fixture track',
+      aspectRatio: '9:16',
+      sceneCount: 5,
+      sourceAnchor: { trackId: 9_999, firstCueIndex: 0, lastCueIndex: 0 },
+    })
+    const belowRange = await post('/api/tasks', {
+      theme: 'Below fixture track range',
+      aspectRatio: '9:16',
+      sceneCount: 5,
+      sourceAnchor: { trackId: 4_101, firstCueIndex: 799, lastCueIndex: 799 },
+    })
+    const aboveRange = await post('/api/tasks', {
+      theme: 'Above fixture track range',
+      aspectRatio: '9:16',
+      sceneCount: 5,
+      sourceAnchor: { trackId: 4_101, firstCueIndex: 1_001, lastCueIndex: 1_001 },
+    })
+
+    expect(unknown.status).not.toBe(201)
+    expect(belowRange.status).not.toBe(201)
+    expect(aboveRange.status).not.toBe(201)
+    expect(await fetch(`${origin}/api/tasks`).then(value => value.json())).toEqual({ tasks: [] })
+  })
+
+  it('replays a complete parsed SSE frame after Last-Event-ID before reaching quota', async () => {
     const started = await post('/api/subtitles/sync', { mode: 'automatic' })
     expect(started.status).toBe(202)
     expect(await started.json()).toMatchObject({ mode: 'automatic', status: 'running' })
@@ -215,18 +276,55 @@ describe('subtitle fixture HTTP runtime', () => {
       signal: controller.signal,
     })
     const reader = events.body!.getReader()
-    const replay = new TextDecoder().decode((await reader.read()).value)
-    controller.abort()
-
     expect(events.headers.get('content-type')).toContain('text/event-stream')
-    expect(replay).toContain('id: 2')
-    expect(replay).toContain('event: progress')
-    expect(replay).toContain('The Matrix')
+    try {
+      const replay = await readSseEvent(reader)
+      expect(replay.id).toBe(2)
+      expect(replay.event).toBe('progress')
+      expect(replay.data).toMatchObject({
+        sequence: 2,
+        snapshot: {
+          status: 'running', attempted: 1,
+          currentMovie: { imdbId: 'tt0133093', title: 'The Matrix', releaseYear: 1999 },
+        },
+      })
+    } finally {
+      await reader.cancel().catch(() => undefined)
+      reader.releaseLock()
+      controller.abort()
+    }
+
     await expect.poll(async () => (await snapshot()).status).toBe('quota_reached')
     expect(await snapshot()).toMatchObject({
       status: 'quota_reached', attempted: 2, succeeded: 1, failed: 0,
       message: 'Provider quota reached; rerun later',
     })
+  })
+
+  it('delivers a new synchronization event to an already-open SSE subscriber', async () => {
+    const events = await fetch(`${origin}/api/subtitles/sync/events`)
+    const reader = events.body!.getReader()
+    try {
+      const started = await post('/api/subtitles/sync', {
+        mode: 'manual',
+        movie: { imdbId: 'tt0133093', title: 'The Matrix', releaseYear: 1999 },
+      })
+      expect(started.status).toBe(202)
+      const live = await readSseEvent(reader)
+      expect(live).toMatchObject({
+        id: 1,
+        event: 'progress',
+        data: {
+          sequence: 1,
+          snapshot: { mode: 'manual', status: 'running', attempted: 0 },
+        },
+      })
+    } finally {
+      await reader.cancel().catch(() => undefined)
+      reader.releaseLock()
+    }
+
+    await expect.poll(async () => (await snapshot()).status).toBe('completed')
   })
 
   it('validates manual metadata and completes one deterministic import', async () => {
@@ -256,7 +354,10 @@ describe('subtitle fixture HTTP runtime', () => {
     expect(stopping.status).toBe(202)
     expect(await stopping.json()).toMatchObject({ status: 'running' })
     await expect.poll(async () => (await snapshot()).status).toBe('stopped')
-    expect(await snapshot()).toMatchObject({ status: 'stopped', message: 'Stopped by operator' })
+    expect(await snapshot()).toMatchObject({
+      status: 'stopped', attempted: 1, succeeded: 1, failed: 0,
+      message: 'Stopped by operator',
+    })
   })
 
   async function post(path: string, body: unknown): Promise<Response> {
@@ -279,3 +380,40 @@ describe('subtitle fixture HTTP runtime', () => {
     await expect.poll(async () => predicate(await snapshot())).toBe(true)
   }
 })
+
+interface ParsedSseEvent {
+  id: number
+  event: string
+  data: { sequence: number; snapshot: SubtitleSyncSnapshot }
+}
+
+async function readSseEvent(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<ParsedSseEvent> {
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const chunk = await reader.read()
+    if (chunk.done) throw new Error('SSE stream ended before a complete event frame')
+    buffer += decoder.decode(chunk.value, { stream: true })
+    let boundary = buffer.indexOf('\n\n')
+    while (boundary >= 0) {
+      const frame = buffer.slice(0, boundary)
+      buffer = buffer.slice(boundary + 2)
+      if (!frame.startsWith(':')) return parseSseEvent(frame)
+      boundary = buffer.indexOf('\n\n')
+    }
+  }
+}
+
+function parseSseEvent(frame: string): ParsedSseEvent {
+  const fields = new Map(frame.split('\n').map(line => {
+    const separator = line.indexOf(':')
+    return [line.slice(0, separator), line.slice(separator + 1).trimStart()]
+  }))
+  const id = Number(fields.get('id'))
+  const event = fields.get('event')
+  const data = fields.get('data')
+  if (!Number.isSafeInteger(id) || event === undefined || data === undefined) {
+    throw new Error('Invalid SSE event frame')
+  }
+  return { id, event, data: JSON.parse(data) as ParsedSseEvent['data'] }
+}

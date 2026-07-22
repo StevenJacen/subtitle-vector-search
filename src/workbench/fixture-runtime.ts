@@ -44,6 +44,15 @@ interface FixtureSubtitleLibraryService {
   summary(): Promise<SubtitleLibrarySummary>
 }
 
+interface FixtureSubtitleTrack {
+  trackId: number
+  movie: { id: number; title: string; releaseYear: number | null }
+  firstCueIndex: number
+  lastCueIndex: number
+  firstCueStartMs: number
+  cueDurationMs: number
+}
+
 const PRODUCTION_STAGES = [
   'preflight',
   'downloading',
@@ -103,10 +112,45 @@ const FIXTURE_SUBTITLE_RESULTS: HybridSubtitleSearchResult[] = [
     timestamp: '00:11:24.000 --> 00:11:32.400',
     text: 'We will always have Paris.',
     cues: [
-      { index: 301, startMs: 684_000, endMs: 686_800, text: 'We will always have Paris.' },
-      { index: 302, startMs: 686_800, endMs: 689_600, text: 'This is the beginning' },
-      { index: 303, startMs: 689_600, endMs: 692_400, text: 'of a beautiful friendship.' },
+      { index: 0, startMs: 684_000, endMs: 686_800, text: 'We will always have Paris.' },
+      { index: 1, startMs: 686_800, endMs: 689_600, text: 'This is the beginning' },
+      { index: 2, startMs: 689_600, endMs: 692_400, text: 'of a beautiful friendship.' },
     ],
+  },
+]
+
+const FIXTURE_SUBTITLE_TRACKS: FixtureSubtitleTrack[] = [
+  {
+    trackId: 4_101,
+    movie: { id: 1, title: 'The Shawshank Redemption', releaseYear: 1994 },
+    firstCueIndex: 800,
+    lastCueIndex: 1_000,
+    firstCueStartMs: 338_400,
+    cueDurationMs: 2_800,
+  },
+  {
+    trackId: 4_102,
+    movie: { id: 1, title: 'The Shawshank Redemption', releaseYear: 1994 },
+    firstCueIndex: 0,
+    lastCueIndex: 600,
+    firstCueStartMs: 0,
+    cueDurationMs: 2_800,
+  },
+  {
+    trackId: 4_201,
+    movie: { id: 2, title: 'Dead Poets Society', releaseYear: 1989 },
+    firstCueIndex: 200,
+    lastCueIndex: 400,
+    firstCueStartMs: 451_400,
+    cueDurationMs: 2_800,
+  },
+  {
+    trackId: 4_301,
+    movie: { id: 3, title: 'Casablanca', releaseYear: 1942 },
+    firstCueIndex: 0,
+    lastCueIndex: 500,
+    firstCueStartMs: 684_000,
+    cueDurationMs: 2_800,
   },
 ]
 
@@ -526,18 +570,25 @@ function fixturePassage(input: CreateTaskInput): WorkbenchTaskView['passage'] {
     }
   }
 
-  const source = FIXTURE_SUBTITLE_RESULTS.find(result => result.trackId === input.sourceAnchor?.trackId)
-  if (source === undefined) {
+  const track = FIXTURE_SUBTITLE_TRACKS.find(value => value.trackId === input.sourceAnchor?.trackId)
+  if (track === undefined
+    || input.sourceAnchor.firstCueIndex < track.firstCueIndex
+    || input.sourceAnchor.lastCueIndex > track.lastCueIndex
+    || track.lastCueIndex - track.firstCueIndex + 1 < input.sceneCount) {
     throw new WorkbenchTaskError('source_anchor_not_found', 'Fixture source anchor not found', false)
   }
   const midpoint = Math.floor((input.sourceAnchor.firstCueIndex + input.sourceAnchor.lastCueIndex) / 2)
-  const startCueIndex = midpoint - Math.floor(input.sceneCount / 2)
+  const latestStartCueIndex = track.lastCueIndex - input.sceneCount + 1
+  const startCueIndex = Math.max(
+    track.firstCueIndex,
+    Math.min(midpoint - Math.floor(input.sceneCount / 2), latestStartCueIndex),
+  )
   const cues = Array.from({ length: input.sceneCount }, (_, index) => (
-    fixtureAnchoredCue(source, startCueIndex + index)
+    fixtureAnchoredCue(track, startCueIndex + index)
   ))
   return {
-    movie: structuredClone(source.movie),
-    trackId: source.trackId,
+    movie: structuredClone(track.movie),
+    trackId: track.trackId,
     startCueIndex,
     endCueIndex: startCueIndex + input.sceneCount - 1,
     totalDurationMs: cues.reduce((sum, cue) => sum + cue.endMs - cue.startMs, 0),
@@ -545,14 +596,14 @@ function fixturePassage(input: CreateTaskInput): WorkbenchTaskView['passage'] {
   }
 }
 
-function fixtureAnchoredCue(source: HybridSubtitleSearchResult, cueIndex: number) {
-  const reference = source.cues[0]
-  const durationMs = reference.endMs - reference.startMs
-  const startMs = reference.startMs + (cueIndex - reference.index) * durationMs
-  const endMs = startMs + durationMs
-  const exact = source.cues.find(cue => cue.index === cueIndex)
+function fixtureAnchoredCue(track: FixtureSubtitleTrack, cueIndex: number) {
+  const startMs = track.firstCueStartMs + (cueIndex - track.firstCueIndex) * track.cueDurationMs
+  const endMs = startMs + track.cueDurationMs
+  const exact = FIXTURE_SUBTITLE_RESULTS
+    .find(result => result.trackId === track.trackId)
+    ?.cues.find(cue => cue.index === cueIndex)
   return {
-    trackId: source.trackId,
+    trackId: track.trackId,
     cueIndex,
     startMs,
     endMs,
