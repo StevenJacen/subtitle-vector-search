@@ -38,7 +38,6 @@ function setup(overrides: Partial<SubtitleSyncDependencies> = {}) {
     batchStatePath: 'batch-state.json',
     snapshotPath: 'snapshot.json',
     downloadsDir: 'downloads',
-    targetSuccessCount: 2,
   }
   return { controller: new SubtitleSyncController(options, dependencies), dependencies, snapshots, writes }
 }
@@ -164,7 +163,7 @@ describe('SubtitleSyncController', () => {
     expect(dependencies.importMovie).not.toHaveBeenCalled()
   })
 
-  it('uses an internal unbounded attempt count for automatic finite batches', async () => {
+  it('uses unbounded success and attempt counts so automatic work reaches quota or exhaustion', async () => {
     type BatchRunner = NonNullable<SubtitleSyncDependencies['runBatchImport']>
     const runBatchImport = vi.fn(async (
       _options?: Parameters<BatchRunner>[0],
@@ -179,7 +178,10 @@ describe('SubtitleSyncController', () => {
     await controller.start({ mode: 'automatic' })
     await settled(controller)
 
-    expect(runBatchImport).toHaveBeenCalledWith(expect.objectContaining({ maxAttempts: Number.MAX_SAFE_INTEGER }), expect.anything(), expect.anything())
+    expect(runBatchImport).toHaveBeenCalledWith(expect.objectContaining({
+      targetSuccessCount: Number.MAX_SAFE_INTEGER,
+      maxAttempts: Number.MAX_SAFE_INTEGER,
+    }), expect.anything(), expect.anything())
   })
 
   it('reloads only a valid sanitized snapshot', async () => {

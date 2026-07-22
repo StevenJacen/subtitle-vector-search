@@ -35,6 +35,7 @@ import { SubtitleLibraryClient } from './subtitle-library.js'
 import { SubtitleSyncController, type SubtitleSyncEventBus } from './subtitle-sync.js'
 import type { PassageSourceAnchor, SelectedPassage, SelectedPassageCue } from './passage-selection.js'
 import {
+  WorkbenchTaskError,
   WorkbenchTaskService,
   type CreateTaskInput,
   type WorkbenchTaskDependencies,
@@ -106,8 +107,9 @@ export async function requestSubtitlePassage(input: {
   sourceAnchor?: PassageSourceAnchor
   fetcher?: typeof fetch
 }): Promise<SelectedPassage> {
+  let response: Response
   try {
-    const response = await (input.fetcher ?? fetch)(`${input.supabaseUrl.replace(/\/$/, '')}/functions/v1/subtitle-passages`, {
+    response = await (input.fetcher ?? fetch)(`${input.supabaseUrl.replace(/\/$/, '')}/functions/v1/subtitle-passages`, {
       method: 'POST',
       headers: {
         apikey: input.publishableKey,
@@ -122,9 +124,24 @@ export async function requestSubtitlePassage(input: {
       redirect: 'error',
       signal: AbortSignal.timeout(30_000),
     })
-    if (!response.ok) throw new Error()
-    const text = await response.text()
+  } catch {
+    throw new Error('subtitle passage request failed')
+  }
+
+  let text: string
+  try {
+    text = await response.text()
     if (Buffer.byteLength(text) > 256 * 1024) throw new Error()
+  } catch {
+    throw new Error('subtitle passage request failed')
+  }
+  if (!response.ok) {
+    if (input.sourceAnchor !== undefined && response.status === 422 && noEligiblePassageEnvelope(text)) {
+      throw new WorkbenchTaskError('source_anchor_not_found', 'Subtitle source anchor not found', false)
+    }
+    throw new Error('subtitle passage request failed')
+  }
+  try {
     const envelope = exactObject(JSON.parse(text), ['passage'])
     return parseSelectedPassage(envelope.passage, input.sceneCount)
   } catch {
@@ -132,10 +149,20 @@ export async function requestSubtitlePassage(input: {
   }
 }
 
-export function createWorkbenchRuntime(
+function noEligiblePassageEnvelope(text: string): boolean {
+  try {
+    const envelope = exactObject(JSON.parse(text), ['error'])
+    const error = exactObject(envelope.error, ['code', 'message'])
+    return error.code === 'no_eligible_passage' && typeof error.message === 'string'
+  } catch {
+    return false
+  }
+}
+
+export async function createWorkbenchRuntime(
   configuration: WorkbenchServerConfiguration,
   fetcher: typeof fetch = fetch,
-): WorkbenchRuntime {
+): Promise<WorkbenchRuntime> {
   const artifactRoot = resolve(configuration.artifactRoot)
   const apiConfiguration = {
     supabaseUrl: configuration.supabaseUrl,
@@ -227,6 +254,13 @@ export function createWorkbenchRuntime(
     ).ephemeral.previewUrl,
   })
   const healthDependencies = productionHealthDependencies(configuration, artifactRoot, fetcher)
+  const subtitleSync = new SubtitleSyncController({
+    candidatesPath: resolve('data', 'classic-movie-candidates.json'),
+    batchStatePath: resolve('.batch-state', 'classic-import-state.json'),
+    snapshotPath: resolve('.batch-state', 'subtitle-sync-snapshot.json'),
+    downloadsDir: resolve('downloads', 'classics'),
+  })
+  await subtitleSync.reload()
   return {
     taskService,
     previews,
@@ -240,13 +274,7 @@ export function createWorkbenchRuntime(
       ollamaModel: configuration.ollamaModel,
       fetchFn: fetcher,
     }),
-    subtitleSync: new SubtitleSyncController({
-      candidatesPath: resolve('data', 'classic-movie-candidates.json'),
-      batchStatePath: resolve('.batch-state', 'classic-import-state.json'),
-      snapshotPath: resolve('.batch-state', 'subtitle-sync-snapshot.json'),
-      downloadsDir: resolve('downloads', 'classics'),
-      targetSuccessCount: 200,
-    }),
+    subtitleSync,
   }
 }
 
@@ -319,7 +347,7 @@ export async function runWorkbenchServer(
     const configuration = parseWorkbenchServerConfiguration(environment)
     port = configuration.port
     artifactRoot = configuration.artifactRoot
-    runtime = createWorkbenchRuntime(configuration)
+    runtime = await createWorkbenchRuntime(configuration)
   }
   await mkdir(resolve(artifactRoot), { recursive: true })
   const workbenchRoot = resolve('workbench')

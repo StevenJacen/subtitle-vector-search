@@ -34,7 +34,6 @@ export interface SubtitleSyncOptions {
   batchStatePath: string
   snapshotPath: string
   downloadsDir: string
-  targetSuccessCount: number
 }
 
 export interface SubtitleSyncDependencies extends Omit<BatchImportDependencies, 'output'> {
@@ -54,7 +53,6 @@ const defaultOptions: SubtitleSyncOptions = {
   batchStatePath: '.batch-state/classic-import-state.json',
   snapshotPath: '.batch-state/subtitle-sync-snapshot.json',
   downloadsDir: 'downloads/classics',
-  targetSuccessCount: 200,
 }
 
 const safeMessages = new Set([
@@ -215,7 +213,7 @@ export class SubtitleSyncController {
       candidatesPath: this.options.candidatesPath,
       statePath: this.options.batchStatePath,
       downloadsDir: this.options.downloadsDir,
-      targetSuccessCount: this.options.targetSuccessCount,
+      targetSuccessCount: Number.MAX_SAFE_INTEGER,
       maxAttempts: Number.MAX_SAFE_INTEGER,
       dryRun: false,
     }, { ...this.dependencies, output: () => {} }, {

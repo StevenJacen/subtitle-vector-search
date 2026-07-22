@@ -155,7 +155,7 @@ async function routeRequest(
     sendJson(response, 200, await subtitleLibrary(options).search(subtitleSearchInput(await readJson(request))))
     return
   }
-  if (path === '/api/subtitles/summary') {
+  if (path === '/api/subtitles/library') {
     requireMethod(method, 'GET')
     sendJson(response, 200, await subtitleLibrary(options).summary())
     return

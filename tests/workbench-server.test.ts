@@ -12,6 +12,7 @@ import {
 } from '../src/workbench/server.js'
 import * as workbenchServer from '../src/workbench/server.js'
 import { PreviewRegistry } from '../src/workbench/vecteezy-candidates.js'
+import { SubtitleSyncController } from '../src/workbench/subtitle-sync.js'
 
 const environment = {
   SUPABASE_URL: 'https://project.supabase.co',
@@ -75,11 +76,26 @@ describe('workbench server configuration', () => {
     })).rejects.toThrow('workbench fixture mode requires NODE_ENV=test')
   })
 
-  it('constructs the production subtitle library and sync controller without health downloads', () => {
-    const runtime = createWorkbenchRuntime(parseWorkbenchServerConfiguration(environment), vi.fn())
+  it('constructs the production subtitle library and sync controller without health downloads', async () => {
+    const runtime = await createWorkbenchRuntime(parseWorkbenchServerConfiguration(environment), vi.fn())
 
     expect(runtime.subtitleLibrary).toBeDefined()
     expect(runtime.subtitleSync).toBeDefined()
+  })
+
+  it('restores the persisted subtitle snapshot before returning the production runtime', async () => {
+    const reload = vi.spyOn(SubtitleSyncController.prototype, 'reload').mockResolvedValue({
+      jobId: 'job-0', mode: 'automatic', status: 'stopped', currentMovie: null,
+      attempted: 3, succeeded: 2, failed: 1, message: 'Stopped by operator',
+      startedAt: '2026-07-20T00:00:00.000Z', updatedAt: '2026-07-20T00:01:00.000Z',
+    })
+
+    try {
+      await createWorkbenchRuntime(parseWorkbenchServerConfiguration(environment), vi.fn())
+      expect(reload).toHaveBeenCalledOnce()
+    } finally {
+      reload.mockRestore()
+    }
   })
 })
 
@@ -185,6 +201,25 @@ describe('subtitle passage client', () => {
       sceneCount: 5,
       fetcher,
     })).rejects.toThrow('subtitle passage request failed')
+  })
+
+  it('maps an anchored 422 response to the controlled source-anchor error', async () => {
+    const fetcher = vi.fn(async () => Response.json({
+      error: { code: 'no_eligible_passage', message: 'no eligible subtitle passage' },
+    }, { status: 422 }))
+
+    await expect(requestSubtitlePassage({
+      supabaseUrl: environment.SUPABASE_URL,
+      publishableKey: environment.SUPABASE_PUBLISHABLE_KEY,
+      personalToken: environment.SUBTITLE_PERSONAL_TOKEN,
+      theme: 'hope',
+      sceneCount: 5,
+      sourceAnchor: { trackId: 12, firstCueIndex: 100, lastCueIndex: 100 },
+      fetcher,
+    })).rejects.toMatchObject({
+      code: 'source_anchor_not_found',
+      message: 'Subtitle source anchor not found',
+    })
   })
 })
 

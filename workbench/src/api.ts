@@ -137,7 +137,7 @@ export function createWorkbenchApi(options: WorkbenchApiOptions = {}): Workbench
       return mutate<SubtitleSearchResponse>('/api/subtitles/search', 'POST', input)
     },
     async subtitleLibrary() {
-      return request<SubtitleLibrarySummary>('/api/subtitles/summary')
+      return request<SubtitleLibrarySummary>('/api/subtitles/library')
     },
     async subtitleSync() {
       return request<SubtitleSyncSnapshot>('/api/subtitles/sync')

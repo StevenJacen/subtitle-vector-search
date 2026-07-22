@@ -94,7 +94,7 @@ describe('createWorkbenchApi', () => {
     const fetcher = vi.fn<typeof fetch>(async (path) => new Response(JSON.stringify(
       path === '/api/subtitles/search'
         ? { originalQuery: 'hope', normalizedQuery: 'hope', warning: null, results: [] }
-        : path === '/api/subtitles/summary'
+        : path === '/api/subtitles/library'
           ? { readyTracks: 12, readyMovies: 5 }
           : { jobId: null, mode: null, status: 'idle', currentMovie: null, attempted: 0, succeeded: 0, failed: 0, message: 'Idle', startedAt: null, updatedAt: '2026-07-21T00:00:00.000Z' },
     ), { status: 200, headers: { 'content-type': 'application/json' } }))
@@ -108,7 +108,7 @@ describe('createWorkbenchApi', () => {
 
     expect(fetcher.mock.calls.map(([path]) => path)).toEqual([
       '/api/subtitles/search',
-      '/api/subtitles/summary',
+      '/api/subtitles/library',
       '/api/subtitles/sync',
       '/api/subtitles/sync',
       '/api/subtitles/sync/stop',

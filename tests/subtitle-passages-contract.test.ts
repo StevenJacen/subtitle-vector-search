@@ -95,6 +95,49 @@ describe('subtitle passage response contract', () => {
     expect(passage.cues.some(cue => cue.cueIndex === 43)).toBe(true)
   })
 
+  it('shifts an exact window left when the anchor reaches the final cue', () => {
+    const select = (passageSelectionModule as typeof passageSelectionModule & {
+      selectAnchoredPassage?: (input: unknown) => ReturnType<typeof selectContinuousPassage>
+    }).selectAnchoredPassage
+    const cues: PassageCue[] = Array.from({ length: 5 }, (_, offset) => ({
+      trackId: 12,
+      cueIndex: 96 + offset,
+      startMs: offset * 3_000,
+      endMs: (offset + 1) * 3_000,
+      text: `Final dialogue ${offset}.`,
+    }))
+
+    const passage = select!({
+      sceneCount: 5,
+      sourceAnchor: { trackId: 12, firstCueIndex: 100, lastCueIndex: 100 },
+      movie: { id: 7, title: 'Exact Film', releaseYear: 1994 },
+      cues,
+    })
+
+    expect(passage.cues.map(cue => cue.cueIndex)).toEqual([96, 97, 98, 99, 100])
+    expect(passage.cues.at(-1)?.cueIndex).toBe(100)
+  })
+
+  it('rejects a partially stale anchor whose midpoint is beyond the final cue', () => {
+    const select = (passageSelectionModule as typeof passageSelectionModule & {
+      selectAnchoredPassage?: (input: unknown) => ReturnType<typeof selectContinuousPassage>
+    }).selectAnchoredPassage
+    const cues: PassageCue[] = Array.from({ length: 5 }, (_, offset) => ({
+      trackId: 12,
+      cueIndex: 96 + offset,
+      startMs: offset * 3_000,
+      endMs: (offset + 1) * 3_000,
+      text: `Final dialogue ${offset}.`,
+    }))
+
+    expect(() => select!({
+      sceneCount: 5,
+      sourceAnchor: { trackId: 12, firstCueIndex: 98, lastCueIndex: 110 },
+      movie: { id: 7, title: 'Exact Film', releaseYear: 1994 },
+      cues,
+    })).toThrow('no eligible subtitle passage')
+  })
+
   it('returns one canonical passage with exact cue text and no anchor diagnostics', () => {
     const anchors: PassageAnchor[] = [{
       similarity: 0.84,

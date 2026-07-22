@@ -167,7 +167,7 @@ describe('subtitle fixture HTTP runtime', () => {
   })
 
   it('serves positive counts plus ranked English and normalized Chinese searches', async () => {
-    const summary = await fetch(`${origin}/api/subtitles/summary`)
+    const summary = await fetch(`${origin}/api/subtitles/library`)
     const english = await post('/api/subtitles/search', { query: 'hope is a good thing', limit: 10 })
     const chinese = await post('/api/subtitles/search', { query: '\u5e0c\u671b\u4e0e\u81ea\u7531', limit: 10 })
 

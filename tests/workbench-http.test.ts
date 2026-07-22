@@ -426,9 +426,9 @@ describe('subtitle library workbench API', () => {
     const { subtitleLibrary, subtitleSync } = fakeSubtitleServices()
     const { origin } = await start({ subtitleLibrary, subtitleSync })
 
-    const summary = await fetch(`${origin}/api/subtitles/summary`)
+    const summary = await fetch(`${origin}/api/subtitles/library`)
     const snapshot = await fetch(`${origin}/api/subtitles/sync`)
-    const summaryMutation = await fetch(`${origin}/api/subtitles/summary`, { method: 'POST', headers: mutationHeaders(origin), body: '{}' })
+    const summaryMutation = await fetch(`${origin}/api/subtitles/library`, { method: 'POST', headers: mutationHeaders(origin), body: '{}' })
     const unauthorized = await fetch(`${origin}/api/subtitles/sync`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode: 'automatic' }) })
     const automatic = await fetch(`${origin}/api/subtitles/sync`, { method: 'POST', headers: mutationHeaders(origin), body: JSON.stringify({ mode: 'automatic' }) })
     const manualInvalid = await fetch(`${origin}/api/subtitles/sync`, { method: 'POST', headers: mutationHeaders(origin), body: JSON.stringify({ mode: 'manual', movie: { imdbId: 'not-imdb', title: '', releaseYear: 1700 } }) })

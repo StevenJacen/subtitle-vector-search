@@ -113,13 +113,22 @@ export function selectAnchoredPassage(input: {
   const midpointCueIndex = Math.floor(
     (input.sourceAnchor.firstCueIndex + input.sourceAnchor.lastCueIndex) / 2,
   )
-  const startCueIndex = Math.max(0, midpointCueIndex - Math.floor(input.sceneCount / 2))
-  const cues = continuousWindow(
-    indexCues(input.cues).get(input.sourceAnchor.trackId) ?? new Map(),
-    startCueIndex,
-    input.sceneCount,
+  const trackCues = indexCues(input.cues).get(input.sourceAnchor.trackId) ?? new Map()
+  const availableCueIndexes = [...trackCues.keys()]
+  if (availableCueIndexes.length === 0) throw new NoEligiblePassageError()
+  const firstAvailableCueIndex = Math.min(...availableCueIndexes)
+  const latestStartCueIndex = Math.max(
+    firstAvailableCueIndex,
+    Math.max(...availableCueIndexes) - input.sceneCount + 1,
   )
-  if (cues === undefined || !eligibleWindow(cues)) {
+  const startCueIndex = Math.max(
+    firstAvailableCueIndex,
+    Math.min(midpointCueIndex - Math.floor(input.sceneCount / 2), latestStartCueIndex),
+  )
+  const cues = continuousWindow(trackCues, startCueIndex, input.sceneCount)
+  if (cues === undefined
+    || !cues.some(cue => cue.cueIndex === midpointCueIndex)
+    || !eligibleWindow(cues)) {
     throw new NoEligiblePassageError()
   }
 
