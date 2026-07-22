@@ -81,6 +81,104 @@ test.describe('local video workbench', () => {
     await assertNoHorizontalOverflow(page)
   })
 
+  test('searches the subtitle library and creates from the exact ranked result', async ({ page }, testInfo) => {
+    const browserErrors = trackBrowserErrors(page)
+    await page.goto('/')
+    await page.getByRole('tab', { name: '字幕库' }).click()
+
+    await expect(page.getByLabel('字幕库统计')).toContainText('3 部电影')
+    await expect(page.getByLabel('字幕库统计')).toContainText('4 条轨道')
+    await page.getByRole('searchbox', { name: '搜索台词' }).fill('hope is a good thing')
+    await page.getByRole('button', { name: '搜索台词' }).click()
+
+    const result = page.getByTestId('subtitle-result-4101-27')
+    await expect(result).toBeVisible()
+    await expect(result).toContainText('The Shawshank Redemption')
+    await expect(result).toContainText('1994')
+    await expect(result).toContainText('00:06:12.000 --> 00:06:20.400')
+    await expect(result).toContainText('Hope is a good thing, maybe the best of things.')
+    await expect(result).toContainText('综合排名 1')
+    await expect(result).toContainText('语义排名 1')
+    await expect(result).toContainText('全文排名 2')
+    await assertNoHorizontalOverflow(page)
+
+    await result.getByRole('button', { name: '用此台词制作' }).click()
+    await expect(page.getByRole('tab', { name: '视频制作' })).toHaveAttribute('aria-selected', 'true')
+    await expect(page.locator('.movie-line')).toContainText('The Shawshank Redemption')
+    await expect(page.locator('.passage-stats')).toContainText('轨道 4101')
+    await expect(page.getByTestId('cue-index').filter({ hasText: '#813' })).toHaveCount(1)
+
+    await page.getByRole('tab', { name: '字幕库' }).click()
+    await page.getByRole('searchbox', { name: '搜索台词' }).fill('希望与自由')
+    const normalizedResponse = page.waitForResponse(response => (
+      response.url().endsWith('/api/subtitles/search') && response.request().method() === 'POST'
+    ))
+    await page.getByRole('button', { name: '搜索台词' }).click()
+    const normalized = await (await normalizedResponse).json() as {
+      originalQuery: string
+      normalizedQuery: string
+      warning: string | null
+    }
+    expect(normalized).toMatchObject({
+      originalQuery: '希望与自由',
+      normalizedQuery: 'hope and freedom',
+      warning: null,
+    })
+    await expect(page.getByTestId('subtitle-result-4101-27')).toBeVisible()
+    await assertNoHorizontalOverflow(page)
+    expect(await page.locator('vite-error-overlay').count()).toBe(0)
+    expect(browserErrors).toEqual([])
+    await page.screenshot({ path: testInfo.outputPath('subtitle-library.png'), fullPage: true })
+  })
+
+  test('runs automatic and manual subtitle sync and cooperatively stops an active job', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'desktop', 'Synchronization lifecycle coverage runs once on desktop')
+    const browserErrors = trackBrowserErrors(page)
+    await page.goto('/')
+    await page.getByRole('tab', { name: '字幕库' }).click()
+    await page.getByRole('button', { name: '同步新电影' }).click()
+    const dialog = page.getByRole('dialog', { name: '同步新电影' })
+
+    await dialog.getByRole('button', { name: '继续' }).click()
+    await expect(dialog.getByText('确认开始自动同步？')).toBeVisible()
+    await dialog.getByRole('button', { name: '开始自动同步' }).click()
+    await expect(dialog.getByText('The Matrix (1999)')).toBeVisible()
+    await expect(dialog.getByText('已尝试 1')).toBeVisible()
+    await expect(dialog.getByText('配额已用尽', { exact: true })).toBeVisible()
+    await expect(dialog.getByText('Provider quota reached; rerun later')).toBeVisible()
+
+    await dialog.getByRole('button', { name: '返回' }).click()
+    await dialog.locator('.sync-mode-control label').filter({ hasText: /^手动$/ }).click()
+    await expect(dialog.getByRole('radio', { name: '手动' })).toBeChecked()
+    await dialog.getByRole('button', { name: '导入电影' }).click()
+    await expect(dialog.getByRole('alert')).toContainText('请填写片名')
+    await dialog.getByLabel('片名').fill('The Matrix')
+    await dialog.getByLabel('上映年份').fill('1999')
+    await dialog.getByLabel('IMDb ID').fill('matrix')
+    await dialog.getByRole('button', { name: '导入电影' }).click()
+    await expect(dialog.getByRole('alert')).toContainText('IMDb ID 必须以 tt 开头并包含数字')
+    await dialog.getByLabel('IMDb ID').fill('tt0133093')
+    await dialog.getByRole('button', { name: '导入电影' }).click()
+    await expect(dialog.getByText('The Matrix (1999)')).toBeVisible()
+    await expect(dialog.getByText('已完成', { exact: true })).toBeVisible()
+    await expect(dialog.getByText('已完成 1')).toBeVisible()
+
+    const automaticMode = dialog.getByRole('radio', { name: '自动' })
+    await automaticMode.focus()
+    await automaticMode.press('Space')
+    await expect(automaticMode).toBeChecked()
+    await dialog.getByRole('button', { name: '继续' }).click()
+    await dialog.getByRole('button', { name: '开始自动同步' }).click()
+    await expect(dialog.getByText('已有同步任务正在运行')).toBeVisible()
+    await dialog.getByRole('button', { name: '停止同步' }).click()
+    await expect(dialog.getByText('已停止', { exact: true })).toBeVisible()
+    await expect(dialog.getByText('Stopped by operator')).toBeVisible()
+
+    await assertNoHorizontalOverflow(page)
+    expect(await page.locator('vite-error-overlay').count()).toBe(0)
+    expect(browserErrors).toEqual([])
+  })
+
   test('recovers a retryable production task', async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== 'desktop', 'Recovery coverage runs once on desktop')
     test.slow()
@@ -150,4 +248,13 @@ async function assertNoCardOverlap(page: Page) {
     )))
   })
   expect(overlapping).toBe(false)
+}
+
+function trackBrowserErrors(page: Page): string[] {
+  const errors: string[] = []
+  page.on('console', message => {
+    if (message.type() === 'error') errors.push(message.text())
+  })
+  page.on('pageerror', error => errors.push(error.message))
+  return errors
 }

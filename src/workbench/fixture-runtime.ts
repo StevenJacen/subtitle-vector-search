@@ -5,6 +5,18 @@ import { dirname, resolve } from 'node:path'
 import type { WorkbenchHealthReport } from './health.js'
 import { WorkbenchEventBus } from './events.js'
 import type { WorkbenchHttpTaskService } from './http-server.js'
+import type {
+  HybridSubtitleSearchResult,
+  SubtitleLibrarySummary,
+  SubtitleSearchRequest,
+  SubtitleSearchResponse,
+} from './subtitle-library.js'
+import {
+  SubtitleSyncEventBus,
+  type SubtitleSyncInput,
+  type SubtitleSyncSnapshot,
+  type SubtitleSyncStatus,
+} from './subtitle-sync.js'
 import { WorkbenchTaskError, type CandidateIdentity, type CreateTaskInput, type WorkbenchTaskView } from './task-service.js'
 
 interface FixtureTaskServiceOptions {
@@ -21,8 +33,15 @@ interface FixtureRuntime {
   previews: { resolve(previewId: string): string | undefined }
   health(): Promise<WorkbenchHealthReport>
   resolveFinalPath(taskId: string): Promise<string | null>
+  subtitleLibrary: FixtureSubtitleLibraryService
+  subtitleSync: FixtureSubtitleSyncController
   previewFetcher: typeof fetch
   lookupPreviewHost(hostname: string): Promise<string[]>
+}
+
+interface FixtureSubtitleLibraryService {
+  search(input: SubtitleSearchRequest): Promise<SubtitleSearchResponse>
+  summary(): Promise<SubtitleLibrarySummary>
 }
 
 const PRODUCTION_STAGES = [
@@ -33,6 +52,63 @@ const PRODUCTION_STAGES = [
   'validating',
   'completing',
 ] as const
+
+const FIXTURE_SUBTITLE_RESULTS: HybridSubtitleSearchResult[] = [
+  {
+    similarity: 0.94,
+    rrfScore: 0.061,
+    semanticRank: 1,
+    fullTextRank: 2,
+    movie: { id: 1, title: 'The Shawshank Redemption', releaseYear: 1994 },
+    trackId: 4_101,
+    chunkIndex: 27,
+    startMs: 372_000,
+    endMs: 380_400,
+    timestamp: '00:06:12.000 --> 00:06:20.400',
+    text: 'Hope is a good thing, maybe the best of things.',
+    cues: [
+      { index: 812, startMs: 372_000, endMs: 374_800, text: 'Hope is a good thing,' },
+      { index: 813, startMs: 374_800, endMs: 377_600, text: 'maybe the best of things,' },
+      { index: 814, startMs: 377_600, endMs: 380_400, text: 'and no good thing ever dies.' },
+    ],
+  },
+  {
+    similarity: 0.89,
+    rrfScore: 0.048,
+    semanticRank: 2,
+    fullTextRank: 1,
+    movie: { id: 2, title: 'Dead Poets Society', releaseYear: 1989 },
+    trackId: 4_201,
+    chunkIndex: 11,
+    startMs: 541_000,
+    endMs: 549_400,
+    timestamp: '00:09:01.000 --> 00:09:09.400',
+    text: 'Carpe diem. Seize the day, boys.',
+    cues: [
+      { index: 232, startMs: 541_000, endMs: 543_800, text: 'Carpe diem.' },
+      { index: 233, startMs: 543_800, endMs: 546_600, text: 'Seize the day, boys.' },
+      { index: 234, startMs: 546_600, endMs: 549_400, text: 'Make your lives extraordinary.' },
+    ],
+  },
+  {
+    similarity: 0.83,
+    rrfScore: 0.037,
+    semanticRank: 3,
+    fullTextRank: null,
+    movie: { id: 3, title: 'Casablanca', releaseYear: 1942 },
+    trackId: 4_301,
+    chunkIndex: 8,
+    startMs: 684_000,
+    endMs: 692_400,
+    timestamp: '00:11:24.000 --> 00:11:32.400',
+    text: 'We will always have Paris.',
+    cues: [
+      { index: 301, startMs: 684_000, endMs: 686_800, text: 'We will always have Paris.' },
+      { index: 302, startMs: 686_800, endMs: 689_600, text: 'This is the beginning' },
+      { index: 303, startMs: 689_600, endMs: 692_400, text: 'of a beautiful friendship.' },
+    ],
+  },
+]
 
 export function assertWorkbenchFixtureMode(
   environment: Record<string, string | undefined>,
@@ -127,7 +203,8 @@ export function createWorkbenchFixtureTaskService(
       validateCreateInput(input)
       const taskId = randomUUID()
       const createdAt = timestamp()
-      const cues = Array.from({ length: input.sceneCount }, (_, index) => fixtureCue(index))
+      const passage = fixturePassage(input)
+      const cues = passage.cues
       const task: WorkbenchTaskView = {
         taskId,
         theme: input.theme.trim(),
@@ -137,14 +214,7 @@ export function createWorkbenchFixtureTaskService(
           : { width: 1080, height: 1920 }),
         sceneCount: input.sceneCount,
         stage: 'review',
-        passage: {
-          movie: { id: 1, title: 'The Shawshank Redemption', releaseYear: 1994 },
-          trackId: 101,
-          startCueIndex: 400,
-          endCueIndex: 399 + input.sceneCount,
-          totalDurationMs: cues.reduce((sum, cue) => sum + cue.endMs - cue.startMs, 0),
-          cues,
-        },
+        passage,
         scenes: cues.map((cue, index) => ({
           index,
           cueIndex: cue.cueIndex,
@@ -260,9 +330,13 @@ export async function createWorkbenchFixtureRuntime(artifactRoot: string): Promi
     }
     return task
   }
+  const subtitleLibrary = createFixtureSubtitleLibraryService()
+  const subtitleSync = new FixtureSubtitleSyncController()
 
   return {
     taskService,
+    subtitleLibrary,
+    subtitleSync,
     previews: {
       resolve(previewId) {
         return previewIds.has(previewId) ? 'https://media.vecteezy.com/fixture-preview.mp4' : undefined
@@ -309,10 +383,226 @@ export async function createWorkbenchFixtureRuntime(artifactRoot: string): Promi
   }
 }
 
+function createFixtureSubtitleLibraryService(): FixtureSubtitleLibraryService {
+  return {
+    async summary() {
+      return { readyTracks: 4, readyMovies: 3 }
+    },
+    async search(input) {
+      const query = typeof input.query === 'string' ? input.query.trim() : ''
+      if (query.length === 0 || query.length > 500
+        || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 50) {
+        throw new Error('invalid subtitle library fixture search')
+      }
+      return structuredClone({
+        originalQuery: query,
+        normalizedQuery: /\p{Script=Han}/u.test(query) ? 'hope and freedom' : query,
+        warning: null,
+        results: FIXTURE_SUBTITLE_RESULTS.slice(0, input.limit),
+      })
+    },
+  }
+}
+
+class FixtureSubtitleSyncController {
+  readonly events = new SubtitleSyncEventBus()
+
+  private current = fixtureIdleSyncSnapshot('2026-07-22T00:00:00.000Z')
+  private running: Promise<void> | null = null
+  private stopRequested = false
+  private jobNumber = 0
+  private clock = Date.parse('2026-07-22T00:00:00.000Z')
+
+  start(input: SubtitleSyncInput): Promise<SubtitleSyncSnapshot> {
+    if (this.running !== null) throw new Error('subtitle_sync_already_running')
+    assertFixtureSyncInput(input)
+    this.stopRequested = false
+    const startedAt = this.timestamp()
+    this.current = {
+      jobId: `fixture-sync-${++this.jobNumber}`,
+      mode: input.mode,
+      status: 'running',
+      currentMovie: null,
+      attempted: 0,
+      succeeded: 0,
+      failed: 0,
+      message: 'Synchronizing subtitles',
+      startedAt,
+      updatedAt: startedAt,
+    }
+    this.events.publish(this.current)
+    this.running = this.run(input).finally(() => { this.running = null })
+    return Promise.resolve(this.snapshot())
+  }
+
+  stop(): SubtitleSyncSnapshot {
+    if (this.running !== null) this.stopRequested = true
+    return this.snapshot()
+  }
+
+  snapshot(): SubtitleSyncSnapshot {
+    return copySyncSnapshot(this.current)
+  }
+
+  private async run(input: SubtitleSyncInput): Promise<void> {
+    if (input.mode === 'manual') {
+      await this.runManual(input.movie)
+      return
+    }
+    await this.runAutomatic()
+  }
+
+  private async runAutomatic(): Promise<void> {
+    await delay(240)
+    if (this.stopRequested) return this.finish('stopped')
+    this.transition({
+      attempted: 1,
+      currentMovie: { imdbId: 'tt0133093', title: 'The Matrix', releaseYear: 1999 },
+      message: 'Importing subtitle',
+    })
+
+    await delay(240)
+    this.transition({ succeeded: 1, message: 'Movie imported' })
+    if (this.stopRequested) return this.finish('stopped')
+
+    await delay(240)
+    if (this.stopRequested) return this.finish('stopped')
+    this.transition({
+      attempted: 2,
+      currentMovie: { imdbId: 'tt0034583', title: 'Casablanca', releaseYear: 1942 },
+      message: 'Importing subtitle',
+    })
+
+    await delay(240)
+    if (this.stopRequested) return this.finish('stopped')
+    this.finish('quota_reached')
+  }
+
+  private async runManual(movie: Extract<SubtitleSyncInput, { mode: 'manual' }>['movie']): Promise<void> {
+    await delay(240)
+    if (this.stopRequested) return this.finish('stopped')
+    this.transition({
+      attempted: 1,
+      currentMovie: { ...movie },
+      message: 'Importing subtitle',
+    })
+
+    await delay(240)
+    this.transition({ succeeded: 1, message: 'Movie imported' })
+    this.finish(this.stopRequested ? 'stopped' : 'completed')
+  }
+
+  private finish(status: Extract<SubtitleSyncStatus, 'completed' | 'quota_reached' | 'stopped'>): void {
+    this.transition({
+      status,
+      currentMovie: null,
+      message: status === 'completed' ? 'Synchronization completed'
+        : status === 'quota_reached' ? 'Provider quota reached; rerun later'
+          : 'Stopped by operator',
+    })
+  }
+
+  private transition(change: Partial<SubtitleSyncSnapshot>): void {
+    this.current = { ...this.current, ...change, updatedAt: this.timestamp() }
+    this.events.publish(this.current)
+  }
+
+  private timestamp(): string {
+    this.clock += 1
+    return new Date(this.clock).toISOString()
+  }
+}
+
+function fixturePassage(input: CreateTaskInput): WorkbenchTaskView['passage'] {
+  if (input.sourceAnchor === undefined) {
+    const cues = Array.from({ length: input.sceneCount }, (_, index) => fixtureCue(index))
+    return {
+      movie: { id: 1, title: 'The Shawshank Redemption', releaseYear: 1994 },
+      trackId: 101,
+      startCueIndex: 400,
+      endCueIndex: 399 + input.sceneCount,
+      totalDurationMs: cues.reduce((sum, cue) => sum + cue.endMs - cue.startMs, 0),
+      cues,
+    }
+  }
+
+  const source = FIXTURE_SUBTITLE_RESULTS.find(result => result.trackId === input.sourceAnchor?.trackId)
+  if (source === undefined) {
+    throw new WorkbenchTaskError('source_anchor_not_found', 'Fixture source anchor not found', false)
+  }
+  const midpoint = Math.floor((input.sourceAnchor.firstCueIndex + input.sourceAnchor.lastCueIndex) / 2)
+  const startCueIndex = midpoint - Math.floor(input.sceneCount / 2)
+  const cues = Array.from({ length: input.sceneCount }, (_, index) => (
+    fixtureAnchoredCue(source, startCueIndex + index)
+  ))
+  return {
+    movie: structuredClone(source.movie),
+    trackId: source.trackId,
+    startCueIndex,
+    endCueIndex: startCueIndex + input.sceneCount - 1,
+    totalDurationMs: cues.reduce((sum, cue) => sum + cue.endMs - cue.startMs, 0),
+    cues,
+  }
+}
+
+function fixtureAnchoredCue(source: HybridSubtitleSearchResult, cueIndex: number) {
+  const reference = source.cues[0]
+  const durationMs = reference.endMs - reference.startMs
+  const startMs = reference.startMs + (cueIndex - reference.index) * durationMs
+  const endMs = startMs + durationMs
+  const exact = source.cues.find(cue => cue.index === cueIndex)
+  return {
+    trackId: source.trackId,
+    cueIndex,
+    startMs,
+    endMs,
+    timestamp: `${formatTime(startMs)} --> ${formatTime(endMs)}`,
+    text: exact?.text ?? fixtureDialogue(((cueIndex % 10) + 10) % 10),
+  }
+}
+
+function fixtureIdleSyncSnapshot(updatedAt: string): SubtitleSyncSnapshot {
+  return {
+    jobId: null,
+    mode: null,
+    status: 'idle',
+    currentMovie: null,
+    attempted: 0,
+    succeeded: 0,
+    failed: 0,
+    message: 'Idle',
+    startedAt: null,
+    updatedAt,
+  }
+}
+
+function copySyncSnapshot(snapshot: SubtitleSyncSnapshot): SubtitleSyncSnapshot {
+  return {
+    ...snapshot,
+    currentMovie: snapshot.currentMovie === null ? null : { ...snapshot.currentMovie },
+  }
+}
+
+function assertFixtureSyncInput(input: SubtitleSyncInput): void {
+  if (typeof input !== 'object' || input === null || (input.mode !== 'automatic' && input.mode !== 'manual')) {
+    throw new Error('invalid_subtitle_sync_input')
+  }
+  if (input.mode === 'manual' && (!/^tt\d+$/.test(input.movie.imdbId)
+    || input.movie.title.trim().length === 0
+    || !Number.isSafeInteger(input.movie.releaseYear)
+    || input.movie.releaseYear < 1888 || input.movie.releaseYear > 3000)) {
+    throw new Error('invalid_subtitle_sync_input')
+  }
+}
+
 function validateCreateInput(input: CreateTaskInput): void {
   if (input.theme.trim() === '' || input.theme.trim().length > 300
     || (input.aspectRatio !== '9:16' && input.aspectRatio !== '16:9')
-    || !Number.isSafeInteger(input.sceneCount) || input.sceneCount < 5 || input.sceneCount > 10) {
+    || !Number.isSafeInteger(input.sceneCount) || input.sceneCount < 5 || input.sceneCount > 10
+    || (input.sourceAnchor !== undefined && (!Number.isSafeInteger(input.sourceAnchor.trackId)
+      || input.sourceAnchor.trackId < 1 || !Number.isSafeInteger(input.sourceAnchor.firstCueIndex)
+      || input.sourceAnchor.firstCueIndex < 0 || !Number.isSafeInteger(input.sourceAnchor.lastCueIndex)
+      || input.sourceAnchor.lastCueIndex < input.sourceAnchor.firstCueIndex))) {
     throw new WorkbenchTaskError('invalid_task', 'Invalid task', false)
   }
 }

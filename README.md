@@ -256,6 +256,30 @@ Workbench generation requests disable Qwen thinking to reduce latency. If task
 creation times out while health remains available, use a faster model or host
 and update `OLLAMA_MODEL` before retrying.
 
+Use the `Subtitle library` tab to search ready English tracks. English queries
+go directly to hybrid search; Chinese queries are normalized to a concise
+English query through the configured Ollama model before search. Choose the
+result count in the toolbar, then select `Create from this quote` to return to
+video production with the clicked movie, subtitle track, and cue midpoint held
+as the source anchor. The current aspect ratio and 5-10 scene count are reused.
+
+`Sync new movies` supports two operator-controlled modes. Automatic mode needs
+an explicit confirmation and continues through the classic candidate list
+until it reaches the OpenSubtitles quota, exhausts the candidates, or is
+stopped. Manual mode imports exactly one title after validating a release year
+and an IMDb ID in `tt` plus digits format. `Stop` is cooperative: the current
+provider or database operation finishes before the job enters `stopped`.
+Subtitle synchronization performs real OpenSubtitles downloads and consumes
+the account's download quota; it does not make a formal Vecteezy download call.
+
+Synchronization state remains local and resumable under:
+
+```text
+.batch-state/classic-import-state.json
+.batch-state/subtitle-sync-snapshot.json
+downloads/classics/
+```
+
 Creating a task selects 5-10 consecutive cues from one ready subtitle track and
 loads exactly eight review candidates per scene. `Load more` appends up to eight
 deduplicated candidates and preserves prior pages and selections. Candidate
@@ -308,7 +332,8 @@ npm run test:e2e
 
 `WORKBENCH_FIXTURE_MODE=1` is accepted only with `NODE_ENV=test`; production
 startup rejects that combination before reading credentials. The fixture makes
-no Supabase, Ollama, or Vecteezy request.
+no Supabase, Ollama, OpenSubtitles, or Vecteezy request and therefore consumes
+neither OpenSubtitles quota nor formal Vecteezy downloads.
 
 ## Local Video Production
 

@@ -32,7 +32,7 @@ import {
 import { assertWorkbenchFixtureMode, createWorkbenchFixtureRuntime } from './fixture-runtime.js'
 import { planPassageWithOllama } from './ollama.js'
 import { SubtitleLibraryClient } from './subtitle-library.js'
-import { SubtitleSyncController } from './subtitle-sync.js'
+import { SubtitleSyncController, type SubtitleSyncEventBus } from './subtitle-sync.js'
 import type { PassageSourceAnchor, SelectedPassage, SelectedPassageCue } from './passage-selection.js'
 import {
   WorkbenchTaskService,
@@ -60,8 +60,10 @@ export interface WorkbenchRuntime {
   previews: { resolve(previewId: string): Promise<string | undefined> | string | undefined }
   health(): ReturnType<typeof runWorkbenchHealthChecks>
   resolveFinalPath(taskId: string): Promise<string | null>
-  subtitleLibrary?: SubtitleLibraryClient
-  subtitleSync?: SubtitleSyncController
+  subtitleLibrary?: Pick<SubtitleLibraryClient, 'search' | 'summary'>
+  subtitleSync?: Pick<SubtitleSyncController, 'start' | 'stop' | 'snapshot'> & {
+    events: Pick<SubtitleSyncEventBus, 'subscribe'>
+  }
 }
 
 export function parseWorkbenchServerConfiguration(
