@@ -147,4 +147,39 @@ describe('SubtitleLibrary', () => {
     expect(screen.queryByRole('dialog', { name: '同步新电影' })).not.toBeInTheDocument()
     expect(trigger).toHaveFocus()
   })
+
+  it('recovers modal focus when starting sync replaces the active command', async () => {
+    const user = userEvent.setup()
+    const api = apiFixture()
+    api.startSubtitleSync.mockResolvedValue({
+      jobId: 'sync-1',
+      mode: 'automatic',
+      status: 'running',
+      currentMovie: null,
+      attempted: 0,
+      succeeded: 0,
+      failed: 0,
+      message: 'Starting',
+      startedAt: '2026-07-21T00:01:00.000Z',
+      updatedAt: '2026-07-21T00:01:00.000Z',
+    })
+    render(<SubtitleLibrary api={api} onCreate={vi.fn(async () => undefined)} />)
+
+    const trigger = screen.getByRole('button', { name: '同步新电影' })
+    await user.click(trigger)
+    await user.click(await screen.findByRole('button', { name: '继续' }))
+    await user.click(screen.getByRole('button', { name: '开始自动同步' }))
+
+    const stop = await screen.findByRole('button', { name: '停止同步' })
+    const close = screen.getByRole('button', { name: '关闭同步面板' })
+    expect(close).toHaveFocus()
+    await user.keyboard('{Shift>}{Tab}{/Shift}')
+    expect(stop).toHaveFocus()
+    await user.tab()
+    expect(close).toHaveFocus()
+
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog', { name: '同步新电影' })).not.toBeInTheDocument()
+    expect(trigger).toHaveFocus()
+  })
 })

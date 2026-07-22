@@ -1,5 +1,5 @@
 import { RefreshCw, Square, X } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 import type { SubtitleSyncSnapshot, WorkbenchApi } from '../types.js'
 
 type SubtitleSyncApi = Pick<WorkbenchApi, 'subtitleSync' | 'startSubtitleSync' | 'stopSubtitleSync' | 'subscribeSubtitleSync'>
@@ -27,11 +27,17 @@ export function SubtitleSyncPanel({ api, open, onClose }: SubtitleSyncPanelProps
     setSnapshot(value)
   }, [])
 
+  useLayoutEffect(() => {
+    if (!open) return undefined
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    closeButtonRef.current?.focus()
+    return () => { previousFocus?.focus() }
+  }, [open])
+
   useEffect(() => {
     if (!open) return undefined
     let active = true
     const initialVersion = snapshotVersion.current
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
     setConfirmAutomatic(false)
     setError(null)
     void api.subtitleSync().then(value => {
@@ -42,13 +48,16 @@ export function SubtitleSyncPanel({ api, open, onClose }: SubtitleSyncPanelProps
     const unsubscribe = api.subscribeSubtitleSync(value => {
       if (active) applySnapshot(value)
     })
-    closeButtonRef.current?.focus()
     return () => {
       active = false
       unsubscribe()
-      previousFocus?.focus()
     }
   }, [api, applySnapshot, open])
+
+  useLayoutEffect(() => {
+    if (!open || panelRef.current === null) return
+    if (!panelRef.current.contains(document.activeElement)) closeButtonRef.current?.focus()
+  }, [confirmAutomatic, mode, open, snapshot?.status])
 
   if (!open) return null
 

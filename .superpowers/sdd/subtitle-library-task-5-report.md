@@ -44,12 +44,13 @@ The two HTTP 500 responses observed during real-browser verification originate f
 ## Review Hardening
 
 - The synchronization dialog now moves focus inside on open, traps forward and reverse Tab navigation, handles Escape from normal trigger-driven use, and restores focus to the trigger on close.
+- Snapshot-driven control replacements also recover focus to a stable in-dialog command before paint, so starting or stopping synchronization cannot drop keyboard users onto the page background.
 - Initial synchronization GET responses are discarded after any newer SSE or start/stop command update, preventing stale idle state from hiding a running job.
 - Shared workbench operations now report whether they actually ran. Exact-result creation stays in the subtitle library when another command is pending or creation fails, and the result action exposes the busy state.
 - Added four regression scenarios covering real-trigger focus restoration, both initial-snapshot races, and pending production work during exact-result creation.
 
 Verification after hardening:
 
-- Focused React suite: 4 files, 29 tests passed.
+- Focused React suite: 4 files, 30 tests passed.
 - `npm run typecheck`: passed.
 - `npm run workbench:build`: passed.
