@@ -109,7 +109,6 @@ export async function runBatchImport(
   const candidates = parseCandidates(await deps.readText(resolved.candidatesPath))
   const state = await readState(resolved.statePath, deps)
   const alreadySucceeded = new Set(state.successes.map(success => success.imdbId))
-  const alreadyFailed = new Set(state.failures.map(failure => failure.imdbId))
   const attemptedCandidates = new Set<string>()
   let attempts = 0
 
@@ -122,7 +121,7 @@ export async function runBatchImport(
       return state
     }
     if (state.successes.length >= resolved.targetSuccessCount || attempts >= resolved.maxAttempts) break
-    if (alreadySucceeded.has(candidate.imdbId) || alreadyFailed.has(candidate.imdbId)) continue
+    if (alreadySucceeded.has(candidate.imdbId) || attemptedCandidates.has(candidate.imdbId)) continue
     attempts += 1
     attemptedCandidates.add(candidate.imdbId)
 
@@ -140,7 +139,6 @@ export async function runBatchImport(
     }
     if (result.status === 'failed') {
       recordFailure(state, candidate, result.stage, result.message, deps.now())
-      alreadyFailed.add(candidate.imdbId)
       await writeState(resolved.statePath, state, deps)
       await reportProgress(hooks, { type: 'movie_failed', movie: subtitleMovie(candidate) })
       deps.output(`Skipped after ${result.stage} failure: ${candidate.title}\n`)
@@ -155,6 +153,7 @@ export async function runBatchImport(
       importedAt: deps.now(),
     })
     alreadySucceeded.add(candidate.imdbId)
+    clearFailure(state, candidate.imdbId)
     await writeState(resolved.statePath, state, deps)
     await reportProgress(hooks, { type: 'movie_succeeded', movie: subtitleMovie(candidate) })
     if (hooks.shouldStop?.()) {
@@ -164,7 +163,7 @@ export async function runBatchImport(
   }
 
   const eligibleCandidatesRemain = candidates.some(candidate => !alreadySucceeded.has(candidate.imdbId)
-    && !alreadyFailed.has(candidate.imdbId) && !attemptedCandidates.has(candidate.imdbId))
+    && !attemptedCandidates.has(candidate.imdbId))
   await reportProgress(hooks, state.successes.length >= resolved.targetSuccessCount ? { type: 'completed' }
     : attempts >= resolved.maxAttempts && eligibleCandidatesRemain ? { type: 'attempt_limit_reached' }
       : { type: 'candidate_exhausted' })
@@ -260,6 +259,7 @@ function recordFailure(
   message: string,
   failedAt: string,
 ): void {
+  clearFailure(state, candidate.imdbId)
   state.failures.push({
     imdbId: candidate.imdbId,
     title: candidate.title,
@@ -268,6 +268,10 @@ function recordFailure(
     message,
     failedAt,
   })
+}
+
+function clearFailure(state: BatchImportState, imdbId: string): void {
+  state.failures = state.failures.filter(failure => failure.imdbId !== imdbId)
 }
 
 async function reportProgress(hooks: BatchImportHooks, event: BatchImportProgress): Promise<void> {

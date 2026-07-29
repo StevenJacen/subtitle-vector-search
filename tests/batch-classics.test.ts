@@ -75,6 +75,37 @@ describe('batch classics importer', () => {
     expect(context.dependencies.importMovie).toHaveBeenCalledTimes(1)
   })
 
+  it('retries a previously failed movie in a new run and clears its old failure after success', async () => {
+    const context = deps({
+      state: {
+        successes: [],
+        failures: [{
+          imdbId: 'tt0468569',
+          title: 'The Dark Knight',
+          year: 2008,
+          stage: 'download',
+          message: 'Subtitle download failed',
+          failedAt: '2026-07-17T00:00:00.000Z',
+        }],
+      },
+      exists: vi.fn((path: string) => path.includes('state')),
+    })
+
+    const state = await runBatchImport({
+      candidatesPath: 'candidates.json',
+      statePath: '.batch-state/state.json',
+      downloadsDir: 'downloads/classics',
+      targetSuccessCount: 1,
+      maxAttempts: 1,
+      dryRun: false,
+    }, context.dependencies)
+
+    expect(state.successes.map(success => success.imdbId)).toEqual(['tt0468569'])
+    expect(state.failures).toEqual([])
+    expect(context.dependencies.downloadMovie).toHaveBeenCalledTimes(1)
+    expect(context.dependencies.importMovie).toHaveBeenCalledTimes(1)
+  })
+
   it('stops cleanly when the provider quota is reached', async () => {
     const context = deps({
       downloadMovie: vi.fn(async () => {
