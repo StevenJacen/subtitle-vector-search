@@ -1027,6 +1027,28 @@ describe('workbench production and recovery', () => {
     expect(JSON.stringify(view)).not.toContain('private.invalid')
   })
 
+  it('returns an unavailable Vecteezy resource to replaceable review state', async () => {
+    const fake = fakeDependencies()
+    vi.mocked(fake.dependencies.preflightSelections).mockRejectedValue(
+      Object.assign(new Error('Vecteezy provider request failed: 422'), { code: 'provider_422' }),
+    )
+    const service = new WorkbenchTaskService(fake.dependencies)
+    await createConfirmedTask(service)
+
+    await expect(service.produce(TASK_ID)).rejects.toMatchObject({
+      code: 'selection_required',
+      retryable: true,
+    })
+    expect(fake.manifest()).toEqual(expect.objectContaining({
+      stage: 'failed',
+      failure: {
+        code: 'selection_required',
+        message: 'Selected source must be replaced',
+        retryable: true,
+      },
+    }))
+  })
+
   it('retries an existing failed remote job after replacing a preflight-rejected candidate', async () => {
     const fake = fakeDependencies()
     let remoteStatus: 'planned' | 'failed' = 'planned'

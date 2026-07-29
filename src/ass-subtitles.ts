@@ -111,11 +111,21 @@ export function buildDynamicAssSubtitles(
   const portrait = config.width < config.height
   const styleName = portrait ? 'Portrait' : 'Landscape'
   const fontSize = portrait ? 52 : 60
+  const sourceFontSize = portrait ? 28 : 32
+  const sourceLineLength = portrait ? 42 : 80
   const marginL = Math.ceil(config.width * 0.10)
   const marginV = Math.ceil(config.height * 0.10)
   const events = timeline.map((scene, index) => {
-    const sourceLine = `${source.movieTitle} (${source.releaseYear}) · ${cueSourceStarts[index]}`
-    const text = [scene.captionEn, scene.captionZh, sourceLine].map(escapeAssText).join('\\N')
+    const sourceLines = wrapSourceLabel(
+      `${source.movieTitle} (${source.releaseYear})`,
+      sourceLineLength,
+    ).map(escapeAssText)
+    const text = [
+      escapeAssText(scene.captionEn),
+      escapeAssText(scene.captionZh),
+      `{\\fs${sourceFontSize}}${sourceLines.join('\\N')}`,
+      escapeAssText(cueSourceStarts[index]),
+    ].join('\\N')
     return `Dialogue: 0,${assTimeMs(scene.startMs)},${assTimeMs(scene.endMs)},${styleName},,0,0,0,,${text}`
   })
 
@@ -136,6 +146,32 @@ export function buildDynamicAssSubtitles(
     ...events,
     '',
   ].join('\n')
+}
+
+function wrapSourceLabel(value: string, maximumLength: number): string[] {
+  const words = value.trim().split(/\s+/)
+  const lines: string[] = []
+  let current = ''
+  for (const word of words) {
+    const chunks = Array.from(word).reduce<string[]>((result, character) => {
+      const last = result.at(-1) ?? ''
+      if (Array.from(last).length >= maximumLength) result.push(character)
+      else if (result.length === 0) result.push(character)
+      else result[result.length - 1] = `${last}${character}`
+      return result
+    }, [])
+    for (const chunk of chunks) {
+      const next = current === '' ? chunk : `${current} ${chunk}`
+      if (Array.from(next).length <= maximumLength) {
+        current = next
+      } else {
+        if (current !== '') lines.push(current)
+        current = chunk
+      }
+    }
+  }
+  if (current !== '') lines.push(current)
+  return lines
 }
 
 function parseCueSourceStarts(source: DynamicAssSource, scenes: readonly DynamicScene[]): string[] {

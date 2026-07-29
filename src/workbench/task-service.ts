@@ -1022,6 +1022,7 @@ const SELECTION_REQUIRED_CODES = new Set([
   'file_size_limit_exceeded',
   'aggregate_size_limit_exceeded',
   'resource_changed',
+  'provider_422',
 ])
 
 const DETERMINISTIC_SOURCE_ERRORS = new Set([

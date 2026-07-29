@@ -93,9 +93,16 @@ describe('buildDynamicAssSubtitles', () => {
   ]
 
   it.each([
-    { width: 1920 as const, height: 1080 as const, expectedStyle: 'Landscape', marginL: 192, marginV: 108 },
-    { width: 1080 as const, height: 1920 as const, expectedStyle: 'Portrait', marginL: 108, marginV: 192 },
-  ])('creates one exact bilingual event per cue with safe $expectedStyle margins', ({ width, height, expectedStyle, marginL, marginV }) => {
+    { width: 1920 as const, height: 1080 as const, expectedStyle: 'Landscape', sourceFontSize: 32, marginL: 192, marginV: 108 },
+    { width: 1080 as const, height: 1920 as const, expectedStyle: 'Portrait', sourceFontSize: 28, marginL: 108, marginV: 192 },
+  ])('creates one exact bilingual event per cue with safe $expectedStyle margins', ({
+    width,
+    height,
+    expectedStyle,
+    sourceFontSize,
+    marginL,
+    marginV,
+  }) => {
     const config = { width, height, frameRate: 30 as const, transitionMs: 400 }
     const timeline = buildDynamicTimeline(dynamicScenes, config)
     const ass = buildDynamicAssSubtitles(dynamicScenes, timeline, config, {
@@ -110,7 +117,9 @@ describe('buildDynamicAssSubtitles', () => {
     expect(events[0]).toContain('0:00:00.00,0:00:01.20')
     expect(events.at(-1)).toContain('0:00:11.00,0:00:16.00')
     for (const [index, event] of events.entries()) {
-      expect(event).toContain(`${escapeAssText(dynamicScenes[index].captionZh)}\\NMovie Title (1994) · ${cueTimestamps[index].slice(0, 12)}`)
+      expect(event).toContain(
+        `${escapeAssText(dynamicScenes[index].captionZh)}\\N{\\fs${sourceFontSize}}Movie Title (1994)\\N${cueTimestamps[index].slice(0, 12)}`,
+      )
     }
     expect(events[1]).not.toContain('00:02:02.000')
     expect(events.every(event => event.includes(`,${expectedStyle},`))).toBe(true)
@@ -118,6 +127,21 @@ describe('buildDynamicAssSubtitles', () => {
     expect(Number(style?.[20])).toBeGreaterThanOrEqual(marginL)
     expect(Number(style?.[21])).toBeGreaterThanOrEqual(marginV)
     expect(ass).not.toContain('Style: Default,Microsoft YaHei')
+  })
+
+  it('uses smaller explicitly wrapped source lines for a long portrait movie title', () => {
+    const config = { width: 1080 as const, height: 1920 as const, frameRate: 30 as const, transitionMs: 400 }
+    const timeline = buildDynamicTimeline(dynamicScenes, config)
+    const ass = buildDynamicAssSubtitles(dynamicScenes, timeline, config, {
+      movieTitle: 'The Lord of the Rings: The Fellowship of the Ring',
+      releaseYear: 2001,
+      cueTimestamps,
+    })
+    const firstEvent = ass.split('\n').find(line => line.startsWith('Dialogue:'))
+
+    expect(firstEvent).toContain(
+      String.raw`\N{\fs28}The Lord of the Rings: The Fellowship of\Nthe Ring (2001)\N00:02:00.000`,
+    )
   })
 
   it.each([
